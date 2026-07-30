@@ -4,6 +4,7 @@ import time
 
 import keyboard
 import pyautogui
+from PIL import Image
 
 from poe2bot import templates
 from poe2bot.focus import is_game_focused
@@ -16,6 +17,20 @@ STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
 STATUS_WAITING_FOCUS = "waiting_focus"
 
+_template_image_cache = {}   # filename -> PIL.Image.Image, decoded once and reused
+
+
+def _load_template_image(filename: str) -> Image.Image:
+    """Load and cache a calibration template so repeated ready-checks never
+    re-read/re-decode the PNG from disk -- pyautogui/pyscreeze does no caching
+    of its own and will do exactly that on every single call if handed a path."""
+    image = _template_image_cache.get(filename)
+    if image is None:
+        image = Image.open(templates.template_path(filename))
+        image.load()  # force-read pixel data now, so later use never touches the file again
+        _template_image_cache[filename] = image
+    return image
+
 
 def _check_ready(step: Step) -> bool:
     """True if step's calibrated 'ready' template currently matches on screen.
@@ -25,10 +40,10 @@ def _check_ready(step: Step) -> bool:
     read/match the template (missing file, corrupt PNG, malformed region, etc.) is
     logged and treated as not-ready rather than propagating out of the thread.
     """
-    path = templates.template_path(step.ready_template)
     try:
+        image = _load_template_image(step.ready_template)
         pyautogui.locateOnScreen(
-            path, region=step.ready_region, confidence=step.ready_confidence, grayscale=True)
+            image, region=step.ready_region, confidence=step.ready_confidence, grayscale=True)
         return True
     except pyautogui.ImageNotFoundException:
         return False
@@ -92,11 +107,15 @@ class RotationRunner:
                 return False
             if self._wait_until_ready(step):
                 self._fire_step(step)
+                # Only pay the post-cast delay/jitter after an actual fire -- there's no
+                # cast animation to wait out for a step that was skipped, so a skipped
+                # cast falls straight through to the next step instead of also eating
+                # this step's full delay on top of the ready-check time.
+                if not self._sleep_delay(step):
+                    return False
             elif not self._stop_event.is_set():
                 log.warning(f"[{self.rotation.name}] '{step.key}' not ready after "
                             f"{step.ready_timeout_ms}ms; skipping this cast")
-            if not self._sleep_delay(step):
-                return False
         return True
 
     def _wait_for_focus_or_stop(self) -> bool:

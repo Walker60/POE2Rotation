@@ -53,8 +53,12 @@ the full timeout before giving up and moving on. The default is now 300ms, which
 is enough time to absorb normal check jitter without noticeably delaying the rest
 of the rotation; only raise it for a specific step if you'd genuinely rather wait
 a bit than skip that particular cast. Keep the calibrated region small and tight
-around just the icon, too — a large region makes each individual check slower,
-which eats into whatever Timeout you set.
+around just the icon, too — matching (`confidence`-based, via OpenCV) gets more
+expensive the larger the region is, and if a *single* check takes longer than
+your configured Timeout, the timeout can't actually be honored no matter how low
+you set it — you'll see it stall well past 50ms even with Timeout set to 50.
+If a step still feels slow after lowering Timeout, recalibrate it with a
+noticeably smaller box before assuming something else is wrong.
 
 Calibration screenshots are stored as individual PNGs under `templates/`, named
 by a random ID rather than the skill name, so rotations stay portable if you
