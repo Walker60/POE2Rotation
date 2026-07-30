@@ -4,7 +4,7 @@ import time
 
 import keyboard
 import pyautogui
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 from poe2bot import templates
 from poe2bot.focus import is_game_focused
@@ -17,16 +17,15 @@ STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
 STATUS_WAITING_FOCUS = "waiting_focus"
 
-_template_image_cache = {}   # filename -> PIL.Image.Image, decoded once and reused
+_template_image_cache = {}   # filename -> grayscale PIL.Image.Image, decoded once and reused
 
 
 def _load_template_image(filename: str) -> Image.Image:
-    """Load and cache a calibration template so repeated ready-checks never
-    re-read/re-decode the PNG from disk -- pyautogui/pyscreeze does no caching
-    of its own and will do exactly that on every single call if handed a path."""
+    """Load and cache a calibration template as grayscale, so repeated ready-checks
+    never re-read/re-decode the PNG from disk or re-convert it to grayscale."""
     image = _template_image_cache.get(filename)
     if image is None:
-        image = Image.open(templates.template_path(filename))
+        image = Image.open(templates.template_path(filename)).convert("L")
         image.load()  # force-read pixel data now, so later use never touches the file again
         _template_image_cache[filename] = image
     return image
@@ -35,18 +34,40 @@ def _load_template_image(filename: str) -> Image.Image:
 def _check_ready(step: Step) -> bool:
     """True if step's calibrated 'ready' template currently matches on screen.
 
-    Broadly defensive: a rotation loaded from a hand-edited or stale JSON file can
-    reach here without ever passing through validate_rotation, so any failure to
-    read/match the template (missing file, corrupt PNG, malformed region, etc.) is
-    logged and treated as not-ready rather than propagating out of the thread.
+    Compares a screenshot of exactly the calibrated region directly against the
+    cached template (mean pixel difference) instead of searching for the
+    template's position with OpenCV. Calibration already tells us precisely
+    where the icon is, so there's nothing to search for -- skipping the
+    sliding-window correlation search entirely is what actually makes this
+    fast, not just a lower confidence threshold. Trade-off: this assumes the
+    icon hasn't moved since calibration (e.g. the game window resizing or UI
+    scale changing) -- if it has, recalibrate rather than expecting this to
+    still find it elsewhere in the region.
+
+    `ready_confidence` (0-1, higher = stricter) is mapped onto an equivalent
+    max-allowed mean pixel difference so existing calibrated steps keep behaving
+    the same way without needing to be retuned for this simpler match: 0.9
+    (the default) allows a mean difference of about 10% of the 0-255 range.
+
+    Broadly defensive: a rotation loaded from a hand-edited or stale JSON file
+    can reach here without ever passing through validate_rotation, so any
+    failure to read/match the template (missing file, corrupt PNG, a captured
+    region that no longer matches the template's size, etc.) is logged and
+    treated as not-ready rather than propagating out of the thread.
     """
-    try:
-        image = _load_template_image(step.ready_template)
-        pyautogui.locateOnScreen(
-            image, region=step.ready_region, confidence=step.ready_confidence, grayscale=True)
-        return True
-    except pyautogui.ImageNotFoundException:
+    if not step.ready_template:
         return False
+    try:
+        template = _load_template_image(step.ready_template)
+        screenshot = pyautogui.screenshot(region=step.ready_region).convert("L")
+        if screenshot.size != template.size:
+            log.error(
+                f"ready-check for '{step.key}': captured region {screenshot.size} doesn't "
+                f"match calibrated template {template.size} -- recalibrate this step")
+            return False
+        mean_diff = ImageStat.Stat(ImageChops.difference(screenshot, template)).mean[0]
+        max_allowed_diff = (1 - step.ready_confidence) * 255
+        return mean_diff <= max_allowed_diff
     except Exception as e:
         log.error(f"ready-check for '{step.key}' failed ({type(e).__name__}: {e}); treating as not ready")
         return False
