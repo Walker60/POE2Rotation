@@ -113,15 +113,25 @@ Known limitation: calibration only supports the primary monitor.
    key up, then Bind Hotkey it on the other rotation. **Unbind All** does the same
    for every saved rotation at once (with a confirmation prompt first), for
    starting your key bindings over from scratch.
-3. Selecting a rotation in the list and clicking **Copy** duplicates it (steps,
+3. **Cancel Key** (optional) immediately stops this rotation if it's currently
+   running — bind it the same way as the trigger hotkey, e.g. to your dodge key,
+   so rolling away instantly cuts off whatever the rotation was doing instead of
+   fighting your input. Unlike the trigger hotkey, a cancel key is never
+   exclusive — multiple rotations can share the exact same one (space cancels
+   *whichever* of them happens to be running), since it only ever stops, never
+   starts or toggles. The one restriction: a rotation's cancel key can't be the
+   same as its own trigger hotkey, since that would race a single keypress
+   against itself (start and immediately self-cancel).
+4. Selecting a rotation in the list and clicking **Copy** duplicates it (steps,
    mode, and all) as a new unsaved rotation named "*name* (copy)" — the hotkey is
-   left unbound since it can't share the original's, and template-based cooldown
+   left unbound since it can't share the original's, the cancel key (if any) is
+   carried over as-is since sharing one is fine, and template-based cooldown
    checks are carried over by reference (no recalibration needed). Rename it,
    assign a hotkey, and **Save Rotation** when ready.
-3. Rotations only fire keystrokes while the configured game process has OS focus —
+5. Rotations only fire keystrokes while the configured game process has OS focus —
    switching away pauses a running rotation; switching back resumes it automatically.
-4. **Stop Bot** stops any running rotation and disables all hotkeys (including the
-   panic key) at once; **Start Bot** re-enables them. While stopped, nothing can be
-   triggered until you press Start Bot again.
+6. **Stop Bot** stops any running rotation and disables all hotkeys (including the
+   panic key and any cancel keys) at once; **Start Bot** re-enables them. While
+   stopped, nothing can be triggered until you press Start Bot again.
 
 Rotations are saved as one JSON file per rotation under `rotations/`.

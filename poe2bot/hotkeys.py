@@ -58,6 +58,8 @@ class HotkeyManager:
         self._panic_key = panic_key
         self._bound = {}           # hotkey -> rotation name
         self._mouse_handlers = {}  # hotkey -> handler object returned by mouse.on_button, for unhook()
+        self._cancel_keys = {}     # rotation name -> cancel key (config, survives enable/disable)
+        self._cancel_handlers = {} # rotation name -> ("keyboard"|"mouse", live handler), only while enabled
         self._enabled = False
         self._register_panic_key()
         self._enabled = True
@@ -70,6 +72,44 @@ class HotkeyManager:
         """Name of the rotation currently owning `hotkey`, or None if unbound.
         Read-only pre-check -- does not touch the OS hook."""
         return self._bound.get(hotkey)
+
+    def cancel_key_for(self, rotation_name: str):
+        return self._cancel_keys.get(rotation_name)
+
+    def set_cancel_key(self, rotation_name: str, cancel_key):
+        """Configure (or clear, if cancel_key is falsy) the key that immediately
+        stops `rotation_name` if it's running -- e.g. the game's dodge key, so any
+        rotation can be interrupted mid-cast. Unlike bind()/the trigger hotkey,
+        multiple rotations may share the same cancel key: pressing it just stops
+        whichever of them happens to be running, so there's nothing to
+        conflict-check the way there is for the exclusive trigger hotkey."""
+        self._unregister_cancel_key(rotation_name)
+        self._cancel_keys[rotation_name] = cancel_key
+        if cancel_key and self._enabled:
+            self._register_cancel_key(rotation_name, cancel_key)
+
+    def _register_cancel_key(self, rotation_name: str, cancel_key: str):
+        callback = lambda n=rotation_name: self._rotation_manager.cancel(n)
+        if is_mouse_hotkey(cancel_key):
+            button = mouse_button_of(cancel_key)
+            handler = mouse.on_button(callback, buttons=(button,), types=(mouse.DOWN,))
+            self._cancel_handlers[rotation_name] = ("mouse", handler)
+        else:
+            def on_key_event(event, n=rotation_name, key=cancel_key):
+                if event.event_type == keyboard.KEY_DOWN and event.name == key:
+                    self._rotation_manager.cancel(n)
+            keyboard.hook(on_key_event)
+            self._cancel_handlers[rotation_name] = ("keyboard", on_key_event)
+
+    def _unregister_cancel_key(self, rotation_name: str):
+        entry = self._cancel_handlers.pop(rotation_name, None)
+        if entry is None:
+            return
+        kind, handler = entry
+        if kind == "mouse":
+            mouse.unhook(handler)
+        else:
+            keyboard.unhook(handler)
 
     def _register_hotkey(self, hotkey: str, rotation_name: str):
         handler = lambda n=rotation_name: self._rotation_manager.trigger(n)
@@ -125,6 +165,9 @@ class HotkeyManager:
         self._register_panic_key()
         for hotkey, name in self._bound.items():
             self._register_hotkey(hotkey, name)
+        for rotation_name, cancel_key in self._cancel_keys.items():
+            if cancel_key:
+                self._register_cancel_key(rotation_name, cancel_key)
         self._enabled = True
 
     def disable_all(self):
@@ -133,6 +176,13 @@ class HotkeyManager:
         keyboard.unhook_all_hotkeys()
         mouse.unhook_all()
         self._mouse_handlers.clear()
+        # mouse-based cancel-key handlers were already released by mouse.unhook_all()
+        # above; keyboard-hook-based ones are a separate registry keyboard doesn't
+        # touch, so those still need releasing explicitly.
+        for kind, handler in self._cancel_handlers.values():
+            if kind == "keyboard":
+                keyboard.unhook(handler)
+        self._cancel_handlers.clear()
         self._enabled = False
 
     def capture_next_key(self) -> str:

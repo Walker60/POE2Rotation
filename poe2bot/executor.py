@@ -260,6 +260,14 @@ class RotationManager:
             runner.stop()
         # running + mode == "once": ignore, no overlapping duplicate runs
 
+    def cancel(self, name: str):
+        """Immediately stop `name` if it's running. Unlike trigger(), never
+        starts it -- for an interrupt key (e.g. dodge) that should only ever
+        cut a rotation short, never toggle it on."""
+        runner = self._runners.get(name)
+        if runner is not None:
+            runner.stop()
+
     def stop_all(self):
         for runner in self._runners.values():
             runner.stop()

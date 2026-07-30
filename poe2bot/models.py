@@ -44,6 +44,7 @@ class Rotation:
     name: str
     mode: str = "once"
     hotkey: Optional[str] = None
+    cancel_key: Optional[str] = None   # e.g. the dodge key -- immediately stops this rotation if running
     steps: List[Step] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -51,6 +52,7 @@ class Rotation:
             "name": self.name,
             "mode": self.mode,
             "hotkey": self.hotkey,
+            "cancel_key": self.cancel_key,
             "steps": [asdict(step) for step in self.steps],
         }
 
@@ -60,6 +62,7 @@ class Rotation:
             name=data["name"],
             mode=data.get("mode", "once"),
             hotkey=data.get("hotkey"),
+            cancel_key=data.get("cancel_key"),
             steps=[Step.from_dict(step) for step in data.get("steps", [])],
         )
 
@@ -73,6 +76,9 @@ def validate_rotation(rotation: Rotation) -> List[str]:
 
     if rotation.mode not in VALID_MODES:
         problems.append(f"Mode must be one of {VALID_MODES}, got '{rotation.mode}'.")
+
+    if rotation.cancel_key and rotation.cancel_key == rotation.hotkey:
+        problems.append("Cancel key cannot be the same as this rotation's own trigger hotkey.")
 
     if not rotation.steps:
         problems.append("Rotation must have at least one step.")
