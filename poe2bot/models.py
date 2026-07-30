@@ -45,6 +45,9 @@ class Rotation:
     mode: str = "once"
     hotkey: Optional[str] = None
     cancel_key: Optional[str] = None   # e.g. the dodge key -- immediately stops this rotation if running
+    folder: str = ""   # "/"-separated group path (e.g. "Bosses/HardMode"); "" = ungrouped. NOT persisted
+                        # in the JSON -- it's derived from where the file actually lives on disk each time
+                        # it's loaded (see storage.py), so there's no way for it to drift out of sync.
     steps: List[Step] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -67,6 +70,21 @@ class Rotation:
         )
 
 
+def folder_path_problem(folder: str) -> Optional[str]:
+    """None if `folder` is a valid '/'-separated group path, else a human-readable
+    reason it isn't. Shared by rotation validation and the GUI's rename/move-to-folder
+    dialogs, so both reject the same things the same way."""
+    if not folder:
+        return None
+    for part in folder.split("/"):
+        part = part.strip()
+        if not part:
+            return "Folder path cannot have empty segments (leading/trailing/double slash)."
+        if part in (".", ".."):
+            return "Folder path cannot contain '.' or '..' segments."
+    return None
+
+
 def validate_rotation(rotation: Rotation) -> List[str]:
     """Return a list of human-readable problems with `rotation`. Empty list == valid."""
     problems = []
@@ -79,6 +97,10 @@ def validate_rotation(rotation: Rotation) -> List[str]:
 
     if rotation.cancel_key and rotation.cancel_key == rotation.hotkey:
         problems.append("Cancel key cannot be the same as this rotation's own trigger hotkey.")
+
+    folder_problem = folder_path_problem(rotation.folder)
+    if folder_problem:
+        problems.append(folder_problem)
 
     if not rotation.steps:
         problems.append("Rotation must have at least one step.")

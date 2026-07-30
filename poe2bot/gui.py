@@ -2,16 +2,17 @@ import copy
 import queue
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 import keyboard
 import pyautogui
+import sv_ttk
 
 from poe2bot import storage, templates
 from poe2bot.executor import RotationManager
 from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Rotation, Step, validate_rotation
+from poe2bot.models import Rotation, Step, folder_path_problem, validate_rotation
 
 log = get_logger()
 
@@ -99,7 +100,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("POE2 Rotation Bot")
-        self.geometry("760x480")
+        self.geometry("920x600")
+
+        sv_ttk.set_theme("dark")
+        self._sync_root_background()
 
         self.status_queue = queue.Queue()
         self.rotation_manager = RotationManager(on_status_change=self._queue_status)
@@ -118,7 +122,7 @@ class App(tk.Tk):
         self._build_widgets()
         self._load_rotations_from_disk()
         self._sweep_templates()
-        self._refresh_listbox()
+        self._refresh_rotation_tree()
         self._new_rotation()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -145,9 +149,12 @@ class App(tk.Tk):
         left.pack(side="left", fill="y")
 
         ttk.Label(left, text="Rotations").pack(anchor="w")
-        self.listbox = tk.Listbox(left, width=28, height=20, exportselection=False)
-        self.listbox.pack(fill="y", expand=True)
-        self.listbox.bind("<<ListboxSelect>>", self._on_select_rotation)
+        self.rotation_tree = ttk.Treeview(left, show="tree", height=20, selectmode="extended")
+        self.rotation_tree.pack(fill="y", expand=True)
+        self.rotation_tree.column("#0", width=220)
+        self.rotation_tree.bind("<<TreeviewSelect>>", self._on_select_rotation)
+        self.rotation_tree.bind("<Button-3>", self._on_rotation_tree_right_click)
+        self._folder_nodes = {}   # folder path -> tree item id, rebuilt each _refresh_rotation_tree()
 
         btns = ttk.Frame(left)
         btns.pack(fill="x", pady=4)
@@ -163,6 +170,14 @@ class App(tk.Tk):
         ttk.Label(name_row, text="Name:").pack(side="left")
         self.name_var = tk.StringVar()
         ttk.Entry(name_row, textvariable=self.name_var).pack(side="left", fill="x", expand=True, padx=4)
+
+        folder_row = ttk.Frame(right)
+        folder_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(folder_row, text="Folder:").pack(side="left")
+        self.folder_var = tk.StringVar()
+        ttk.Entry(folder_row, textvariable=self.folder_var).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Label(folder_row, text="e.g. Bosses/HardMode (blank = ungrouped)",
+                  foreground="gray").pack(side="left")
 
         mode_row = ttk.Frame(right)
         mode_row.pack(fill="x", pady=4)
@@ -255,25 +270,157 @@ class App(tk.Tk):
         self.toggle_btn.pack(side="left")
         self.status_var = tk.StringVar(value="Bot running. Hotkeys are live.")
         ttk.Label(bottom, textvariable=self.status_var).pack(side="left", padx=8)
+        ttk.Button(bottom, text="Toggle Light/Dark", command=self._toggle_theme).pack(side="right")
+
+    # ---- appearance -----------------------------------------------------------
+
+    def _sync_root_background(self):
+        """Plain tk widgets (the root window itself, and any raw tk.Toplevel
+        dialogs) aren't restyled by sv_ttk -- it only touches ttk widgets -- so
+        their background is kept in sync with the current theme's own frame
+        color here, queried live rather than hardcoded so it can't drift out of
+        sync if the theme's palette ever changes."""
+        bg = ttk.Style().lookup("TFrame", "background")
+        if bg:
+            self.configure(bg=bg)
+
+    def _toggle_theme(self):
+        sv_ttk.set_theme("light" if sv_ttk.get_theme() == "dark" else "dark")
+        self._sync_root_background()
 
     # ---- rotation list / selection --------------------------------------
 
-    def _refresh_listbox(self):
+    def _refresh_rotation_tree(self):
         selected = self.editing_original_name
-        self.listbox.delete(0, tk.END)
-        for name in sorted(self.rotations.keys()):
+        previously_open = {
+            path for path, item_id in self._folder_nodes.items()
+            if self.rotation_tree.exists(item_id) and self.rotation_tree.item(item_id, "open")
+        }
+        self.rotation_tree.delete(*self.rotation_tree.get_children())
+        self._folder_nodes = {}
+
+        def ensure_folder_node(folder_path: str) -> str:
+            """Return the tree item id for folder_path (the root tree item id,
+            "", for an ungrouped rotation), creating it -- and any missing
+            parent folders -- on first use."""
+            if not folder_path:
+                return ""
+            if folder_path in self._folder_nodes:
+                return self._folder_nodes[folder_path]
+            parent_path, _, label = folder_path.rpartition("/")
+            parent_id = ensure_folder_node(parent_path)
+            item_id = self.rotation_tree.insert(
+                parent_id, tk.END, iid=f"folder:{folder_path}",
+                text=f"\U0001F4C1 {label}", open=folder_path in previously_open)
+            self._folder_nodes[folder_path] = item_id
+            return item_id
+
+        # Folders first, then ungrouped rotations, each group alphabetical -- avoids
+        # ungrouped rotations (folder == "") sorting before every folder name.
+        for name in sorted(self.rotations, key=lambda n: (
+                self.rotations[n].folder == "", self.rotations[n].folder.lower(), n.lower())):
+            rotation = self.rotations[name]
+            parent_id = ensure_folder_node(rotation.folder)
             suffix = STATUS_LABELS.get(self.rotation_manager.status(name), "")
-            self.listbox.insert(tk.END, f"{name}{suffix}")
-        if selected in self.rotations:
-            names = sorted(self.rotations.keys())
-            self.listbox.selection_set(names.index(selected))
+            self.rotation_tree.insert(parent_id, tk.END, iid=f"rotation:{name}", text=f"{name}{suffix}")
+
+        if selected:
+            item_id = f"rotation:{selected}"
+            if self.rotation_tree.exists(item_id):
+                self.rotation_tree.see(item_id)
+                self.rotation_tree.selection_set(item_id)
+
+    def _selected_rotation_name(self):
+        """Name of the single currently-selected rotation, or None if nothing,
+        a folder, or more than one item is selected."""
+        selection = self.rotation_tree.selection()
+        if len(selection) != 1 or not selection[0].startswith("rotation:"):
+            return None
+        return selection[0][len("rotation:"):]
+
+    def _selected_rotation_names(self) -> list:
+        """Names of every currently-selected rotation (folders in the
+        selection are ignored), for actions that support multi-select."""
+        return [item_id[len("rotation:"):] for item_id in self.rotation_tree.selection()
+                if item_id.startswith("rotation:")]
 
     def _on_select_rotation(self, _event):
-        selection = self.listbox.curselection()
-        if not selection:
+        name = self._selected_rotation_name()
+        if name is not None and name in self.rotations:
+            self._load_rotation_into_form(self.rotations[name])
+
+    def _on_rotation_tree_right_click(self, event):
+        item_id = self.rotation_tree.identify_row(event.y)
+        if not item_id:
             return
-        name = sorted(self.rotations.keys())[selection[0]]
-        self._load_rotation_into_form(self.rotations[name])
+        if item_id.startswith("folder:"):
+            self.rotation_tree.selection_set(item_id)
+            folder_path = item_id[len("folder:"):]
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Rename Folder...", command=lambda: self._rename_folder(folder_path))
+            menu.tk_popup(event.x_root, event.y_root)
+        elif item_id.startswith("rotation:"):
+            if item_id not in self.rotation_tree.selection():
+                self.rotation_tree.selection_set(item_id)
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Move to Folder...", command=self._move_selected_to_folder)
+            menu.tk_popup(event.x_root, event.y_root)
+
+    def _rename_folder(self, folder_path: str):
+        """Renames/moves folder_path to a new path, taking every rotation in it
+        (and any nested subfolders) along -- a bulk operation, unlike editing a
+        single rotation's Folder field one at a time."""
+        new_path = simpledialog.askstring(
+            "Rename Folder", "New folder path:", initialvalue=folder_path, parent=self)
+        if new_path is None:
+            return
+        new_path = new_path.strip().strip("/")
+        problem = folder_path_problem(new_path)
+        if problem:
+            messagebox.showerror("Invalid folder", problem)
+            return
+        if not new_path or new_path == folder_path:
+            return
+        affected = [r for r in self.rotations.values()
+                    if r.folder == folder_path or r.folder.startswith(folder_path + "/")]
+        for rotation in affected:
+            old_folder = rotation.folder
+            new_folder = new_path + old_folder[len(folder_path):]
+            storage.delete_rotation(rotation.name, old_folder)
+            rotation.folder = new_folder
+            storage.save_rotation(rotation)
+            if rotation.name == self.editing_original_name:
+                self.folder_var.set(new_folder)
+        self._refresh_rotation_tree()
+
+    def _move_selected_to_folder(self):
+        """Moves every currently-selected rotation to one destination folder in
+        a single action, instead of opening each one to edit its Folder field."""
+        names = self._selected_rotation_names()
+        if not names:
+            messagebox.showinfo("No rotations selected", "Select one or more rotations in the list first.")
+            return
+        current_folder = self.rotations[names[0]].folder
+        new_path = simpledialog.askstring(
+            "Move to Folder", "Destination folder (blank = ungrouped):",
+            initialvalue=current_folder, parent=self)
+        if new_path is None:
+            return
+        new_path = new_path.strip().strip("/")
+        problem = folder_path_problem(new_path)
+        if problem:
+            messagebox.showerror("Invalid folder", problem)
+            return
+        for name in names:
+            rotation = self.rotations[name]
+            if rotation.folder == new_path:
+                continue
+            storage.delete_rotation(rotation.name, rotation.folder)
+            rotation.folder = new_path
+            storage.save_rotation(rotation)
+            if name == self.editing_original_name:
+                self.folder_var.set(new_path)
+        self._refresh_rotation_tree()
 
     def _load_rotation_into_form(self, rotation: Rotation):
         self.editing_original_name = rotation.name
@@ -282,6 +429,7 @@ class App(tk.Tk):
         self.pending_cancel_key = rotation.cancel_key
         self.editing_steps = copy.deepcopy(rotation.steps)
         self.name_var.set(rotation.name)
+        self.folder_var.set(rotation.folder)
         self.mode_var.set(rotation.mode)
         self.hotkey_label_var.set(display_name(rotation.hotkey))
         self.cancel_key_label_var.set(display_name(rotation.cancel_key))
@@ -295,29 +443,30 @@ class App(tk.Tk):
         self.pending_cancel_key = None
         self.editing_steps = []
         self.name_var.set("New Rotation")
+        self.folder_var.set("")
         self.mode_var.set("once")
         self.hotkey_label_var.set("(unbound)")
         self.cancel_key_label_var.set("(unbound)")
         self._reset_ready_form()
         self._refresh_steps_tree()
-        self.listbox.selection_clear(0, tk.END)
+        self.rotation_tree.selection_remove(*self.rotation_tree.selection())
 
     def _copy_rotation(self):
-        selection = self.listbox.curselection()
-        if not selection:
+        name = self._selected_rotation_name()
+        if name is None:
             messagebox.showinfo("No rotation selected", "Select a rotation in the list first.")
             return
-        name = sorted(self.rotations.keys())[selection[0]]
         original = self.rotations[name]
         duplicate = Rotation(
             name=self._unique_rotation_name(f"{original.name} (copy)"),
             mode=original.mode,
             hotkey=None,  # can't share the original's hotkey -- bind a new one before saving
             cancel_key=original.cancel_key,  # cancel keys CAN be shared, so this carries over as-is
+            folder=original.folder,
             steps=copy.deepcopy(original.steps),
         )
         self._load_rotation_into_form(duplicate)
-        self.listbox.selection_clear(0, tk.END)
+        self.rotation_tree.selection_remove(*self.rotation_tree.selection())
 
     def _unique_rotation_name(self, base_name: str) -> str:
         if base_name not in self.rotations:
@@ -342,10 +491,9 @@ class App(tk.Tk):
             self.step_ready_status_var.set("No cooldown check")
 
     def _delete_rotation(self):
-        selection = self.listbox.curselection()
-        if not selection:
+        name = self._selected_rotation_name()
+        if name is None:
             return
-        name = sorted(self.rotations.keys())[selection[0]]
         if not messagebox.askyesno("Delete rotation", f"Delete '{name}'?"):
             return
         rotation = self.rotations.pop(name)
@@ -353,8 +501,8 @@ class App(tk.Tk):
             self.hotkey_manager.unbind(rotation.hotkey)
         self.hotkey_manager.set_cancel_key(name, None)
         self.rotation_manager.unload(name)
-        storage.delete_rotation(name)
-        self._refresh_listbox()
+        storage.delete_rotation(name, rotation.folder)
+        self._refresh_rotation_tree()
         self._new_rotation()
         self._sweep_templates()
 
@@ -517,6 +665,9 @@ class App(tk.Tk):
         preview.transient(self)
         preview.grab_set()
         preview.resizable(False, False)
+        bg = ttk.Style().lookup("TFrame", "background")
+        if bg:
+            preview.configure(bg=bg)
 
         image = tk.PhotoImage(file=templates.template_path(filename))
         preview.image = image  # keep a reference -- Tk drops it otherwise
@@ -605,7 +756,7 @@ class App(tk.Tk):
             self.pending_hotkey = None
             self.editing_original_hotkey = None
             self.hotkey_label_var.set(display_name(None))
-        self._refresh_listbox()
+        self._refresh_rotation_tree()
 
     # ---- cancel key -----------------------------------------------------------
 
@@ -635,6 +786,7 @@ class App(tk.Tk):
             mode=self.mode_var.get(),
             hotkey=self.pending_hotkey,
             cancel_key=self.pending_cancel_key,
+            folder=self.folder_var.get().strip(),
             steps=copy.deepcopy(self.editing_steps),
         )
         problems = validate_rotation(rotation)
@@ -652,7 +804,7 @@ class App(tk.Tk):
             return
 
         # Rebind hotkey first (release whatever this rotation held before, bind the new
-        # choice) -- before any destructive rename step, so a conflict here (shouldn't
+        # choice) -- before any destructive rename/move step, so a conflict here (shouldn't
         # happen given the pre-check above, but kept as a defensive guard) can't leave
         # the old file deleted with nothing saved in its place.
         try:
@@ -661,12 +813,16 @@ class App(tk.Tk):
             messagebox.showerror("Hotkey conflict", str(e))
             return
 
-        renamed = self.editing_original_name is not None and self.editing_original_name != name
-        if renamed:
-            storage.delete_rotation(self.editing_original_name)
-            self.rotation_manager.unload(self.editing_original_name)
-            self.hotkey_manager.set_cancel_key(self.editing_original_name, None)
-            del self.rotations[self.editing_original_name]
+        # A rotation's file path depends on both its name and its folder, so either
+        # changing means the old file needs to go, not just a plain rename.
+        old_rotation = self.rotations.get(self.editing_original_name) if self.editing_original_name else None
+        moved = old_rotation is not None and (
+            old_rotation.name != rotation.name or old_rotation.folder != rotation.folder)
+        if moved:
+            storage.delete_rotation(old_rotation.name, old_rotation.folder)
+            self.rotation_manager.unload(old_rotation.name)
+            self.hotkey_manager.set_cancel_key(old_rotation.name, None)
+            del self.rotations[old_rotation.name]
 
         storage.save_rotation(rotation)
         self.rotation_manager.load(rotation)
@@ -674,7 +830,7 @@ class App(tk.Tk):
         self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
 
         self._load_rotation_into_form(rotation)
-        self._refresh_listbox()
+        self._refresh_rotation_tree()
         self._sweep_templates()
 
     # ---- global start/stop --------------------------------------------------
@@ -707,7 +863,7 @@ class App(tk.Tk):
                 elif name == "__cancel_capture__":
                     self._on_cancel_key_captured(payload)
                 else:
-                    self._refresh_listbox()
+                    self._refresh_rotation_tree()
         except queue.Empty:
             pass
         self.after(200, self._poll_status_queue)

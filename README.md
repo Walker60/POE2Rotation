@@ -13,6 +13,15 @@ pip install -r requirements.txt
 `tkinter` ships with the standard python.org Windows installer — verify with
 `python -m tkinter` (should open a small test window). It is not a pip package.
 
+The app uses the [Sun Valley ttk theme](https://github.com/rdbende/Sun-Valley-ttk-theme)
+(`sv-ttk`) for a modern, Windows-11-like dark/light look. It starts in dark mode;
+click **Toggle Light/Dark** (bottom-right) to switch. This restyles standard ttk
+widgets (buttons, entries, the rotation/step trees) but can't reach a couple of
+things Tkinter itself doesn't theme: native dialogs (the message boxes and the
+folder rename/move prompts) keep the OS's own light appearance regardless of
+the app's theme, and the Windows title bar doesn't switch color on its own —
+both are Tkinter/Windows limitations, not bugs.
+
 ## Running
 
 ```
@@ -85,9 +94,28 @@ save, delete, and app startup.
 
 Known limitation: calibration only supports the primary monitor.
 
+## Organizing rotations into folders
+
+The rotation list is a folder tree, not a flat list — set a rotation's **Folder**
+field (e.g. `Bosses/HardMode` for nesting) to group it under a collapsible folder
+node instead of leaving it at the root. Folders exist purely because rotations
+reference them: there's no separate "create an empty folder" step, and a folder
+disappears from the tree once nothing is in it anymore (its now-empty directory
+is removed automatically). A folder is just where the rotation's JSON file
+physically lives on disk — it isn't duplicated inside the file itself, so there's
+no way for the two to drift out of sync.
+
+Two dedicated actions for reorganizing without editing rotations one at a time:
+- **Right-click a folder → Rename Folder...** renames/moves it, taking every
+  rotation inside it (and any nested subfolders) along in one action.
+- **Right-click one or more selected rotations → Move to Folder...** moves all
+  of them to a destination folder at once. Ctrl/Shift-click to select several
+  rotations first.
+
 ## Usage
 
-1. Click **New**, give the rotation a name, add steps (optional display name,
+1. Click **New**, give the rotation a name and, optionally, a Folder to group it
+   under, add steps (optional display name,
    key, delay in ms, optional jitter, optional hold duration, optional hold
    jitter), and choose **Once** (single pass) or **Loop** (repeats until
    re-triggered or the panic key is pressed). Jitter randomizes the delay ± that
@@ -134,4 +162,5 @@ Known limitation: calibration only supports the primary monitor.
    panic key and any cancel keys) at once; **Start Bot** re-enables them. While
    stopped, nothing can be triggered until you press Start Bot again.
 
-Rotations are saved as one JSON file per rotation under `rotations/`.
+Rotations are saved as one JSON file per rotation under `rotations/`, in whatever
+subfolder structure their Folder field puts them in.
