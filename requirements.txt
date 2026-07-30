@@ -1,5 +1,6 @@
 keyboard>=0.13.5
 mouse>=0.7.1
+mss>=9.0.1
 psutil>=5.9
 pyautogui>=0.9.54
 Pillow>=10.0

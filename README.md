@@ -66,6 +66,14 @@ still exactly where it was when calibrated — if the game window moves, resizes
 or the UI scale changes afterward, the check will stop matching (never crash,
 it'll just always read as "not ready") and that step needs recalibrating.
 
+**Screenshots go through `mss`, not `pyautogui`.** On Windows, `pyautogui`
+(and even Pillow's own `ImageGrab.grab()` used directly) always captures the
+*entire* screen internally and crops it down afterward, no matter how small
+the requested region is — for a check running many times a second, that's a
+real, avoidable cost that scales with your monitor's resolution. `mss`
+captures only the requested rectangle directly, so this is what actually makes
+repeated checks fast rather than just a smaller region or a cheaper threshold.
+
 Calibration screenshots are stored as individual PNGs under `templates/`, named
 by a random ID rather than the skill name, so rotations stay portable if you
 rename or reorder things. Rotation JSON files reference these by filename only —

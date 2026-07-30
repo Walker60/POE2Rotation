@@ -3,7 +3,7 @@ import threading
 import time
 
 import keyboard
-import pyautogui
+import mss
 from PIL import Image, ImageChops, ImageStat
 
 from poe2bot import templates
@@ -18,6 +18,7 @@ STATUS_RUNNING = "running"
 STATUS_WAITING_FOCUS = "waiting_focus"
 
 _template_image_cache = {}   # filename -> grayscale PIL.Image.Image, decoded once and reused
+_thread_local = threading.local()
 
 
 def _load_template_image(filename: str) -> Image.Image:
@@ -29,6 +30,39 @@ def _load_template_image(filename: str) -> Image.Image:
         image.load()  # force-read pixel data now, so later use never touches the file again
         _template_image_cache[filename] = image
     return image
+
+
+def _screen_capture():
+    """A thread-local mss capture instance. mss is not safe to share across
+    threads, and each RotationRunner polls readiness from its own dedicated
+    thread, so this caches one instance per thread rather than per process."""
+    sct = getattr(_thread_local, "sct", None)
+    if sct is None:
+        sct = mss.mss()
+        _thread_local.sct = sct
+    return sct
+
+
+def _close_screen_capture():
+    """Release the current thread's mss capture resources, if any were ever
+    created. Called when a RotationRunner's thread finishes so GDI handles
+    don't accumulate across many start/stop cycles over a long session."""
+    sct = getattr(_thread_local, "sct", None)
+    if sct is not None:
+        sct.close()
+        _thread_local.sct = None
+
+
+def _capture_region(region) -> Image.Image:
+    """Screenshot exactly `region` (left, top, width, height) -- and only that
+    region. pyautogui/Pillow's own screen grab always captures the *entire*
+    screen on Windows and crops afterward regardless of region size; mss
+    captures just the requested rectangle directly via BitBlt, which is what
+    actually matters for a check that runs in a tight polling loop."""
+    left, top, width, height = region
+    monitor = {"left": left, "top": top, "width": width, "height": height}
+    shot = _screen_capture().grab(monitor)
+    return Image.frombytes("RGB", shot.size, shot.rgb)
 
 
 def _check_ready(step: Step) -> bool:
@@ -59,7 +93,7 @@ def _check_ready(step: Step) -> bool:
         return False
     try:
         template = _load_template_image(step.ready_template)
-        screenshot = pyautogui.screenshot(region=step.ready_region).convert("L")
+        screenshot = _capture_region(step.ready_region).convert("L")
         if screenshot.size != template.size:
             log.error(
                 f"ready-check for '{step.key}': captured region {screenshot.size} doesn't "
@@ -117,6 +151,7 @@ class RotationRunner:
             else:
                 self._run_once()
         finally:
+            _close_screen_capture()
             log.info(f"[{self.rotation.name}] stopped")
             self._notify(STATUS_IDLE)
 
