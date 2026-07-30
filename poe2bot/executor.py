@@ -122,19 +122,24 @@ class RotationRunner:
         while not _check_ready(step):
             if time.perf_counter() >= deadline:
                 return False
-            if self._stop_event.wait(timeout=0.1):
+            if self._stop_event.wait(timeout=0.05):
                 return False
         return True
 
     def _fire_step(self, step: Step):
-        log.debug(f"[{self.rotation.name}] key={step.key} hold_ms={step.hold_ms}")
         if step.hold_ms > 0:
+            hold = step.hold_ms
+            if step.hold_jitter_ms:
+                hold += random.uniform(-step.hold_jitter_ms, step.hold_jitter_ms)
+            hold = max(0, hold)
+            log.debug(f"[{self.rotation.name}] key={step.key} hold_ms={hold:.0f}")
             try:
                 keyboard.press(step.key)
-                self._stop_event.wait(timeout=step.hold_ms / 1000)
+                self._stop_event.wait(timeout=hold / 1000)
             finally:
                 keyboard.release(step.key)
         else:
+            log.debug(f"[{self.rotation.name}] key={step.key} (tap)")
             keyboard.send(step.key)
 
     def _sleep_delay(self, step: Step) -> bool:

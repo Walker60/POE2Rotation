@@ -12,26 +12,30 @@ VALID_MODES = ("once", "loop")
 @dataclass
 class Step:
     key: str
+    name: str = ""   # optional display label (e.g. "Fireball"); falls back to `key` in the GUI if blank
     delay_ms: int = 100
     jitter_ms: int = 0
     hold_ms: int = 0
+    hold_jitter_ms: int = 0   # uniform random +/- jitter applied to hold_ms each time (only when hold_ms > 0)
     ready_template: Optional[str] = None                       # filename only, resolved via templates.template_path()
     ready_region: Optional[Tuple[int, int, int, int]] = None   # (left, top, width, height), absolute screen px
     ready_confidence: float = 0.9
-    ready_timeout_ms: int = 5000
+    ready_timeout_ms: int = 300
 
     @staticmethod
     def from_dict(data: dict) -> "Step":
         region = data.get("ready_region")
         return Step(
             key=data["key"],
+            name=data.get("name", ""),
             delay_ms=int(data.get("delay_ms", 100)),
             jitter_ms=int(data.get("jitter_ms", 0)),
             hold_ms=int(data.get("hold_ms", 0)),
+            hold_jitter_ms=int(data.get("hold_jitter_ms", 0)),
             ready_template=data.get("ready_template"),
             ready_region=tuple(region) if region is not None else None,  # JSON round-trips tuples as lists
             ready_confidence=float(data.get("ready_confidence", 0.9)),
-            ready_timeout_ms=int(data.get("ready_timeout_ms", 5000)),
+            ready_timeout_ms=int(data.get("ready_timeout_ms", 300)),
         )
 
 
@@ -88,6 +92,8 @@ def validate_rotation(rotation: Rotation) -> List[str]:
             problems.append(f"Step {i}: jitter_ms cannot be negative.")
         if step.hold_ms < 0:
             problems.append(f"Step {i}: hold_ms cannot be negative.")
+        if step.hold_jitter_ms < 0:
+            problems.append(f"Step {i}: hold_jitter_ms cannot be negative.")
 
         if step.ready_template:
             if not (isinstance(step.ready_region, tuple) and len(step.ready_region) == 4):

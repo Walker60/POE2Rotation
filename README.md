@@ -29,9 +29,9 @@ seem to work at all, try running from an elevated terminal first to rule this ou
 ## Configuration
 
 - `POE2BOT_TARGET_PROCESS` — the game executable name the focus guard checks for
-  (default `PathOfExile.exe`). Verify the exact name via Task Manager > Details while
-  POE2 is running — it may differ by storefront (Steam/EGS/standalone). Set this to
-  `notepad.exe` to test the bot against Notepad instead of the game.
+  (default `PathOfExileSteam.exe`). Verify the exact name via Task Manager > Details
+  while POE2 is running — it may differ by storefront (Steam/EGS/standalone). Set
+  this to `notepad.exe` to test the bot against Notepad instead of the game.
 - `POE2BOT_PANIC_KEY` — reserved global hotkey that instantly stops every running
   rotation (default `f12`). Cannot be bound to a rotation.
 
@@ -43,6 +43,18 @@ editor, click **Calibrate...**: the window hides, drag a small rectangle tightly
 around the skill's icon while it's off cooldown, then confirm the capture. If the
 icon doesn't reappear within the step's Timeout, that cast is skipped (logged as a
 warning) and the rotation moves on — it never fires blind and never hangs.
+
+**Timeout is a quick "is it ready right now?" check, not a wait-for-cooldown
+timer.** The bot blocks the *entire* rotation for up to Timeout milliseconds on
+every step that has a cooldown check, so a large value (the old default was
+5000ms) makes a fast rotation feel like it stalls or hangs on any skill that's
+still cooling down — it's not actually hung, it's just sitting there waiting out
+the full timeout before giving up and moving on. The default is now 300ms, which
+is enough time to absorb normal check jitter without noticeably delaying the rest
+of the rotation; only raise it for a specific step if you'd genuinely rather wait
+a bit than skip that particular cast. Keep the calibrated region small and tight
+around just the icon, too — a large region makes each individual check slower,
+which eats into whatever Timeout you set.
 
 Calibration screenshots are stored as individual PNGs under `templates/`, named
 by a random ID rather than the skill name, so rotations stay portable if you
@@ -61,9 +73,18 @@ Known limitation: calibration only supports the primary monitor.
 
 ## Usage
 
-1. Click **New**, give the rotation a name, add steps (key, delay in ms, optional
-   jitter, optional hold duration), and choose **Once** (single pass) or **Loop**
-   (repeats until re-triggered or the panic key is pressed).
+1. Click **New**, give the rotation a name, add steps (optional display name,
+   key, delay in ms, optional jitter, optional hold duration, optional hold
+   jitter), and choose **Once** (single pass) or **Loop** (repeats until
+   re-triggered or the panic key is pressed). Jitter randomizes the delay ± that
+   many ms each time; Hold Jitter does the same for how long the key is held
+   down — both make timing look less like a perfectly repeating macro. Leave
+   either at 0 for exact, fixed timing. The step's Name (e.g. "Fireball") is just
+   a label for the steps list — it doesn't affect what gets sent, that's the Key
+   field. If you need the same skill more than once in a rotation, select it and
+   click **Copy Selected** rather than re-entering it (and recalibrating its
+   cooldown check, if it has one) from scratch — the copy is inserted right after
+   the original and can be tweaked independently from there.
 2. Click **Bind Hotkey...** and either press a keyboard key or click a mouse button
    to trigger this rotation, then **Save Rotation**. Left/middle/right click and the
    two extra side buttons (mouse 4/5) are all supported.
@@ -72,6 +93,17 @@ Known limitation: calibration only supports the primary monitor.
    *everywhere*, not just in-game — every left-click in Windows Explorer, every
    right-click context menu, etc. Middle-click or a side button (mouse 4/5) is
    almost always the safer choice unless you're certain you want that trade-off.
+
+   **Unbind** clears this rotation's hotkey and saves immediately — use it when you
+   want to move a hotkey to a different rotation: Unbind it here first to free the
+   key up, then Bind Hotkey it on the other rotation. **Unbind All** does the same
+   for every saved rotation at once (with a confirmation prompt first), for
+   starting your key bindings over from scratch.
+3. Selecting a rotation in the list and clicking **Copy** duplicates it (steps,
+   mode, and all) as a new unsaved rotation named "*name* (copy)" — the hotkey is
+   left unbound since it can't share the original's, and template-based cooldown
+   checks are carried over by reference (no recalibration needed). Rename it,
+   assign a hotkey, and **Save Rotation** when ready.
 3. Rotations only fire keystrokes while the configured game process has OS focus —
    switching away pauses a running rotation; switching back resumes it automatically.
 4. **Stop Bot** stops any running rotation and disables all hotkeys (including the
