@@ -64,8 +64,14 @@ Known limitation: calibration only supports the primary monitor.
 1. Click **New**, give the rotation a name, add steps (key, delay in ms, optional
    jitter, optional hold duration), and choose **Once** (single pass) or **Loop**
    (repeats until re-triggered or the panic key is pressed).
-2. Click **Bind Hotkey...** and press the key you want to trigger this rotation, then
-   **Save Rotation**.
+2. Click **Bind Hotkey...** and either press a keyboard key or click a mouse button
+   to trigger this rotation, then **Save Rotation**. Left/middle/right click and the
+   two extra side buttons (mouse 4/5) are all supported.
+
+   **Caution:** binding left or right click makes that button trigger the rotation
+   *everywhere*, not just in-game — every left-click in Windows Explorer, every
+   right-click context menu, etc. Middle-click or a side button (mouse 4/5) is
+   almost always the safer choice unless you're certain you want that trade-off.
 3. Rotations only fire keystrokes while the configured game process has OS focus —
    switching away pauses a running rotation; switching back resumes it automatically.
 4. **Stop Bot** stops any running rotation and disables all hotkeys (including the

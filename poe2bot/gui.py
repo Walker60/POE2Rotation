@@ -9,7 +9,7 @@ import pyautogui
 
 from poe2bot import storage, templates
 from poe2bot.executor import RotationManager
-from poe2bot.hotkeys import HotkeyManager
+from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Rotation, Step, validate_rotation
 
@@ -257,7 +257,7 @@ class App(tk.Tk):
         self.editing_steps = copy.deepcopy(rotation.steps)
         self.name_var.set(rotation.name)
         self.mode_var.set(rotation.mode)
-        self.hotkey_label_var.set(rotation.hotkey or "(unbound)")
+        self.hotkey_label_var.set(display_name(rotation.hotkey))
         self._reset_ready_form()
         self._refresh_steps_tree()
 
@@ -496,7 +496,7 @@ class App(tk.Tk):
     # ---- hotkey binding ----------------------------------------------------
 
     def _on_bind_hotkey_clicked(self):
-        self.bind_hotkey_btn.config(text="Press a key...", state="disabled")
+        self.bind_hotkey_btn.config(text="Press a key or click...", state="disabled")
         threading.Thread(target=self._capture_hotkey_worker, daemon=True).start()
 
     def _capture_hotkey_worker(self):
@@ -505,7 +505,7 @@ class App(tk.Tk):
 
     def _on_hotkey_captured(self, key: str):
         self.pending_hotkey = key
-        self.hotkey_label_var.set(key)
+        self.hotkey_label_var.set(display_name(key))
         self.bind_hotkey_btn.config(text="Bind Hotkey...", state="normal")
 
     # ---- save ---------------------------------------------------------------
@@ -523,11 +523,11 @@ class App(tk.Tk):
             problems.append(f"A rotation named '{name}' already exists.")
         if rotation.hotkey:
             if rotation.hotkey == self.hotkey_manager.panic_key:
-                problems.append(f"'{rotation.hotkey}' is reserved as the panic/stop-all key.")
+                problems.append(f"'{display_name(rotation.hotkey)}' is reserved as the panic/stop-all key.")
             else:
                 owner = self.hotkey_manager.bound_to(rotation.hotkey)
                 if owner is not None and owner != self.editing_original_name:
-                    problems.append(f"'{rotation.hotkey}' is already bound to '{owner}'.")
+                    problems.append(f"'{display_name(rotation.hotkey)}' is already bound to '{owner}'.")
         if problems:
             messagebox.showerror("Cannot save rotation", "\n".join(problems))
             return
