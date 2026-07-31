@@ -161,6 +161,13 @@ class RotationRunner:
                 return False
             if not self._wait_for_focus_or_stop():
                 return False
+            if not step.key:
+                # Sleep step: no key to check readiness for or fire, just pause for
+                # delay_ms (+/- jitter_ms) like any other step's post-fire wait.
+                log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms")
+                if not self._sleep_delay(step):
+                    return False
+                continue
             if self._wait_until_ready(step):
                 self._fire_step(step)
                 # Only pay the post-cast delay/jitter after an actual fire -- there's no

@@ -106,9 +106,9 @@ def validate_rotation(rotation: Rotation) -> List[str]:
         problems.append("Rotation must have at least one step.")
 
     for i, step in enumerate(rotation.steps, start=1):
-        if not step.key or not step.key.strip():
-            problems.append(f"Step {i}: key cannot be empty.")
-        else:
+        # A blank key means this step is a sleep/pause: no key to press, it just
+        # waits out delay_ms (+/- jitter_ms) like any other step's post-fire wait.
+        if step.key and step.key.strip():
             try:
                 keyboard.key_to_scan_codes(step.key)
             except ValueError:

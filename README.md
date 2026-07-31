@@ -126,7 +126,13 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    field. If you need the same skill more than once in a rotation, select it and
    click **Copy Selected** rather than re-entering it (and recalibrating its
    cooldown check, if it has one) from scratch — the copy is inserted right after
-   the original and can be tweaked independently from there.
+   the original and can be tweaked independently from there. **Add Sleep** adds a
+   step with no key at all — just a deliberate pause (Delay ± Jitter, same fields
+   as any other step) with nothing pressed, for spacing out a rotation without
+   tying the wait to any particular skill. It shows up in the list as "Sleep"
+   unless you give it its own Name. You can also turn any existing step into a
+   sleep by clearing its Key field and clicking Update Selected, or turn a sleep
+   back into a real step by typing a key into it.
 2. Click **Bind Hotkey...** and either press a keyboard key or click a mouse button
    to trigger this rotation, then **Save Rotation**. Left/middle/right click and the
    two extra side buttons (mouse 4/5) are all supported.

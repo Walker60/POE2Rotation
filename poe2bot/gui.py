@@ -255,7 +255,8 @@ class App(tk.Tk):
         step_btns = ttk.Frame(right)
         step_btns.pack(fill="x", pady=4)
         for text, cmd in (
-            ("Add Step", self._add_step), ("Copy Selected", self._copy_selected_step),
+            ("Add Step", self._add_step), ("Add Sleep", self._add_sleep_step),
+            ("Copy Selected", self._copy_selected_step),
             ("Update Selected", self._update_selected_step),
             ("Remove Selected", self._remove_selected_step),
             ("Move Up", self._move_step_up), ("Move Down", self._move_step_down),
@@ -511,8 +512,11 @@ class App(tk.Tk):
     def _refresh_steps_tree(self):
         self.tree.delete(*self.tree.get_children())
         for i, step in enumerate(self.editing_steps):
+            is_sleep = not step.key
+            label = step.name or ("Sleep" if is_sleep else step.key)
+            key_col = "(sleep)" if is_sleep else step.key
             self.tree.insert("", tk.END, iid=str(i),
-                              values=(step.name or step.key, step.key, step.delay_ms,
+                              values=(label, key_col, step.delay_ms,
                                       step.jitter_ms, step.hold_ms, step.hold_jitter_ms))
 
     def _on_select_step(self, _event):
@@ -563,6 +567,18 @@ class App(tk.Tk):
         step = self._read_step_form()
         if step is None:
             return
+        self.editing_steps.append(step)
+        self._refresh_steps_tree()
+        self._reset_ready_form()
+
+    def _add_sleep_step(self):
+        """A sleep step has no key -- it's just a pause of delay_ms (+/- jitter_ms)
+        with nothing pressed, for a deliberate wait that isn't tied to any skill.
+        Reuses the same form fields as Add Step; whatever's in Key is ignored."""
+        step = self._read_step_form()
+        if step is None:
+            return
+        step.key = ""
         self.editing_steps.append(step)
         self._refresh_steps_tree()
         self._reset_ready_form()
