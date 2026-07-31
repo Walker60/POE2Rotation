@@ -156,17 +156,37 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    starts or toggles. The one restriction: a rotation's cancel key can't be the
    same as its own trigger hotkey, since that would race a single keypress
    against itself (start and immediately self-cancel).
-4. Selecting a rotation in the list and clicking **Copy** duplicates it (steps,
+4. **Reset Key** (optional) immediately restarts this rotation from its first
+   step if it's currently running — for when a fight phase changes, you
+   misjudged a cast, or anything else where you want to bail back to the top of
+   the sequence rather than either letting it continue from the middle or
+   stopping it outright. Whatever step it was on, and however far into that
+   step's timing it was, is abandoned immediately; if the rotation is in Loop
+   mode it just starts the current lap over, and even in Once mode a reset
+   restarts it rather than ending it. Same sharing rule as the cancel key
+   (multiple rotations can use the same reset key), and the same restriction:
+   it can't be the same as this rotation's own trigger hotkey or its own
+   cancel key, since either would race a single keypress against itself.
+5. **Pause Key** (optional) immediately freezes this rotation in place if it's
+   currently running, then automatically resumes it — from the *same* step it
+   was on (re-attempting that step's ready-check/fire from scratch, not
+   skipping ahead or restarting the whole sequence). Choose **For [N] ms** to
+   auto-resume after a fixed delay, or **Until pressed again** to stay frozen
+   until you press the same key a second time. Same sharing rule as the
+   cancel/reset keys, and the same restriction: it can't be the same as this
+   rotation's own trigger hotkey, cancel key, or reset key.
+6. Selecting a rotation in the list and clicking **Copy** duplicates it (steps,
    mode, and all) as a new unsaved rotation named "*name* (copy)" — the hotkey is
-   left unbound since it can't share the original's, the cancel key (if any) is
-   carried over as-is since sharing one is fine, and template-based cooldown
-   checks are carried over by reference (no recalibration needed). Rename it,
-   assign a hotkey, and **Save Rotation** when ready.
-5. Rotations only fire keystrokes while the configured game process has OS focus —
+   left unbound since it can't share the original's, the cancel/reset/pause keys
+   (if any) are carried over as-is since sharing those is fine, and
+   template-based cooldown checks are carried over by reference (no
+   recalibration needed). Rename it, assign a hotkey, and **Save Rotation**
+   when ready.
+7. Rotations only fire keystrokes while the configured game process has OS focus —
    switching away pauses a running rotation; switching back resumes it automatically.
-6. **Stop Bot** stops any running rotation and disables all hotkeys (including the
-   panic key and any cancel keys) at once; **Start Bot** re-enables them. While
-   stopped, nothing can be triggered until you press Start Bot again.
+8. **Stop Bot** stops any running rotation and disables all hotkeys (including the
+   panic key and any cancel/reset/pause keys) at once; **Start Bot** re-enables
+   them. While stopped, nothing can be triggered until you press Start Bot again.
 
 Rotations are saved as one JSON file per rotation under `rotations/`, in whatever
 subfolder structure their Folder field puts them in.

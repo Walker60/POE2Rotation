@@ -16,6 +16,7 @@ log = get_logger()
 STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
 STATUS_WAITING_FOCUS = "waiting_focus"
+STATUS_PAUSED = "paused"
 
 _template_image_cache = {}   # filename -> grayscale PIL.Image.Image, decoded once and reused
 _thread_local = threading.local()
@@ -119,6 +120,13 @@ class RotationRunner:
         self.rotation = rotation
         self.on_status_change = on_status_change
         self._stop_event = threading.Event()
+        # These three are written only by reset()/pause() (another thread) and
+        # read/cleared only by _run's own thread, except _paused which pause()
+        # also reads/clears directly (see pause() for why that one's safe).
+        self._reset_requested = False
+        self._pause_requested = False
+        self._paused = threading.Event()
+        self._current_step_index = 0   # touched only by _run_once's own thread
         self._thread = None
 
     @property
@@ -129,11 +137,48 @@ class RotationRunner:
         if self.is_running:
             return
         self._stop_event.clear()
+        self._reset_requested = False
+        self._pause_requested = False
+        self._paused.clear()
+        self._current_step_index = 0
         self._thread = threading.Thread(
             target=self._run, name=f"rotation-{self.rotation.name}", daemon=True)
         self._thread.start()
 
     def stop(self):
+        self._stop_event.set()
+
+    def reset(self):
+        """Immediately abandon whatever step is currently in progress and restart
+        this rotation's step sequence from the beginning. No-op if not running.
+
+        Implemented by (ab)using the same stop_event every cooperative wait in
+        _run_once already watches for instant wakeup -- no new polling needed --
+        with _reset_requested marking that this particular wakeup should restart
+        the step sequence rather than actually stop the thread."""
+        if self.is_running:
+            self._reset_requested = True
+            self._stop_event.set()
+
+    def pause(self):
+        """Immediately freeze this rotation in place if it's running -- same
+        interrupt mechanism as reset(), but resumes from the *same* step it was
+        on (re-attempting that step's ready-check/fire from scratch) rather
+        than restarting from step 1. No-op if not running.
+
+        In "duration" mode, resumes automatically after rotation.pause_duration_ms.
+        In "toggle" mode, stays frozen until pause() is called again -- that
+        second call is what this method's `if self._paused.is_set()` branch
+        handles, distinguishing "start a pause" from "end one already in
+        progress" (for "duration" mode a second press while already paused is
+        just a no-op; it's already counting down to auto-resume)."""
+        if not self.is_running:
+            return
+        if self._paused.is_set():
+            if self.rotation.pause_mode == "toggle":
+                self._paused.clear()
+            return
+        self._pause_requested = True
         self._stop_event.set()
 
     def _notify(self, status: str):
@@ -143,20 +188,64 @@ class RotationRunner:
     def _run(self):
         log.info(f"[{self.rotation.name}] starting ({self.rotation.mode})")
         self._notify(STATUS_RUNNING)
+        resume_index = 0
         try:
-            if self.rotation.mode == "loop":
-                while not self._stop_event.is_set():
-                    if not self._run_once():
-                        break
-            else:
-                self._run_once()
+            while True:
+                if self._stop_event.is_set() and not self._reset_requested and not self._pause_requested:
+                    break
+                completed = self._run_once(resume_index)
+                if self._reset_requested:
+                    log.info(f"[{self.rotation.name}] reset to start")
+                    self._reset_requested = False
+                    self._stop_event.clear()
+                    resume_index = 0
+                    continue
+                if self._pause_requested:
+                    self._pause_requested = False
+                    resume_index = self._current_step_index
+                    self._stop_event.clear()
+                    if self._do_pause():
+                        continue
+                    break  # a genuine stop() arrived while paused
+                if not completed or self.rotation.mode != "loop":
+                    break
+                resume_index = 0
         finally:
             _close_screen_capture()
             log.info(f"[{self.rotation.name}] stopped")
             self._notify(STATUS_IDLE)
 
-    def _run_once(self) -> bool:
-        for step in self.rotation.steps:
+    def _do_pause(self) -> bool:
+        """Block until this pause ends (duration elapsed, or toggled off), or
+        reset()/stop() interrupts it. Returns True if _run's main loop should
+        continue -- either to resume normally, or because a reset() arrived
+        while paused and needs _run's own reset-handling to take over -- and
+        False only for a genuine, non-reset stop() (reset() also sets
+        stop_event to wake this wait instantly, so it must be told apart from
+        a real stop rather than treated as one)."""
+        log.info(f"[{self.rotation.name}] paused ({self.rotation.pause_mode})")
+        self._paused.set()
+        self._notify(STATUS_PAUSED)
+        try:
+            if self.rotation.pause_mode == "toggle":
+                while self._paused.is_set() and not self._reset_requested:
+                    if self._stop_event.wait(timeout=0.1) and not self._reset_requested:
+                        return False
+            else:
+                deadline = time.perf_counter() + self.rotation.pause_duration_ms / 1000
+                while time.perf_counter() < deadline and not self._reset_requested:
+                    remaining = max(0.0, deadline - time.perf_counter())
+                    if self._stop_event.wait(timeout=min(0.1, remaining)) and not self._reset_requested:
+                        return False
+            return True
+        finally:
+            self._paused.clear()
+            self._notify(STATUS_RUNNING)
+
+    def _run_once(self, start_index: int = 0) -> bool:
+        for i in range(start_index, len(self.rotation.steps)):
+            step = self.rotation.steps[i]
+            self._current_step_index = i
             if self._stop_event.is_set():
                 return False
             if not self._wait_for_focus_or_stop():
@@ -274,6 +363,22 @@ class RotationManager:
         runner = self._runners.get(name)
         if runner is not None:
             runner.stop()
+
+    def reset(self, name: str):
+        """Immediately restart `name` from its first step if it's running.
+        No-op if it's not running -- there's nothing to reset back to the
+        start of, and unlike trigger()/cancel() this never changes whether
+        the rotation is running at all, only where in its sequence it is."""
+        runner = self._runners.get(name)
+        if runner is not None:
+            runner.reset()
+
+    def pause(self, name: str):
+        """Immediately freeze `name` in place if it's running, per its own
+        pause_mode/pause_duration_ms. No-op if it's not running."""
+        runner = self._runners.get(name)
+        if runner is not None:
+            runner.pause()
 
     def stop_all(self):
         for runner in self._runners.values():

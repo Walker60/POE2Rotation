@@ -20,6 +20,7 @@ STATUS_LABELS = {
     "idle": "",
     "running": " (running)",
     "waiting_focus": " (waiting for game focus)",
+    "paused": " (paused)",
 }
 
 
@@ -116,6 +117,8 @@ class App(tk.Tk):
         self.editing_steps = []              # working list[Step] for the form
         self.pending_hotkey = None            # hotkey chosen in this edit session (may be unchanged)
         self.pending_cancel_key = None        # cancel key chosen in this edit session (may be unchanged)
+        self.pending_reset_key = None         # reset key chosen in this edit session (may be unchanged)
+        self.pending_pause_key = None         # pause key chosen in this edit session (may be unchanged)
         self.step_ready_template = None       # cooldown-check filename pending for the step being edited
         self.step_ready_region = None         # (left, top, width, height) absolute screen coords, or None
 
@@ -141,6 +144,10 @@ class App(tk.Tk):
                     messagebox.showwarning("Hotkey conflict on startup", str(e))
             if rotation.cancel_key:
                 self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
+            if rotation.reset_key:
+                self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
+            if rotation.pause_key:
+                self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
 
     # ---- widget layout -------------------------------------------------
 
@@ -206,6 +213,41 @@ class App(tk.Tk):
         self.bind_cancel_btn.pack(side="left")
         ttk.Button(cancel_row, text="Clear", command=self._on_clear_cancel_key).pack(side="left", padx=(4, 0))
         ttk.Label(cancel_row, text="e.g. your dodge key -- stops this rotation instantly if pressed",
+                  foreground="gray").pack(side="left", padx=(8, 0))
+
+        reset_row = ttk.Frame(right)
+        reset_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(reset_row, text="Reset Key:").pack(side="left")
+        self.reset_key_label_var = tk.StringVar(value="(unbound)")
+        ttk.Label(reset_row, textvariable=self.reset_key_label_var, width=12).pack(side="left", padx=4)
+        self.bind_reset_btn = ttk.Button(
+            reset_row, text="Bind Reset Key...", command=self._on_bind_reset_clicked)
+        self.bind_reset_btn.pack(side="left")
+        ttk.Button(reset_row, text="Clear", command=self._on_clear_reset_key).pack(side="left", padx=(4, 0))
+        ttk.Label(reset_row, text="restarts this rotation from step 1 instantly if pressed",
+                  foreground="gray").pack(side="left", padx=(8, 0))
+
+        pause_row = ttk.Frame(right)
+        pause_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(pause_row, text="Pause Key:").pack(side="left")
+        self.pause_key_label_var = tk.StringVar(value="(unbound)")
+        ttk.Label(pause_row, textvariable=self.pause_key_label_var, width=12).pack(side="left", padx=4)
+        self.bind_pause_btn = ttk.Button(
+            pause_row, text="Bind Pause Key...", command=self._on_bind_pause_clicked)
+        self.bind_pause_btn.pack(side="left")
+        ttk.Button(pause_row, text="Clear", command=self._on_clear_pause_key).pack(side="left", padx=(4, 0))
+
+        pause_mode_row = ttk.Frame(right)
+        pause_mode_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(pause_mode_row, text="Pause behavior:").pack(side="left")
+        self.pause_mode_var = tk.StringVar(value="duration")
+        ttk.Radiobutton(pause_mode_row, text="For", variable=self.pause_mode_var, value="duration").pack(side="left")
+        self.pause_duration_var = tk.StringVar(value="1000")
+        ttk.Entry(pause_mode_row, textvariable=self.pause_duration_var, width=6).pack(side="left")
+        ttk.Label(pause_mode_row, text="ms").pack(side="left", padx=(2, 8))
+        ttk.Radiobutton(pause_mode_row, text="Until pressed again",
+                         variable=self.pause_mode_var, value="toggle").pack(side="left")
+        ttk.Label(pause_mode_row, text="freezes this rotation in place, resuming the same step",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         self.tree = ttk.Treeview(
@@ -428,12 +470,18 @@ class App(tk.Tk):
         self.editing_original_hotkey = rotation.hotkey
         self.pending_hotkey = rotation.hotkey
         self.pending_cancel_key = rotation.cancel_key
+        self.pending_reset_key = rotation.reset_key
+        self.pending_pause_key = rotation.pause_key
         self.editing_steps = copy.deepcopy(rotation.steps)
         self.name_var.set(rotation.name)
         self.folder_var.set(rotation.folder)
         self.mode_var.set(rotation.mode)
         self.hotkey_label_var.set(display_name(rotation.hotkey))
         self.cancel_key_label_var.set(display_name(rotation.cancel_key))
+        self.reset_key_label_var.set(display_name(rotation.reset_key))
+        self.pause_key_label_var.set(display_name(rotation.pause_key))
+        self.pause_mode_var.set(rotation.pause_mode)
+        self.pause_duration_var.set(str(rotation.pause_duration_ms))
         self._reset_ready_form()
         self._refresh_steps_tree()
 
@@ -442,12 +490,18 @@ class App(tk.Tk):
         self.editing_original_hotkey = None
         self.pending_hotkey = None
         self.pending_cancel_key = None
+        self.pending_reset_key = None
+        self.pending_pause_key = None
         self.editing_steps = []
         self.name_var.set("New Rotation")
         self.folder_var.set("")
         self.mode_var.set("once")
         self.hotkey_label_var.set("(unbound)")
         self.cancel_key_label_var.set("(unbound)")
+        self.reset_key_label_var.set("(unbound)")
+        self.pause_key_label_var.set("(unbound)")
+        self.pause_mode_var.set("duration")
+        self.pause_duration_var.set("1000")
         self._reset_ready_form()
         self._refresh_steps_tree()
         self.rotation_tree.selection_remove(*self.rotation_tree.selection())
@@ -462,7 +516,11 @@ class App(tk.Tk):
             name=self._unique_rotation_name(f"{original.name} (copy)"),
             mode=original.mode,
             hotkey=None,  # can't share the original's hotkey -- bind a new one before saving
-            cancel_key=original.cancel_key,  # cancel keys CAN be shared, so this carries over as-is
+            cancel_key=original.cancel_key,  # cancel/reset/pause keys CAN be shared, so these carry over as-is
+            reset_key=original.reset_key,
+            pause_key=original.pause_key,
+            pause_mode=original.pause_mode,
+            pause_duration_ms=original.pause_duration_ms,
             folder=original.folder,
             steps=copy.deepcopy(original.steps),
         )
@@ -501,6 +559,8 @@ class App(tk.Tk):
         if rotation.hotkey:
             self.hotkey_manager.unbind(rotation.hotkey)
         self.hotkey_manager.set_cancel_key(name, None)
+        self.hotkey_manager.set_reset_key(name, None)
+        self.hotkey_manager.set_pause_key(name, None)
         self.rotation_manager.unload(name)
         storage.delete_rotation(name, rotation.folder)
         self._refresh_rotation_tree()
@@ -793,15 +853,62 @@ class App(tk.Tk):
         self.pending_cancel_key = None
         self.cancel_key_label_var.set(display_name(None))
 
+    # ---- reset key ------------------------------------------------------------
+
+    def _on_bind_reset_clicked(self):
+        self.bind_reset_btn.config(text="Press a key or click...", state="disabled")
+        threading.Thread(target=self._capture_reset_key_worker, daemon=True).start()
+
+    def _capture_reset_key_worker(self):
+        key = self.hotkey_manager.capture_next_key()
+        self.status_queue.put(("__reset_capture__", key))
+
+    def _on_reset_key_captured(self, key: str):
+        self.pending_reset_key = key
+        self.reset_key_label_var.set(display_name(key))
+        self.bind_reset_btn.config(text="Bind Reset Key...", state="normal")
+
+    def _on_clear_reset_key(self):
+        self.pending_reset_key = None
+        self.reset_key_label_var.set(display_name(None))
+
+    # ---- pause key ------------------------------------------------------------
+
+    def _on_bind_pause_clicked(self):
+        self.bind_pause_btn.config(text="Press a key or click...", state="disabled")
+        threading.Thread(target=self._capture_pause_key_worker, daemon=True).start()
+
+    def _capture_pause_key_worker(self):
+        key = self.hotkey_manager.capture_next_key()
+        self.status_queue.put(("__pause_capture__", key))
+
+    def _on_pause_key_captured(self, key: str):
+        self.pending_pause_key = key
+        self.pause_key_label_var.set(display_name(key))
+        self.bind_pause_btn.config(text="Bind Pause Key...", state="normal")
+
+    def _on_clear_pause_key(self):
+        self.pending_pause_key = None
+        self.pause_key_label_var.set(display_name(None))
+
     # ---- save ---------------------------------------------------------------
 
     def _save_rotation(self):
         name = self.name_var.get().strip()
+        try:
+            pause_duration_ms = int(self.pause_duration_var.get())
+        except ValueError:
+            messagebox.showerror("Cannot save rotation", "Pause duration must be a whole number.")
+            return
         rotation = Rotation(
             name=name,
             mode=self.mode_var.get(),
             hotkey=self.pending_hotkey,
             cancel_key=self.pending_cancel_key,
+            reset_key=self.pending_reset_key,
+            pause_key=self.pending_pause_key,
+            pause_mode=self.pause_mode_var.get(),
+            pause_duration_ms=pause_duration_ms,
             folder=self.folder_var.get().strip(),
             steps=copy.deepcopy(self.editing_steps),
         )
@@ -838,12 +945,16 @@ class App(tk.Tk):
             storage.delete_rotation(old_rotation.name, old_rotation.folder)
             self.rotation_manager.unload(old_rotation.name)
             self.hotkey_manager.set_cancel_key(old_rotation.name, None)
+            self.hotkey_manager.set_reset_key(old_rotation.name, None)
+            self.hotkey_manager.set_pause_key(old_rotation.name, None)
             del self.rotations[old_rotation.name]
 
         storage.save_rotation(rotation)
         self.rotation_manager.load(rotation)
         self.rotations[rotation.name] = rotation
         self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
+        self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
+        self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
 
         self._load_rotation_into_form(rotation)
         self._refresh_rotation_tree()
@@ -878,6 +989,10 @@ class App(tk.Tk):
                     self._on_hotkey_captured(payload)
                 elif name == "__cancel_capture__":
                     self._on_cancel_key_captured(payload)
+                elif name == "__reset_capture__":
+                    self._on_reset_key_captured(payload)
+                elif name == "__pause_capture__":
+                    self._on_pause_key_captured(payload)
                 else:
                     self._refresh_rotation_tree()
         except queue.Empty:

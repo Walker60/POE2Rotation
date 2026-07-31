@@ -7,6 +7,7 @@ import keyboard
 from poe2bot import templates
 
 VALID_MODES = ("once", "loop")
+VALID_PAUSE_MODES = ("duration", "toggle")
 
 
 @dataclass
@@ -45,6 +46,10 @@ class Rotation:
     mode: str = "once"
     hotkey: Optional[str] = None
     cancel_key: Optional[str] = None   # e.g. the dodge key -- immediately stops this rotation if running
+    reset_key: Optional[str] = None    # immediately restarts this rotation from its first step if running
+    pause_key: Optional[str] = None    # immediately freezes this rotation in place if running (see pause_mode)
+    pause_mode: str = "duration"        # "duration" = auto-resume after pause_duration_ms; "toggle" = press again to resume
+    pause_duration_ms: int = 1000       # only used when pause_mode == "duration"
     folder: str = ""   # "/"-separated group path (e.g. "Bosses/HardMode"); "" = ungrouped. NOT persisted
                         # in the JSON -- it's derived from where the file actually lives on disk each time
                         # it's loaded (see storage.py), so there's no way for it to drift out of sync.
@@ -56,6 +61,10 @@ class Rotation:
             "mode": self.mode,
             "hotkey": self.hotkey,
             "cancel_key": self.cancel_key,
+            "reset_key": self.reset_key,
+            "pause_key": self.pause_key,
+            "pause_mode": self.pause_mode,
+            "pause_duration_ms": self.pause_duration_ms,
             "steps": [asdict(step) for step in self.steps],
         }
 
@@ -66,6 +75,10 @@ class Rotation:
             mode=data.get("mode", "once"),
             hotkey=data.get("hotkey"),
             cancel_key=data.get("cancel_key"),
+            reset_key=data.get("reset_key"),
+            pause_key=data.get("pause_key"),
+            pause_mode=data.get("pause_mode", "duration"),
+            pause_duration_ms=int(data.get("pause_duration_ms", 1000)),
             steps=[Step.from_dict(step) for step in data.get("steps", [])],
         )
 
@@ -97,6 +110,25 @@ def validate_rotation(rotation: Rotation) -> List[str]:
 
     if rotation.cancel_key and rotation.cancel_key == rotation.hotkey:
         problems.append("Cancel key cannot be the same as this rotation's own trigger hotkey.")
+
+    if rotation.reset_key:
+        if rotation.reset_key == rotation.hotkey:
+            problems.append("Reset key cannot be the same as this rotation's own trigger hotkey.")
+        if rotation.reset_key == rotation.cancel_key:
+            problems.append("Reset key cannot be the same as this rotation's own cancel key.")
+
+    if rotation.pause_key:
+        if rotation.pause_key == rotation.hotkey:
+            problems.append("Pause key cannot be the same as this rotation's own trigger hotkey.")
+        if rotation.pause_key == rotation.cancel_key:
+            problems.append("Pause key cannot be the same as this rotation's own cancel key.")
+        if rotation.pause_key == rotation.reset_key:
+            problems.append("Pause key cannot be the same as this rotation's own reset key.")
+
+    if rotation.pause_mode not in VALID_PAUSE_MODES:
+        problems.append(f"Pause mode must be one of {VALID_PAUSE_MODES}, got '{rotation.pause_mode}'.")
+    if rotation.pause_duration_ms < 0:
+        problems.append("Pause duration cannot be negative.")
 
     folder_problem = folder_path_problem(rotation.folder)
     if folder_problem:
