@@ -10,7 +10,7 @@ from PIL import Image, ImageChops, ImageStat
 from poe2bot import templates
 from poe2bot.focus import is_game_focused
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Rotation, Step
+from poe2bot.models import Condition, Rotation, Step
 
 log = get_logger()
 
@@ -74,16 +74,27 @@ def _check_ready(step: Step) -> bool:
     dispatching to whichever matching method (image or pixel color) this step
     is configured to use."""
     if step.ready_match_type == "pixel":
-        return _check_pixel_ready(step)
-    return _check_image_ready(step)
+        return _pixel_matches(step.ready_pixel_pos, step.ready_pixel_color, step.ready_confidence, step.key)
+    return _image_matches(step.ready_template, step.ready_region, step.ready_confidence, step.key)
 
 
-def _check_image_ready(step: Step) -> bool:
-    """True if step's calibrated 'ready' template currently matches on screen.
+def _check_condition(condition: Condition, label: str) -> bool:
+    """True if `condition` currently matches on screen -- same dispatch/matching
+    code as _check_ready, just parameterized on a Condition instead of a Step
+    (a Condition is an extra, instantly-checked gate on a step; see
+    RotationRunner._run_once)."""
+    if condition.match_type == "pixel":
+        return _pixel_matches(condition.pixel_pos, condition.pixel_color, condition.confidence, label)
+    return _image_matches(condition.template, condition.region, condition.confidence, label)
 
-    Compares a screenshot of exactly the calibrated region directly against the
-    cached template (mean pixel difference) instead of searching for the
-    template's position with OpenCV. Calibration already tells us precisely
+
+def _image_matches(template_filename, region, confidence: float, label: str) -> bool:
+    """True if a screenshot of exactly `region` currently matches the cached
+    `template_filename` (mean pixel difference) -- shared by both a step's own
+    cooldown check and any image-match Condition.
+
+    Compares directly against the calibrated region instead of searching for
+    the template's position with OpenCV. Calibration already tells us precisely
     where the icon is, so there's nothing to search for -- skipping the
     sliding-window correlation search entirely is what actually makes this
     fast, not just a lower confidence threshold. Trade-off: this assumes the
@@ -91,7 +102,7 @@ def _check_image_ready(step: Step) -> bool:
     scale changing) -- if it has, recalibrate rather than expecting this to
     still find it elsewhere in the region.
 
-    `ready_confidence` (0-1, higher = stricter) is mapped onto an equivalent
+    `confidence` (0-1, higher = stricter) is mapped onto an equivalent
     max-allowed mean pixel difference so existing calibrated steps keep behaving
     the same way without needing to be retuned for this simpler match: 0.9
     (the default) allows a mean difference of about 10% of the 0-255 range.
@@ -102,46 +113,47 @@ def _check_image_ready(step: Step) -> bool:
     region that no longer matches the template's size, etc.) is logged and
     treated as not-ready rather than propagating out of the thread.
     """
-    if not step.ready_template:
+    if not template_filename:
         return False
     try:
-        template = _load_template_image(step.ready_template)
-        screenshot = _capture_region(step.ready_region).convert("L")
+        template = _load_template_image(template_filename)
+        screenshot = _capture_region(region).convert("L")
         if screenshot.size != template.size:
             log.error(
-                f"ready-check for '{step.key}': captured region {screenshot.size} doesn't "
+                f"ready-check for '{label}': captured region {screenshot.size} doesn't "
                 f"match calibrated template {template.size} -- recalibrate this step")
             return False
         mean_diff = ImageStat.Stat(ImageChops.difference(screenshot, template)).mean[0]
-        max_allowed_diff = (1 - step.ready_confidence) * 255
+        max_allowed_diff = (1 - confidence) * 255
         return mean_diff <= max_allowed_diff
     except Exception as e:
-        log.error(f"ready-check for '{step.key}' failed ({type(e).__name__}: {e}); treating as not ready")
+        log.error(f"ready-check for '{label}' failed ({type(e).__name__}: {e}); treating as not ready")
         return False
 
 
-def _check_pixel_ready(step: Step) -> bool:
-    """True if the calibrated pixel's current color is within tolerance of its
-    expected 'ready' color. Much cheaper than image matching (a single 1x1
+def _pixel_matches(pixel_pos, pixel_color, confidence: float, label: str) -> bool:
+    """True if the current color at `pixel_pos` is within tolerance of the
+    expected `pixel_color` -- shared by both a step's own cooldown check and
+    any pixel-match Condition. Much cheaper than image matching (a single 1x1
     capture, no template file, no per-pixel convolution) for the common case
-    where a skill's readiness shows as a stable color (a border, a glow, a
-    swatch) rather than needing a whole icon comparison.
+    where readiness shows as a stable color (a border, a glow, a swatch)
+    rather than needing a whole icon comparison.
 
-    `ready_confidence` uses the same 0-1, higher-is-stricter meaning as image
+    `confidence` uses the same 0-1, higher-is-stricter meaning as image
     matching, mapped onto an equivalent max-allowed Euclidean RGB distance
     (0.9 default allows roughly 10% of the largest possible color distance).
     """
-    if not step.ready_pixel_pos or not step.ready_pixel_color:
+    if not pixel_pos or not pixel_color:
         return False
     try:
-        x, y = step.ready_pixel_pos
+        x, y = pixel_pos
         monitor = {"left": x, "top": y, "width": 1, "height": 1}
         current = tuple(_screen_capture().grab(monitor).rgb)
-        distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(current, step.ready_pixel_color)))
-        max_allowed_distance = (1 - step.ready_confidence) * _MAX_COLOR_DISTANCE
+        distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(current, pixel_color)))
+        max_allowed_distance = (1 - confidence) * _MAX_COLOR_DISTANCE
         return distance <= max_allowed_distance
     except Exception as e:
-        log.error(f"pixel ready-check for '{step.key}' failed ({type(e).__name__}: {e}); treating as not ready")
+        log.error(f"pixel ready-check for '{label}' failed ({type(e).__name__}: {e}); treating as not ready")
         return False
 
 
@@ -294,17 +306,21 @@ class RotationRunner:
                 if not self._sleep_delay(step):
                     return False
                 continue
-            if self._wait_until_ready(step):
+            ready = self._wait_until_ready(step)
+            if ready and all(_check_condition(c, step.key) for c in step.conditions):
                 self._fire_step(step)
                 # Only pay the post-cast delay/jitter after an actual fire -- there's no
                 # cast animation to wait out for a step that was skipped, so a skipped
                 # cast falls straight through to the next step instead of also eating
-                # this step's full delay on top of the ready-check time.
+                # this step's full delay on top of the ready-check/condition-check time.
                 if not self._sleep_delay(step):
                     return False
             elif not self._stop_event.is_set():
-                log.warning(f"[{self.rotation.name}] '{step.key}' not ready after "
-                            f"{step.ready_timeout_ms}ms; skipping this cast")
+                if not ready:
+                    log.warning(f"[{self.rotation.name}] '{step.key}' not ready after "
+                                f"{step.ready_timeout_ms}ms; skipping this cast")
+                else:
+                    log.info(f"[{self.rotation.name}] '{step.key}' conditions not met; skipping this cast")
         return True
 
     def _wait_for_focus_or_stop(self) -> bool:

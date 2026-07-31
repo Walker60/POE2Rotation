@@ -12,6 +12,39 @@ VALID_READY_MATCH_TYPES = ("image", "pixel")
 
 
 @dataclass
+class Condition:
+    """An extra gate on a Step: it only fires if every one of its conditions
+    currently matches, checked once right before firing (no polling/timeout,
+    unlike the step's own cooldown check -- a condition is either true right
+    now or the cast is skipped this pass)."""
+    match_type: str = "image"                                    # "image" or "pixel"
+    template: Optional[str] = None                              # filename only, resolved via templates.template_path()
+    region: Optional[Tuple[int, int, int, int]] = None          # (left, top, width, height), absolute screen px -- image mode
+    pixel_pos: Optional[Tuple[int, int]] = None                  # (x, y) absolute screen px -- pixel mode
+    pixel_color: Optional[Tuple[int, int, int]] = None           # expected (r, g, b) -- pixel mode
+    confidence: float = 0.9
+
+    def has_check(self) -> bool:
+        if self.match_type == "pixel":
+            return self.pixel_color is not None
+        return bool(self.template)
+
+    @staticmethod
+    def from_dict(data: dict) -> "Condition":
+        region = data.get("region")
+        pixel_pos = data.get("pixel_pos")
+        pixel_color = data.get("pixel_color")
+        return Condition(
+            match_type=data.get("match_type", "image"),
+            template=data.get("template"),
+            region=tuple(region) if region is not None else None,
+            pixel_pos=tuple(pixel_pos) if pixel_pos is not None else None,
+            pixel_color=tuple(pixel_color) if pixel_color is not None else None,
+            confidence=float(data.get("confidence", 0.9)),
+        )
+
+
+@dataclass
 class Step:
     key: str
     name: str = ""   # optional display label (e.g. "Fireball"); falls back to `key` in the GUI if blank
@@ -26,6 +59,7 @@ class Step:
     ready_pixel_color: Optional[Tuple[int, int, int]] = None    # expected (r, g, b) when "ready" -- pixel mode
     ready_confidence: float = 0.9
     ready_timeout_ms: int = 300
+    conditions: List[Condition] = field(default_factory=list)   # extra gates, checked once, instantly, before firing
 
     def has_ready_check(self) -> bool:
         """True if this step has a cooldown check configured, via whichever
@@ -53,6 +87,7 @@ class Step:
             ready_pixel_color=tuple(pixel_color) if pixel_color is not None else None,
             ready_confidence=float(data.get("ready_confidence", 0.9)),
             ready_timeout_ms=int(data.get("ready_timeout_ms", 300)),
+            conditions=[Condition.from_dict(c) for c in data.get("conditions", [])],
         )
 
 
@@ -189,5 +224,21 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                     problems.append(f"Step {i}: has an image cooldown check but no calibrated region (recalibrate).")
                 if not step.ready_template or not os.path.isfile(templates.template_path(step.ready_template)):
                     problems.append(f"Step {i}: calibrated template image is missing on disk (recalibrate).")
+
+        for j, condition in enumerate(step.conditions, start=1):
+            if condition.match_type not in VALID_READY_MATCH_TYPES:
+                problems.append(f"Step {i}, condition {j}: match_type must be one of {VALID_READY_MATCH_TYPES}.")
+            if not (0 < condition.confidence <= 1):
+                problems.append(f"Step {i}, condition {j}: confidence must be greater than 0 and at most 1.")
+            if condition.match_type == "pixel":
+                if not (isinstance(condition.pixel_pos, tuple) and len(condition.pixel_pos) == 2):
+                    problems.append(f"Step {i}, condition {j}: has no calibrated point (recalibrate).")
+                if not (isinstance(condition.pixel_color, tuple) and len(condition.pixel_color) == 3):
+                    problems.append(f"Step {i}, condition {j}: has no calibrated color (recalibrate).")
+            else:
+                if not (isinstance(condition.region, tuple) and len(condition.region) == 4):
+                    problems.append(f"Step {i}, condition {j}: has no calibrated region (recalibrate).")
+                if not condition.template or not os.path.isfile(templates.template_path(condition.template)):
+                    problems.append(f"Step {i}, condition {j}: calibrated template image is missing on disk (recalibrate).")
 
     return problems

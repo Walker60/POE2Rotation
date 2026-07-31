@@ -112,6 +112,42 @@ they're already portable with no matching file to copy.
 
 Known limitation: calibration only supports the primary monitor.
 
+## Conditions (optional, per step)
+
+A step can also have any number of **conditions** — extra image/pixel-match
+gates layered on top of its own cooldown check. A step only fires if its
+cooldown check (if any) is ready *and* every one of its conditions currently
+matches; if any single condition doesn't match, that cast is skipped (logged)
+the same way a not-ready cooldown check is, and the rotation moves on to the
+next step without eating that step's delay.
+
+Conditions are a different kind of check than the cooldown check above:
+they're read **once, instantly**, right before firing — there's no Timeout
+and no waiting for one to become true. This suits things like "only cast this
+if I still have a buff active" or "only cast this if the target isn't already
+below a health threshold" — a quick yes/no read of something elsewhere on
+screen, not a cooldown icon you'd expect to wait out.
+
+The step list shows conditions as indented rows nested under their step, with
+an expand/collapse arrow — a step with any conditions starts expanded so
+you'll always see one right after adding it, though a manual collapse doesn't
+persist across further edits to the step list.
+
+- Select a step (or one of its existing conditions) and click **Add Image
+  Condition...** or **Add Pixel Condition...** to attach a new one — same
+  calibration flow as Image Match/Pixel Match above, plus a Confidence field
+  in the confirmation dialog (each condition has its own).
+- **Double-click** an existing condition to recalibrate it in place (region or
+  pixel, matching whichever type it already is) — its Confidence field starts
+  pre-filled with its current value. Double-clicking a step itself does
+  nothing; steps are still recalibrated via Image Match/Pixel Match.
+- Select a condition and click **Remove Selected** to delete just that
+  condition, leaving the step and its other conditions untouched.
+
+Copying a step (Copy Selected, or copying a whole rotation) carries its
+conditions along with it. Conditions with an image-match template participate
+in the same template-file portability/cleanup rules described above.
+
 ## Organizing rotations into folders
 
 The rotation list is a folder tree, not a flat list — set a rotation's **Folder**

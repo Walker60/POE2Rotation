@@ -12,7 +12,7 @@ from poe2bot import storage, templates
 from poe2bot.executor import RotationManager
 from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Rotation, Step, folder_path_problem, validate_rotation
+from poe2bot.models import Condition, Rotation, Step, folder_path_problem, validate_rotation
 
 log = get_logger()
 
@@ -293,10 +293,12 @@ class App(tk.Tk):
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         self.tree = ttk.Treeview(
-            right, columns=("name", "key", "delay", "jitter", "hold", "hold_jitter"),
-            show="headings", height=10)
+            right, columns=("key", "delay", "jitter", "hold", "hold_jitter"),
+            show="tree headings", height=10)
+        self.tree.heading("#0", text="Name")
+        self.tree.column("#0", width=140)
         for col, label, width in (
-            ("name", "Name", 110), ("key", "Key", 60), ("delay", "Delay (ms)", 90),
+            ("key", "Key", 60), ("delay", "Delay (ms)", 90),
             ("jitter", "Jitter (ms)", 90), ("hold", "Hold (ms)", 90),
             ("hold_jitter", "Hold Jitter (ms)", 100),
         ):
@@ -304,6 +306,7 @@ class App(tk.Tk):
             self.tree.column(col, width=width, anchor="center")
         self.tree.pack(fill="both", expand=True, pady=(8, 4))
         self.tree.bind("<<TreeviewSelect>>", self._on_select_step)
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
 
         edit_row = ttk.Frame(right)
         edit_row.pack(fill="x")
@@ -349,6 +352,17 @@ class App(tk.Tk):
             ("Move Up", self._move_step_up), ("Move Down", self._move_step_down),
         ):
             ttk.Button(step_btns, text=text, command=cmd).pack(side="left", padx=(0, 4))
+
+        condition_btns = ttk.Frame(right)
+        condition_btns.pack(fill="x", pady=(0, 4))
+        ttk.Label(condition_btns, text="Conditions:").pack(side="left", padx=(0, 4))
+        ttk.Button(condition_btns, text="Add Image Condition...",
+                   command=self._on_add_image_condition_clicked).pack(side="left", padx=(0, 4))
+        ttk.Button(condition_btns, text="Add Pixel Condition...",
+                   command=self._on_add_pixel_condition_clicked).pack(side="left", padx=(0, 4))
+        ttk.Label(condition_btns,
+                  text="(double-click a condition to recalibrate it)",
+                  foreground="gray").pack(side="left", padx=(8, 0))
 
         ttk.Button(right, text="Save Rotation", command=self._save_rotation).pack(anchor="e", pady=(8, 0))
 
@@ -626,15 +640,73 @@ class App(tk.Tk):
             is_sleep = not step.key
             label = step.name or ("Sleep" if is_sleep else step.key)
             key_col = "(sleep)" if is_sleep else step.key
-            self.tree.insert("", tk.END, iid=str(i),
-                              values=(label, key_col, step.delay_ms,
-                                      step.jitter_ms, step.hold_ms, step.hold_jitter_ms))
+            step_iid = f"step-{i}"
+            self.tree.insert("", tk.END, iid=step_iid, text=label,
+                              values=(key_col, step.delay_ms,
+                                      step.jitter_ms, step.hold_ms, step.hold_jitter_ms),
+                              open=bool(step.conditions))
+            for j, condition in enumerate(step.conditions):
+                self.tree.insert(step_iid, tk.END, iid=f"{step_iid}-cond-{j}",
+                                  text=self._condition_summary(condition),
+                                  values=("", "", "", "", ""))
+
+    @staticmethod
+    def _condition_summary(condition) -> str:
+        if condition.match_type == "pixel" and condition.pixel_color:
+            r, g, b = condition.pixel_color
+            return f"Condition: Pixel RGB({r},{g},{b})"
+        if condition.match_type == "image" and condition.region:
+            w, h = condition.region[2], condition.region[3]
+            return f"Condition: Image {w}x{h}"
+        return "Condition: (not calibrated)"
+
+    @staticmethod
+    def _parse_tree_iid(iid: str):
+        """("step-N", None) for a step row's index, (N, M) for the M'th
+        condition of step N, or None if `iid` doesn't match either scheme."""
+        parts = iid.split("-")
+        if len(parts) == 2 and parts[0] == "step":
+            return int(parts[1]), None
+        if len(parts) == 4 and parts[0] == "step" and parts[2] == "cond":
+            return int(parts[1]), int(parts[3])
+        return None
+
+    def _selected_step_index(self, silent=False):
+        """For actions that only make sense on a whole step (Copy/Update/Move).
+        Returns None if nothing or a condition is selected -- silently unless
+        `silent` is False, in which case an info box explains why."""
+        selection = self.tree.selection()
+        if not selection:
+            if not silent:
+                messagebox.showinfo("No step selected", "Select a step in the list first.")
+            return None
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None or parsed[1] is not None:
+            if not silent:
+                messagebox.showinfo("Select a step", "Select a step (not a condition) for this action.")
+            return None
+        return parsed[0]
+
+    def _selected_owning_step_index(self):
+        """For actions that attach to a step regardless of whether the step
+        itself or one of its conditions is selected (Add Condition)."""
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("No step selected", "Select a step (or one of its conditions) first.")
+            return None
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None:
+            return None
+        return parsed[0]
 
     def _on_select_step(self, _event):
         selection = self.tree.selection()
         if not selection:
             return
-        step = self.editing_steps[int(selection[0])]
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None:
+            return
+        step = self.editing_steps[parsed[0]]
         self.step_name_var.set(step.name)
         self.step_key_var.set(step.key)
         self.step_delay_var.set(str(step.delay_ms))
@@ -650,7 +722,7 @@ class App(tk.Tk):
         self.step_ready_confidence_var.set(f"{step.ready_confidence:.2f}")
         self._refresh_ready_status()
 
-    def _read_step_form(self):
+    def _read_step_form(self, conditions=None):
         try:
             delay = int(self.step_delay_var.get())
             jitter = int(self.step_jitter_var.get())
@@ -664,7 +736,7 @@ class App(tk.Tk):
                 "Delay/jitter/hold/hold jitter/timeout must be whole numbers, and "
                 "confidence must be a decimal (e.g. 0.9).")
             return None
-        return Step(
+        step = Step(
             key=self.step_key_var.get().strip(),
             name=self.step_name_var.get().strip(),
             delay_ms=delay,
@@ -679,6 +751,13 @@ class App(tk.Tk):
             ready_confidence=confidence,
             ready_timeout_ms=timeout,
         )
+        if conditions is not None:
+            # The form has no fields of its own for conditions -- Update Selected
+            # must carry over the step's existing conditions explicitly, or they'd
+            # silently be wiped out by this fresh Step (whose conditions default
+            # to an empty list).
+            step.conditions = conditions
+        return step
 
     def _add_step(self):
         step = self._read_step_form()
@@ -701,55 +780,53 @@ class App(tk.Tk):
         self._reset_ready_form()
 
     def _copy_selected_step(self):
-        selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo("No step selected", "Select a step in the list first.")
+        i = self._selected_step_index()
+        if i is None:
             return
-        i = int(selection[0])
         duplicate = copy.deepcopy(self.editing_steps[i])
         self.editing_steps.insert(i + 1, duplicate)
         self._refresh_steps_tree()
-        self.tree.selection_set(str(i + 1))
+        self.tree.selection_set(f"step-{i + 1}")
 
     def _update_selected_step(self):
-        selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo("No step selected", "Select a step in the list first.")
+        i = self._selected_step_index()
+        if i is None:
             return
-        step = self._read_step_form()
+        step = self._read_step_form(conditions=self.editing_steps[i].conditions)
         if step is None:
             return
-        self.editing_steps[int(selection[0])] = step
+        self.editing_steps[i] = step
         self._refresh_steps_tree()
 
     def _remove_selected_step(self):
         selection = self.tree.selection()
         if not selection:
             return
-        del self.editing_steps[int(selection[0])]
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None:
+            return
+        step_idx, cond_idx = parsed
+        if cond_idx is None:
+            del self.editing_steps[step_idx]
+        else:
+            del self.editing_steps[step_idx].conditions[cond_idx]
         self._refresh_steps_tree()
 
     def _move_step_up(self):
-        selection = self.tree.selection()
-        if not selection:
-            return
-        i = int(selection[0])
-        if i == 0:
+        i = self._selected_step_index(silent=True)
+        if i is None or i == 0:
             return
         self.editing_steps[i - 1], self.editing_steps[i] = self.editing_steps[i], self.editing_steps[i - 1]
         self._refresh_steps_tree()
-        self.tree.selection_set(str(i - 1))
+        self.tree.selection_set(f"step-{i - 1}")
 
     def _move_step_down(self):
-        selection = self.tree.selection()
-        if not selection:
-            return
-        i = int(selection[0])
-        if i >= len(self.editing_steps) - 1:
+        i = self._selected_step_index(silent=True)
+        if i is None or i >= len(self.editing_steps) - 1:
             return
         self.editing_steps[i + 1], self.editing_steps[i] = self.editing_steps[i], self.editing_steps[i + 1]
         self._refresh_steps_tree()
-        self.tree.selection_set(str(i + 1))
+        self.tree.selection_set(f"step-{i + 1}")
 
     # ---- cooldown-check calibration -----------------------------------------
 
@@ -762,6 +839,14 @@ class App(tk.Tk):
         self._refresh_ready_status()
 
     def _on_image_match_clicked(self):
+        self._start_image_capture()
+
+    def _start_image_capture(self, on_use=None, default_confidence=0.90):
+        """Runs the region-capture-overlay flow, ending in an image-match preview.
+        With `on_use` set, "Use This" calls on_use(filename, region, confidence)
+        and shows a Confidence field (pre-filled from `default_confidence`)
+        instead of the default behavior of staging the step's own cooldown
+        check into self.step_ready_* (used for Add/Recalibrate Condition)."""
         messagebox.showinfo(
             "Calibrate image match",
             "After you click OK, the bot window will hide.\n\n"
@@ -769,20 +854,21 @@ class App(tk.Tk):
             "then click-drag a small rectangle tightly around just that icon and "
             "release the mouse button.\n\nPress Escape at any time to cancel.")
         self.withdraw()
-        self.after(150, self._open_region_capture_overlay)
+        self.after(150, lambda: self._open_region_capture_overlay(on_use, default_confidence))
 
-    def _open_region_capture_overlay(self):
-        RegionCaptureOverlay(self, on_done=self._on_image_region_captured)
+    def _open_region_capture_overlay(self, on_use=None, default_confidence=0.90):
+        RegionCaptureOverlay(
+            self, on_done=lambda region: self._on_image_region_captured(region, on_use, default_confidence))
 
-    def _on_image_region_captured(self, region):
+    def _on_image_region_captured(self, region, on_use=None, default_confidence=0.90):
         if region is None:
             self.deiconify()
             return
         # Let the overlay's own window fully disappear/repaint first, so the
         # captured template isn't tinted by our own semi-transparent gray overlay.
-        self.after(200, lambda: self._take_image_match_screenshot(region))
+        self.after(200, lambda: self._take_image_match_screenshot(region, on_use, default_confidence))
 
-    def _take_image_match_screenshot(self, region):
+    def _take_image_match_screenshot(self, region, on_use=None, default_confidence=0.90):
         filename = templates.new_template_filename()
         path = templates.template_path(filename)
         try:
@@ -793,9 +879,9 @@ class App(tk.Tk):
             messagebox.showerror("Calibration failed", f"Could not capture the region:\n{e}")
             return
         self.deiconify()
-        self._show_image_match_preview(filename, region)
+        self._show_image_match_preview(filename, region, on_use, default_confidence)
 
-    def _show_image_match_preview(self, filename, region):
+    def _show_image_match_preview(self, filename, region, on_use=None, default_confidence=0.90):
         preview = tk.Toplevel(self)
         preview.title("Confirm image match")
         preview.transient(self)
@@ -810,10 +896,27 @@ class App(tk.Tk):
         ttk.Label(preview, image=image).pack(padx=8, pady=8)
         ttk.Label(preview, text=f"{region[2]} x {region[3]} px at ({region[0]}, {region[1]})").pack()
 
+        confidence_var = None
+        if on_use is not None:
+            conf_row = ttk.Frame(preview)
+            conf_row.pack(pady=(4, 0))
+            ttk.Label(conf_row, text="Confidence").pack(side="left", padx=(0, 4))
+            confidence_var = tk.StringVar(value=f"{default_confidence:.2f}")
+            ttk.Entry(conf_row, textvariable=confidence_var, width=5).pack(side="left")
+
         btns = ttk.Frame(preview, padding=8)
-        btns.pack()
+        btns.pack(pady=(4, 0))
 
         def use_this():
+            if on_use is not None:
+                try:
+                    confidence = float(confidence_var.get())
+                except ValueError:
+                    messagebox.showerror("Invalid confidence", "Confidence must be a decimal (e.g. 0.9).")
+                    return
+                preview.destroy()
+                on_use(filename, region, confidence)
+                return
             # Deliberately does NOT delete any previously-calibrated file for this
             # step -- that file may still be referenced by a committed Step until
             # "Update Selected"/"Save Rotation" runs. Orphans are cleaned up by the
@@ -829,7 +932,7 @@ class App(tk.Tk):
         def retry():
             templates.delete_template(filename)  # safe: nothing has ever referenced it
             preview.destroy()
-            self._on_image_match_clicked()
+            self._start_image_capture(on_use, default_confidence)
 
         def cancel():
             templates.delete_template(filename)  # safe: same as above
@@ -840,6 +943,10 @@ class App(tk.Tk):
         ttk.Button(btns, text="Cancel", command=cancel).pack(side="left", padx=4)
 
     def _on_pixel_match_clicked(self):
+        self._start_pixel_capture()
+
+    def _start_pixel_capture(self, on_use=None, default_confidence=0.90):
+        """Same shape as _start_image_capture, for the pixel-match flow."""
         messagebox.showinfo(
             "Calibrate pixel match",
             "After you click OK, the bot window will hide.\n\n"
@@ -847,20 +954,21 @@ class App(tk.Tk):
             "then click exactly on the pixel you want to check.\n\n"
             "Press Escape at any time to cancel.")
         self.withdraw()
-        self.after(150, self._open_point_capture_overlay)
+        self.after(150, lambda: self._open_point_capture_overlay(on_use, default_confidence))
 
-    def _open_point_capture_overlay(self):
-        PointCaptureOverlay(self, on_done=self._on_point_captured)
+    def _open_point_capture_overlay(self, on_use=None, default_confidence=0.90):
+        PointCaptureOverlay(
+            self, on_done=lambda point: self._on_point_captured(point, on_use, default_confidence))
 
-    def _on_point_captured(self, point):
+    def _on_point_captured(self, point, on_use=None, default_confidence=0.90):
         if point is None:
             self.deiconify()
             return
         # Let the overlay's own window fully disappear/repaint first, so the
         # sampled color isn't tinted by our own semi-transparent gray overlay.
-        self.after(200, lambda: self._sample_pixel_color(point))
+        self.after(200, lambda: self._sample_pixel_color(point, on_use, default_confidence))
 
-    def _sample_pixel_color(self, point):
+    def _sample_pixel_color(self, point, on_use=None, default_confidence=0.90):
         try:
             color = pyautogui.screenshot(region=(point[0], point[1], 1, 1)).getpixel((0, 0))
         except Exception as e:
@@ -868,9 +976,9 @@ class App(tk.Tk):
             messagebox.showerror("Calibration failed", f"Could not sample the pixel:\n{e}")
             return
         self.deiconify()
-        self._show_pixel_match_preview(point, color)
+        self._show_pixel_match_preview(point, color, on_use, default_confidence)
 
-    def _show_pixel_match_preview(self, point, color):
+    def _show_pixel_match_preview(self, point, color, on_use=None, default_confidence=0.90):
         preview = tk.Toplevel(self)
         preview.title("Confirm pixel match")
         preview.transient(self)
@@ -885,10 +993,27 @@ class App(tk.Tk):
         swatch.create_rectangle(1, 1, 59, 59, fill="#%02x%02x%02x" % color, outline="")
         ttk.Label(preview, text=f"RGB {color} at ({point[0]}, {point[1]})").pack(pady=(0, 8))
 
+        confidence_var = None
+        if on_use is not None:
+            conf_row = ttk.Frame(preview)
+            conf_row.pack(pady=(0, 4))
+            ttk.Label(conf_row, text="Confidence").pack(side="left", padx=(0, 4))
+            confidence_var = tk.StringVar(value=f"{default_confidence:.2f}")
+            ttk.Entry(conf_row, textvariable=confidence_var, width=5).pack(side="left")
+
         btns = ttk.Frame(preview, padding=8)
         btns.pack()
 
         def use_this():
+            if on_use is not None:
+                try:
+                    confidence = float(confidence_var.get())
+                except ValueError:
+                    messagebox.showerror("Invalid confidence", "Confidence must be a decimal (e.g. 0.9).")
+                    return
+                preview.destroy()
+                on_use(point, color, confidence)
+                return
             self.step_ready_match_type = "pixel"
             self.step_ready_pixel_pos = point
             self.step_ready_pixel_color = color
@@ -899,11 +1024,60 @@ class App(tk.Tk):
 
         def retry():
             preview.destroy()
-            self._on_pixel_match_clicked()
+            self._start_pixel_capture(on_use, default_confidence)
 
         ttk.Button(btns, text="Use This", command=use_this).pack(side="left", padx=4)
         ttk.Button(btns, text="Retry", command=retry).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", command=preview.destroy).pack(side="left", padx=4)
+
+    # ---- conditions -----------------------------------------------------
+
+    def _on_add_image_condition_clicked(self):
+        step_idx = self._selected_owning_step_index()
+        if step_idx is None:
+            return
+        self._start_image_capture(on_use=lambda filename, region, confidence: self._add_condition(
+            step_idx, Condition(match_type="image", template=filename, region=region, confidence=confidence)))
+
+    def _on_add_pixel_condition_clicked(self):
+        step_idx = self._selected_owning_step_index()
+        if step_idx is None:
+            return
+        self._start_pixel_capture(on_use=lambda point, color, confidence: self._add_condition(
+            step_idx, Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)))
+
+    def _add_condition(self, step_idx: int, condition: Condition):
+        self.editing_steps[step_idx].conditions.append(condition)
+        self._refresh_steps_tree()
+
+    def _on_tree_double_click(self, _event):
+        """Double-clicking a condition row recalibrates it in place (same
+        capture flow as adding one, but replacing rather than appending).
+        Double-clicking a step row is a no-op -- steps are recalibrated via
+        the Image Match/Pixel Match buttons instead."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None or parsed[1] is None:
+            return
+        step_idx, cond_idx = parsed
+        condition = self.editing_steps[step_idx].conditions[cond_idx]
+
+        def replace(new_condition: Condition):
+            self.editing_steps[step_idx].conditions[cond_idx] = new_condition
+            self._refresh_steps_tree()
+
+        if condition.match_type == "pixel":
+            self._start_pixel_capture(
+                on_use=lambda point, color, confidence: replace(
+                    Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)),
+                default_confidence=condition.confidence)
+        else:
+            self._start_image_capture(
+                on_use=lambda filename, region, confidence: replace(
+                    Condition(match_type="image", template=filename, region=region, confidence=confidence)),
+                default_confidence=condition.confidence)
 
     def _referenced_templates(self) -> set:
         keep = set()
@@ -911,9 +1085,15 @@ class App(tk.Tk):
             for step in rotation.steps:
                 if step.ready_template:
                     keep.add(step.ready_template)
+                for condition in step.conditions:
+                    if condition.template:
+                        keep.add(condition.template)
         for step in self.editing_steps:
             if step.ready_template:
                 keep.add(step.ready_template)
+            for condition in step.conditions:
+                if condition.template:
+                    keep.add(condition.template)
         if self.step_ready_template:
             keep.add(self.step_ready_template)
         return keep
