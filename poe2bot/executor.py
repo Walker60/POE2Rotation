@@ -1,3 +1,4 @@
+import math
 import random
 import threading
 import time
@@ -17,6 +18,8 @@ STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
 STATUS_WAITING_FOCUS = "waiting_focus"
 STATUS_PAUSED = "paused"
+
+_MAX_COLOR_DISTANCE = math.sqrt(3 * 255 ** 2)  # largest possible Euclidean distance between two RGB colors
 
 _template_image_cache = {}   # filename -> grayscale PIL.Image.Image, decoded once and reused
 _thread_local = threading.local()
@@ -67,6 +70,15 @@ def _capture_region(region) -> Image.Image:
 
 
 def _check_ready(step: Step) -> bool:
+    """True if step's calibrated 'ready' state currently matches on screen,
+    dispatching to whichever matching method (image or pixel color) this step
+    is configured to use."""
+    if step.ready_match_type == "pixel":
+        return _check_pixel_ready(step)
+    return _check_image_ready(step)
+
+
+def _check_image_ready(step: Step) -> bool:
     """True if step's calibrated 'ready' template currently matches on screen.
 
     Compares a screenshot of exactly the calibrated region directly against the
@@ -105,6 +117,31 @@ def _check_ready(step: Step) -> bool:
         return mean_diff <= max_allowed_diff
     except Exception as e:
         log.error(f"ready-check for '{step.key}' failed ({type(e).__name__}: {e}); treating as not ready")
+        return False
+
+
+def _check_pixel_ready(step: Step) -> bool:
+    """True if the calibrated pixel's current color is within tolerance of its
+    expected 'ready' color. Much cheaper than image matching (a single 1x1
+    capture, no template file, no per-pixel convolution) for the common case
+    where a skill's readiness shows as a stable color (a border, a glow, a
+    swatch) rather than needing a whole icon comparison.
+
+    `ready_confidence` uses the same 0-1, higher-is-stricter meaning as image
+    matching, mapped onto an equivalent max-allowed Euclidean RGB distance
+    (0.9 default allows roughly 10% of the largest possible color distance).
+    """
+    if not step.ready_pixel_pos or not step.ready_pixel_color:
+        return False
+    try:
+        x, y = step.ready_pixel_pos
+        monitor = {"left": x, "top": y, "width": 1, "height": 1}
+        current = tuple(_screen_capture().grab(monitor).rgb)
+        distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(current, step.ready_pixel_color)))
+        max_allowed_distance = (1 - step.ready_confidence) * _MAX_COLOR_DISTANCE
+        return distance <= max_allowed_distance
+    except Exception as e:
+        log.error(f"pixel ready-check for '{step.key}' failed ({type(e).__name__}: {e}); treating as not ready")
         return False
 
 
@@ -287,7 +324,7 @@ class RotationRunner:
         change). Otherwise polls _check_ready until it matches or ready_timeout_ms
         elapses, sleeping cooperatively (stop/panic returns immediately) between
         polls -- same cancellation idiom as _wait_for_focus_or_stop/_sleep_delay."""
-        if not step.ready_template:
+        if not step.has_ready_check():
             return True
         deadline = time.perf_counter() + step.ready_timeout_ms / 1000
         while not _check_ready(step):

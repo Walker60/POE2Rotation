@@ -46,12 +46,25 @@ seem to work at all, try running from an elevated terminal first to rule this ou
 
 ## Cooldown-gated steps (optional, per step)
 
-Any step can optionally wait for a calibrated "ready" icon to appear on screen
-before firing its key, instead of firing blind on a fixed delay. In the step
-editor, click **Calibrate...**: the window hides, drag a small rectangle tightly
-around the skill's icon while it's off cooldown, then confirm the capture. If the
-icon doesn't reappear within the step's Timeout, that cast is skipped (logged as a
-warning) and the rotation moves on — it never fires blind and never hangs.
+Any step can optionally wait for a calibrated "ready" signal on screen before
+firing its key, instead of firing blind on a fixed delay. There are two ways to
+calibrate this, and a step uses exactly one at a time:
+
+- **Image Match...** — the window hides, drag a small rectangle tightly around
+  the skill's icon while it's off cooldown, then confirm the capture. Best when
+  the icon's whole appearance (shape, highlight, etc.) changes between ready and
+  on-cooldown.
+- **Pixel Match...** — the window hides, click exactly on a single pixel that's
+  a distinct, reliable color when the skill is ready (e.g. a bright border pixel
+  on the icon), then confirm the sampled color. Cheaper than an image match and
+  handy when a whole-icon capture isn't needed — one pixel read and compare is
+  enough to tell ready from not-ready.
+
+Whichever you calibrate last is the one that's active for that step; switching
+from one to the other replaces the previous calibration rather than combining
+them. If the ready signal doesn't reappear within the step's Timeout, that cast
+is skipped (logged as a warning) and the rotation moves on — it never fires
+blind and never hangs.
 
 **Timeout is a quick "is it ready right now?" check, not a wait-for-cooldown
 timer.** The bot blocks the *entire* rotation for up to Timeout milliseconds on
@@ -63,17 +76,20 @@ is enough time to absorb normal check jitter without noticeably delaying the res
 of the rotation; only raise it for a specific step if you'd genuinely rather wait
 a bit than skip that particular cast.
 
-**Matching is a direct comparison against exactly the calibrated region, not a
-search.** A ready-check takes a screenshot of precisely the region you drew
-during calibration and compares it directly against the saved template (mean
-pixel difference, scaled by the Confidence field — higher Confidence demands a
-closer match) — it does not search elsewhere on screen for the icon. This is
-deliberately cheap: no sliding-window matching, so check speed doesn't scale
+**Matching is a direct comparison against exactly the calibrated spot, not a
+search.** An image-match check takes a screenshot of precisely the region you
+drew during calibration and compares it directly against the saved template
+(mean pixel difference, scaled by the Confidence field — higher Confidence
+demands a closer match). A pixel-match check reads the single calibrated pixel
+and compares its color to the saved color (Euclidean RGB distance, scaled by
+the same Confidence field), which is cheaper still since there's no image to
+decode or diff. Neither mode searches elsewhere on screen for the icon — this
+is deliberately cheap: no sliding-window matching, so check speed doesn't scale
 with region size the way it used to, and a single check can no longer blow past
-a very low Timeout on its own. The trade-off is that it assumes the icon is
-still exactly where it was when calibrated — if the game window moves, resizes,
-or the UI scale changes afterward, the check will stop matching (never crash,
-it'll just always read as "not ready") and that step needs recalibrating.
+a very low Timeout on its own. The trade-off is that both assume the icon/pixel
+is still exactly where it was when calibrated — if the game window moves,
+resizes, or the UI scale changes afterward, the check will stop matching (never
+crash, it'll just always read as "not ready") and that step needs recalibrating.
 
 **Screenshots go through `mss`, not `pyautogui`.** On Windows, `pyautogui`
 (and even Pillow's own `ImageGrab.grab()` used directly) always captures the
@@ -83,14 +99,16 @@ real, avoidable cost that scales with your monitor's resolution. `mss`
 captures only the requested rectangle directly, so this is what actually makes
 repeated checks fast rather than just a smaller region or a cheaper threshold.
 
-Calibration screenshots are stored as individual PNGs under `templates/`, named
+Image-match calibrations are stored as individual PNGs under `templates/`, named
 by a random ID rather than the skill name, so rotations stay portable if you
 rename or reorder things. Rotation JSON files reference these by filename only —
 if you copy a `rotations/*.json` file to another machine or folder, copy its
 matching `templates/*.png` file(s) too, or that step's cooldown check will simply
 log an error and skip firing (never crash) until recalibrated. Files no longer
 referenced by any saved or in-progress rotation are cleaned up automatically on
-save, delete, and app startup.
+save, delete, and app startup. Pixel-match calibrations don't need any of this —
+the point and color are just numbers stored directly in the rotation's JSON, so
+they're already portable with no matching file to copy.
 
 Known limitation: calibration only supports the primary monitor.
 

@@ -97,6 +97,45 @@ class RegionCaptureOverlay(tk.Toplevel):
         callback(region)
 
 
+class PointCaptureOverlay(tk.Toplevel):
+    """Fullscreen, borderless, semi-transparent single-click point picker.
+
+    Calls on_done(point) where point is (x, y) in absolute screen pixels, or
+    on_done(None) if cancelled (Escape). Primary monitor only, same limitation
+    as RegionCaptureOverlay.
+    """
+
+    def __init__(self, master, on_done):
+        super().__init__(master)
+        self.on_done = on_done
+
+        self.overrideredirect(True)
+        self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+        self.attributes("-alpha", 0.25)
+        self.attributes("-topmost", True)
+        self.configure(bg="gray")
+
+        self.canvas = tk.Canvas(self, cursor="cross", bg="gray", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+
+        self.canvas.bind("<ButtonRelease-1>", self._on_click)
+        self.bind("<Escape>", self._on_cancel)
+
+        self.grab_set()
+        self.focus_force()
+
+    def _on_click(self, event):
+        self._finish((event.x_root, event.y_root))
+
+    def _on_cancel(self, _event):
+        self._finish(None)
+
+    def _finish(self, point):
+        callback = self.on_done
+        self.destroy()
+        callback(point)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -119,8 +158,11 @@ class App(tk.Tk):
         self.pending_cancel_key = None        # cancel key chosen in this edit session (may be unchanged)
         self.pending_reset_key = None         # reset key chosen in this edit session (may be unchanged)
         self.pending_pause_key = None         # pause key chosen in this edit session (may be unchanged)
+        self.step_ready_match_type = "image"  # "image" or "pixel" -- which method the step being edited uses
         self.step_ready_template = None       # cooldown-check filename pending for the step being edited
         self.step_ready_region = None         # (left, top, width, height) absolute screen coords, or None
+        self.step_ready_pixel_pos = None      # (x, y) absolute screen coords, for pixel-match mode
+        self.step_ready_pixel_color = None    # (r, g, b) expected "ready" color, for pixel-match mode
 
         self._build_widgets()
         self._load_rotations_from_disk()
@@ -286,12 +328,15 @@ class App(tk.Tk):
 
         ready_row = ttk.Frame(right)
         ready_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(ready_row, textvariable=self.step_ready_status_var, width=24).pack(side="left")
+        ttk.Label(ready_row, textvariable=self.step_ready_status_var, width=28).pack(side="left")
         ttk.Label(ready_row, text="Timeout (ms)").pack(side="left", padx=(8, 2))
         ttk.Entry(ready_row, textvariable=self.step_ready_timeout_var, width=6).pack(side="left")
         ttk.Label(ready_row, text="Confidence").pack(side="left", padx=(8, 2))
         ttk.Entry(ready_row, textvariable=self.step_ready_confidence_var, width=5).pack(side="left")
-        ttk.Button(ready_row, text="Calibrate...", command=self._on_calibrate_clicked).pack(side="left", padx=(8, 4))
+        ttk.Button(ready_row, text="Image Match...", command=self._on_image_match_clicked).pack(
+            side="left", padx=(8, 4))
+        ttk.Button(ready_row, text="Pixel Match...", command=self._on_pixel_match_clicked).pack(
+            side="left", padx=(0, 4))
         ttk.Button(ready_row, text="Clear", command=self._clear_ready_check).pack(side="left")
 
         step_btns = ttk.Frame(right)
@@ -536,16 +581,22 @@ class App(tk.Tk):
         return f"{base_name} {n}"
 
     def _reset_ready_form(self):
+        self.step_ready_match_type = "image"
         self.step_ready_template = None
         self.step_ready_region = None
+        self.step_ready_pixel_pos = None
+        self.step_ready_pixel_color = None
         self.step_ready_timeout_var.set("300")
         self.step_ready_confidence_var.set("0.90")
         self._refresh_ready_status()
 
     def _refresh_ready_status(self):
-        if self.step_ready_template and self.step_ready_region:
+        if self.step_ready_match_type == "pixel" and self.step_ready_pixel_color:
+            r, g, b = self.step_ready_pixel_color
+            self.step_ready_status_var.set(f"Pixel: RGB({r},{g},{b})")
+        elif self.step_ready_match_type == "image" and self.step_ready_template and self.step_ready_region:
             w, h = self.step_ready_region[2], self.step_ready_region[3]
-            self.step_ready_status_var.set(f"Calibrated ({w}x{h})")
+            self.step_ready_status_var.set(f"Image: {w}x{h}")
         else:
             self.step_ready_status_var.set("No cooldown check")
 
@@ -590,8 +641,11 @@ class App(tk.Tk):
         self.step_jitter_var.set(str(step.jitter_ms))
         self.step_hold_var.set(str(step.hold_ms))
         self.step_hold_jitter_var.set(str(step.hold_jitter_ms))
+        self.step_ready_match_type = step.ready_match_type
         self.step_ready_template = step.ready_template
         self.step_ready_region = step.ready_region
+        self.step_ready_pixel_pos = step.ready_pixel_pos
+        self.step_ready_pixel_color = step.ready_pixel_color
         self.step_ready_timeout_var.set(str(step.ready_timeout_ms))
         self.step_ready_confidence_var.set(f"{step.ready_confidence:.2f}")
         self._refresh_ready_status()
@@ -617,8 +671,11 @@ class App(tk.Tk):
             jitter_ms=jitter,
             hold_ms=hold,
             hold_jitter_ms=hold_jitter,
+            ready_match_type=self.step_ready_match_type,
             ready_template=self.step_ready_template,
             ready_region=self.step_ready_region,
+            ready_pixel_pos=self.step_ready_pixel_pos,
+            ready_pixel_color=self.step_ready_pixel_color,
             ready_confidence=confidence,
             ready_timeout_ms=timeout,
         )
@@ -697,32 +754,35 @@ class App(tk.Tk):
     # ---- cooldown-check calibration -----------------------------------------
 
     def _clear_ready_check(self):
+        self.step_ready_match_type = "image"
         self.step_ready_template = None
         self.step_ready_region = None
+        self.step_ready_pixel_pos = None
+        self.step_ready_pixel_color = None
         self._refresh_ready_status()
 
-    def _on_calibrate_clicked(self):
+    def _on_image_match_clicked(self):
         messagebox.showinfo(
-            "Calibrate cooldown check",
+            "Calibrate image match",
             "After you click OK, the bot window will hide.\n\n"
             "Make sure the skill's icon is visible and OFF cooldown (ready to cast), "
             "then click-drag a small rectangle tightly around just that icon and "
             "release the mouse button.\n\nPress Escape at any time to cancel.")
         self.withdraw()
-        self.after(150, self._open_capture_overlay)
+        self.after(150, self._open_region_capture_overlay)
 
-    def _open_capture_overlay(self):
-        RegionCaptureOverlay(self, on_done=self._on_region_captured)
+    def _open_region_capture_overlay(self):
+        RegionCaptureOverlay(self, on_done=self._on_image_region_captured)
 
-    def _on_region_captured(self, region):
+    def _on_image_region_captured(self, region):
         if region is None:
             self.deiconify()
             return
         # Let the overlay's own window fully disappear/repaint first, so the
         # captured template isn't tinted by our own semi-transparent gray overlay.
-        self.after(200, lambda: self._take_calibration_screenshot(region))
+        self.after(200, lambda: self._take_image_match_screenshot(region))
 
-    def _take_calibration_screenshot(self, region):
+    def _take_image_match_screenshot(self, region):
         filename = templates.new_template_filename()
         path = templates.template_path(filename)
         try:
@@ -733,11 +793,11 @@ class App(tk.Tk):
             messagebox.showerror("Calibration failed", f"Could not capture the region:\n{e}")
             return
         self.deiconify()
-        self._show_calibration_preview(filename, region)
+        self._show_image_match_preview(filename, region)
 
-    def _show_calibration_preview(self, filename, region):
+    def _show_image_match_preview(self, filename, region):
         preview = tk.Toplevel(self)
-        preview.title("Confirm calibration")
+        preview.title("Confirm image match")
         preview.transient(self)
         preview.grab_set()
         preview.resizable(False, False)
@@ -758,15 +818,18 @@ class App(tk.Tk):
             # step -- that file may still be referenced by a committed Step until
             # "Update Selected"/"Save Rotation" runs. Orphans are cleaned up by the
             # periodic sweep instead (see _sweep_templates).
+            self.step_ready_match_type = "image"
             self.step_ready_template = filename
             self.step_ready_region = region
+            self.step_ready_pixel_pos = None
+            self.step_ready_pixel_color = None
             self._refresh_ready_status()
             preview.destroy()
 
         def retry():
             templates.delete_template(filename)  # safe: nothing has ever referenced it
             preview.destroy()
-            self._on_calibrate_clicked()
+            self._on_image_match_clicked()
 
         def cancel():
             templates.delete_template(filename)  # safe: same as above
@@ -775,6 +838,72 @@ class App(tk.Tk):
         ttk.Button(btns, text="Use This", command=use_this).pack(side="left", padx=4)
         ttk.Button(btns, text="Retry", command=retry).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", command=cancel).pack(side="left", padx=4)
+
+    def _on_pixel_match_clicked(self):
+        messagebox.showinfo(
+            "Calibrate pixel match",
+            "After you click OK, the bot window will hide.\n\n"
+            "Make sure the skill's icon is visible and OFF cooldown (ready to cast), "
+            "then click exactly on the pixel you want to check.\n\n"
+            "Press Escape at any time to cancel.")
+        self.withdraw()
+        self.after(150, self._open_point_capture_overlay)
+
+    def _open_point_capture_overlay(self):
+        PointCaptureOverlay(self, on_done=self._on_point_captured)
+
+    def _on_point_captured(self, point):
+        if point is None:
+            self.deiconify()
+            return
+        # Let the overlay's own window fully disappear/repaint first, so the
+        # sampled color isn't tinted by our own semi-transparent gray overlay.
+        self.after(200, lambda: self._sample_pixel_color(point))
+
+    def _sample_pixel_color(self, point):
+        try:
+            color = pyautogui.screenshot(region=(point[0], point[1], 1, 1)).getpixel((0, 0))
+        except Exception as e:
+            self.deiconify()
+            messagebox.showerror("Calibration failed", f"Could not sample the pixel:\n{e}")
+            return
+        self.deiconify()
+        self._show_pixel_match_preview(point, color)
+
+    def _show_pixel_match_preview(self, point, color):
+        preview = tk.Toplevel(self)
+        preview.title("Confirm pixel match")
+        preview.transient(self)
+        preview.grab_set()
+        preview.resizable(False, False)
+        bg = ttk.Style().lookup("TFrame", "background")
+        if bg:
+            preview.configure(bg=bg)
+
+        swatch = tk.Canvas(preview, width=60, height=60, highlightthickness=1)
+        swatch.pack(padx=8, pady=8)
+        swatch.create_rectangle(1, 1, 59, 59, fill="#%02x%02x%02x" % color, outline="")
+        ttk.Label(preview, text=f"RGB {color} at ({point[0]}, {point[1]})").pack(pady=(0, 8))
+
+        btns = ttk.Frame(preview, padding=8)
+        btns.pack()
+
+        def use_this():
+            self.step_ready_match_type = "pixel"
+            self.step_ready_pixel_pos = point
+            self.step_ready_pixel_color = color
+            self.step_ready_template = None
+            self.step_ready_region = None
+            self._refresh_ready_status()
+            preview.destroy()
+
+        def retry():
+            preview.destroy()
+            self._on_pixel_match_clicked()
+
+        ttk.Button(btns, text="Use This", command=use_this).pack(side="left", padx=4)
+        ttk.Button(btns, text="Retry", command=retry).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancel", command=preview.destroy).pack(side="left", padx=4)
 
     def _referenced_templates(self) -> set:
         keep = set()

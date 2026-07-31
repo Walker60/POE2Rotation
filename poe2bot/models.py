@@ -8,6 +8,7 @@ from poe2bot import templates
 
 VALID_MODES = ("once", "loop")
 VALID_PAUSE_MODES = ("duration", "toggle")
+VALID_READY_MATCH_TYPES = ("image", "pixel")
 
 
 @dataclass
@@ -18,14 +19,26 @@ class Step:
     jitter_ms: int = 0
     hold_ms: int = 0
     hold_jitter_ms: int = 0   # uniform random +/- jitter applied to hold_ms each time (only when hold_ms > 0)
+    ready_match_type: str = "image"                             # "image" or "pixel" -- which method below is active
     ready_template: Optional[str] = None                       # filename only, resolved via templates.template_path()
-    ready_region: Optional[Tuple[int, int, int, int]] = None   # (left, top, width, height), absolute screen px
+    ready_region: Optional[Tuple[int, int, int, int]] = None   # (left, top, width, height), absolute screen px -- image mode
+    ready_pixel_pos: Optional[Tuple[int, int]] = None           # (x, y) absolute screen px -- pixel mode
+    ready_pixel_color: Optional[Tuple[int, int, int]] = None    # expected (r, g, b) when "ready" -- pixel mode
     ready_confidence: float = 0.9
     ready_timeout_ms: int = 300
+
+    def has_ready_check(self) -> bool:
+        """True if this step has a cooldown check configured, via whichever
+        method ready_match_type currently points at."""
+        if self.ready_match_type == "pixel":
+            return self.ready_pixel_color is not None
+        return bool(self.ready_template)
 
     @staticmethod
     def from_dict(data: dict) -> "Step":
         region = data.get("ready_region")
+        pixel_pos = data.get("ready_pixel_pos")
+        pixel_color = data.get("ready_pixel_color")
         return Step(
             key=data["key"],
             name=data.get("name", ""),
@@ -33,8 +46,11 @@ class Step:
             jitter_ms=int(data.get("jitter_ms", 0)),
             hold_ms=int(data.get("hold_ms", 0)),
             hold_jitter_ms=int(data.get("hold_jitter_ms", 0)),
+            ready_match_type=data.get("ready_match_type", "image"),
             ready_template=data.get("ready_template"),
             ready_region=tuple(region) if region is not None else None,  # JSON round-trips tuples as lists
+            ready_pixel_pos=tuple(pixel_pos) if pixel_pos is not None else None,
+            ready_pixel_color=tuple(pixel_color) if pixel_color is not None else None,
             ready_confidence=float(data.get("ready_confidence", 0.9)),
             ready_timeout_ms=int(data.get("ready_timeout_ms", 300)),
         )
@@ -155,14 +171,23 @@ def validate_rotation(rotation: Rotation) -> List[str]:
         if step.hold_jitter_ms < 0:
             problems.append(f"Step {i}: hold_jitter_ms cannot be negative.")
 
-        if step.ready_template:
-            if not (isinstance(step.ready_region, tuple) and len(step.ready_region) == 4):
-                problems.append(f"Step {i}: has a cooldown check but no calibrated region (recalibrate).")
-            if not os.path.isfile(templates.template_path(step.ready_template)):
-                problems.append(f"Step {i}: calibrated template image is missing on disk (recalibrate).")
+        if step.ready_match_type not in VALID_READY_MATCH_TYPES:
+            problems.append(f"Step {i}: ready_match_type must be one of {VALID_READY_MATCH_TYPES}.")
+
+        if step.has_ready_check():
             if not (0 < step.ready_confidence <= 1):
                 problems.append(f"Step {i}: confidence must be greater than 0 and at most 1.")
             if step.ready_timeout_ms < 0:
                 problems.append(f"Step {i}: ready_timeout_ms cannot be negative.")
+            if step.ready_match_type == "pixel":
+                if not (isinstance(step.ready_pixel_pos, tuple) and len(step.ready_pixel_pos) == 2):
+                    problems.append(f"Step {i}: has a pixel cooldown check but no calibrated point (recalibrate).")
+                if not (isinstance(step.ready_pixel_color, tuple) and len(step.ready_pixel_color) == 3):
+                    problems.append(f"Step {i}: has a pixel cooldown check but no calibrated color (recalibrate).")
+            else:
+                if not (isinstance(step.ready_region, tuple) and len(step.ready_region) == 4):
+                    problems.append(f"Step {i}: has an image cooldown check but no calibrated region (recalibrate).")
+                if not step.ready_template or not os.path.isfile(templates.template_path(step.ready_template)):
+                    problems.append(f"Step {i}: calibrated template image is missing on disk (recalibrate).")
 
     return problems
