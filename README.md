@@ -143,6 +143,15 @@ persist across further edits to the step list.
   nothing; steps are still recalibrated via Image Match/Pixel Match.
 - Select a condition and click **Remove Selected** to delete just that
   condition, leaving the step and its other conditions untouched.
+- Select a condition, type into the **Name** field, and click **Rename
+  Selected Condition** to give it a label (e.g. "Bleeding") — it's shown in
+  the list instead of the auto-generated "Pixel RGB(...)"/"Image WxH"
+  description, purely cosmetic, and survives recalibration.
+- Select a condition and click **Move Up**/**Move Down** (in Step Actions) to
+  reorder it within its own step — the same two buttons used to reorder
+  steps, applied to whichever kind of row is currently selected. Reordering
+  conditions is cosmetic only (all of a step's conditions are still AND'd
+  together regardless of order).
 
 Copying a step (Copy Selected, or copying a whole rotation) carries its
 conditions along with it. Conditions with an image-match template participate
@@ -186,7 +195,11 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    tying the wait to any particular skill. It shows up in the list as "Sleep"
    unless you give it its own Name. You can also turn any existing step into a
    sleep by clearing its Key field and clicking Update Selected, or turn a sleep
-   back into a real step by typing a key into it.
+   back into a real step by typing a key into it. **Save Rotation** always
+   applies whatever's currently in the step form to the selected step first, as
+   if Update Selected had just been clicked — so editing a step's fields (or
+   recalibrating its cooldown check) and going straight to Save Rotation is
+   enough; Update Selected is only for applying an edit without saving yet.
 2. Click **Bind Hotkey...** and either press a keyboard key or click a mouse button
    to trigger this rotation, then **Save Rotation**. Left/middle/right click and the
    two extra side buttons (mouse 4/5) are all supported.

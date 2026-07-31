@@ -18,6 +18,7 @@ class Condition:
     unlike the step's own cooldown check -- a condition is either true right
     now or the cast is skipped this pass)."""
     match_type: str = "image"                                    # "image" or "pixel"
+    name: str = ""   # optional display label (e.g. "Bleeding"); falls back to an auto description in the GUI if blank
     template: Optional[str] = None                              # filename only, resolved via templates.template_path()
     region: Optional[Tuple[int, int, int, int]] = None          # (left, top, width, height), absolute screen px -- image mode
     pixel_pos: Optional[Tuple[int, int]] = None                  # (x, y) absolute screen px -- pixel mode
@@ -36,6 +37,7 @@ class Condition:
         pixel_color = data.get("pixel_color")
         return Condition(
             match_type=data.get("match_type", "image"),
+            name=data.get("name", ""),
             template=data.get("template"),
             region=tuple(region) if region is not None else None,
             pixel_pos=tuple(pixel_pos) if pixel_pos is not None else None,

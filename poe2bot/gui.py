@@ -308,7 +308,11 @@ class App(tk.Tk):
         self.tree.bind("<<TreeviewSelect>>", self._on_select_step)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
-        edit_row = ttk.Frame(right)
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(0, 8))
+
+        step_fields_group = ttk.LabelFrame(right, text="Selected Step", padding=6)
+        step_fields_group.pack(fill="x", pady=(0, 6))
+        edit_row = ttk.Frame(step_fields_group)
         edit_row.pack(fill="x")
         self.step_name_var = tk.StringVar()
         self.step_key_var = tk.StringVar()
@@ -329,8 +333,10 @@ class App(tk.Tk):
         self.step_ready_confidence_var = tk.StringVar(value="0.90")
         self.step_ready_status_var = tk.StringVar(value="No cooldown check")
 
-        ready_row = ttk.Frame(right)
-        ready_row.pack(fill="x", pady=(0, 4))
+        cooldown_group = ttk.LabelFrame(right, text="Cooldown Check", padding=6)
+        cooldown_group.pack(fill="x", pady=(0, 6))
+        ready_row = ttk.Frame(cooldown_group)
+        ready_row.pack(fill="x")
         ttk.Label(ready_row, textvariable=self.step_ready_status_var, width=28).pack(side="left")
         ttk.Label(ready_row, text="Timeout (ms)").pack(side="left", padx=(8, 2))
         ttk.Entry(ready_row, textvariable=self.step_ready_timeout_var, width=6).pack(side="left")
@@ -342,8 +348,32 @@ class App(tk.Tk):
             side="left", padx=(0, 4))
         ttk.Button(ready_row, text="Clear", command=self._clear_ready_check).pack(side="left")
 
-        step_btns = ttk.Frame(right)
-        step_btns.pack(fill="x", pady=4)
+        conditions_group = ttk.LabelFrame(right, text="Conditions", padding=6)
+        conditions_group.pack(fill="x", pady=(0, 6))
+        condition_btns = ttk.Frame(conditions_group)
+        condition_btns.pack(fill="x")
+        ttk.Button(condition_btns, text="Add Image Condition...",
+                   command=self._on_add_image_condition_clicked).pack(side="left", padx=(0, 4))
+        ttk.Button(condition_btns, text="Add Pixel Condition...",
+                   command=self._on_add_pixel_condition_clicked).pack(side="left", padx=(0, 4))
+        ttk.Label(condition_btns,
+                  text="(double-click a condition in the list to recalibrate it;"
+                       " use Move Up/Move Down in Step Actions to reorder it)",
+                  foreground="gray").pack(side="left", padx=(8, 0))
+
+        condition_name_row = ttk.Frame(conditions_group)
+        condition_name_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(condition_name_row, text="Name:").pack(side="left")
+        self.condition_name_var = tk.StringVar()
+        ttk.Entry(condition_name_row, textvariable=self.condition_name_var, width=20).pack(
+            side="left", padx=(2, 8))
+        ttk.Button(condition_name_row, text="Rename Selected Condition",
+                   command=self._on_rename_condition_clicked).pack(side="left")
+
+        step_actions_group = ttk.LabelFrame(right, text="Step Actions", padding=6)
+        step_actions_group.pack(fill="x", pady=(0, 6))
+        step_btns = ttk.Frame(step_actions_group)
+        step_btns.pack(fill="x")
         for text, cmd in (
             ("Add Step", self._add_step), ("Add Sleep", self._add_sleep_step),
             ("Copy Selected", self._copy_selected_step),
@@ -353,18 +383,7 @@ class App(tk.Tk):
         ):
             ttk.Button(step_btns, text=text, command=cmd).pack(side="left", padx=(0, 4))
 
-        condition_btns = ttk.Frame(right)
-        condition_btns.pack(fill="x", pady=(0, 4))
-        ttk.Label(condition_btns, text="Conditions:").pack(side="left", padx=(0, 4))
-        ttk.Button(condition_btns, text="Add Image Condition...",
-                   command=self._on_add_image_condition_clicked).pack(side="left", padx=(0, 4))
-        ttk.Button(condition_btns, text="Add Pixel Condition...",
-                   command=self._on_add_pixel_condition_clicked).pack(side="left", padx=(0, 4))
-        ttk.Label(condition_btns,
-                  text="(double-click a condition to recalibrate it)",
-                  foreground="gray").pack(side="left", padx=(8, 0))
-
-        ttk.Button(right, text="Save Rotation", command=self._save_rotation).pack(anchor="e", pady=(8, 0))
+        ttk.Button(right, text="Save Rotation", command=self._save_rotation).pack(anchor="e", pady=(4, 0))
 
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(side="bottom", fill="x")
@@ -652,6 +671,8 @@ class App(tk.Tk):
 
     @staticmethod
     def _condition_summary(condition) -> str:
+        if condition.name:
+            return f"Condition: {condition.name}"
         if condition.match_type == "pixel" and condition.pixel_color:
             r, g, b = condition.pixel_color
             return f"Condition: Pixel RGB({r},{g},{b})"
@@ -671,19 +692,17 @@ class App(tk.Tk):
             return int(parts[1]), int(parts[3])
         return None
 
-    def _selected_step_index(self, silent=False):
-        """For actions that only make sense on a whole step (Copy/Update/Move).
-        Returns None if nothing or a condition is selected -- silently unless
-        `silent` is False, in which case an info box explains why."""
+    def _selected_step_index(self):
+        """For actions that only make sense on a whole step (Copy/Update).
+        Returns None (with an info box explaining why) if nothing or a
+        condition is selected."""
         selection = self.tree.selection()
         if not selection:
-            if not silent:
-                messagebox.showinfo("No step selected", "Select a step in the list first.")
+            messagebox.showinfo("No step selected", "Select a step in the list first.")
             return None
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None or parsed[1] is not None:
-            if not silent:
-                messagebox.showinfo("Select a step", "Select a step (not a condition) for this action.")
+            messagebox.showinfo("Select a step", "Select a step (not a condition) for this action.")
             return None
         return parsed[0]
 
@@ -707,6 +726,7 @@ class App(tk.Tk):
         if parsed is None:
             return
         step = self.editing_steps[parsed[0]]
+        self.condition_name_var.set(step.conditions[parsed[1]].name if parsed[1] is not None else "")
         self.step_name_var.set(step.name)
         self.step_key_var.set(step.key)
         self.step_delay_var.set(str(step.delay_ms))
@@ -813,20 +833,54 @@ class App(tk.Tk):
         self._refresh_steps_tree()
 
     def _move_step_up(self):
-        i = self._selected_step_index(silent=True)
-        if i is None or i == 0:
+        """Moves the selected step, or -- if a condition is selected instead --
+        that condition up within its own step's conditions list."""
+        selection = self.tree.selection()
+        if not selection:
             return
-        self.editing_steps[i - 1], self.editing_steps[i] = self.editing_steps[i], self.editing_steps[i - 1]
-        self._refresh_steps_tree()
-        self.tree.selection_set(f"step-{i - 1}")
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None:
+            return
+        step_idx, cond_idx = parsed
+        if cond_idx is None:
+            if step_idx == 0:
+                return
+            self.editing_steps[step_idx - 1], self.editing_steps[step_idx] = \
+                self.editing_steps[step_idx], self.editing_steps[step_idx - 1]
+            self._refresh_steps_tree()
+            self.tree.selection_set(f"step-{step_idx - 1}")
+        else:
+            if cond_idx == 0:
+                return
+            conditions = self.editing_steps[step_idx].conditions
+            conditions[cond_idx - 1], conditions[cond_idx] = conditions[cond_idx], conditions[cond_idx - 1]
+            self._refresh_steps_tree()
+            self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx - 1}")
 
     def _move_step_down(self):
-        i = self._selected_step_index(silent=True)
-        if i is None or i >= len(self.editing_steps) - 1:
+        """Moves the selected step, or -- if a condition is selected instead --
+        that condition down within its own step's conditions list."""
+        selection = self.tree.selection()
+        if not selection:
             return
-        self.editing_steps[i + 1], self.editing_steps[i] = self.editing_steps[i], self.editing_steps[i + 1]
-        self._refresh_steps_tree()
-        self.tree.selection_set(f"step-{i + 1}")
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None:
+            return
+        step_idx, cond_idx = parsed
+        if cond_idx is None:
+            if step_idx >= len(self.editing_steps) - 1:
+                return
+            self.editing_steps[step_idx + 1], self.editing_steps[step_idx] = \
+                self.editing_steps[step_idx], self.editing_steps[step_idx + 1]
+            self._refresh_steps_tree()
+            self.tree.selection_set(f"step-{step_idx + 1}")
+        else:
+            conditions = self.editing_steps[step_idx].conditions
+            if cond_idx >= len(conditions) - 1:
+                return
+            conditions[cond_idx + 1], conditions[cond_idx] = conditions[cond_idx], conditions[cond_idx + 1]
+            self._refresh_steps_tree()
+            self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx + 1}")
 
     # ---- cooldown-check calibration -----------------------------------------
 
@@ -1050,6 +1104,20 @@ class App(tk.Tk):
         self.editing_steps[step_idx].conditions.append(condition)
         self._refresh_steps_tree()
 
+    def _on_rename_condition_clicked(self):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("No condition selected", "Select a condition in the list first.")
+            return
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None or parsed[1] is None:
+            messagebox.showinfo("Select a condition", "Select a condition (not a step) to rename.")
+            return
+        step_idx, cond_idx = parsed
+        self.editing_steps[step_idx].conditions[cond_idx].name = self.condition_name_var.get().strip()
+        self._refresh_steps_tree()
+        self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx}")
+
     def _on_tree_double_click(self, _event):
         """Double-clicking a condition row recalibrates it in place (same
         capture flow as adding one, but replacing rather than appending).
@@ -1065,6 +1133,7 @@ class App(tk.Tk):
         condition = self.editing_steps[step_idx].conditions[cond_idx]
 
         def replace(new_condition: Condition):
+            new_condition.name = condition.name  # recalibrating shouldn't clear an existing name
             self.editing_steps[step_idx].conditions[cond_idx] = new_condition
             self._refresh_steps_tree()
 
@@ -1202,7 +1271,31 @@ class App(tk.Tk):
 
     # ---- save ---------------------------------------------------------------
 
+    def _apply_pending_step_edits(self) -> bool:
+        """Writes the step-editing form's current contents back into whichever
+        step is selected (or owns the selected condition), as if Update
+        Selected had just been clicked -- so Save Rotation always persists
+        what's currently on screen instead of silently discarding it if the
+        user forgot to click Update Selected first. Returns False (leaving an
+        error box up from _read_step_form) if the form doesn't parse; True if
+        there was nothing to apply (no step selected) or the apply succeeded."""
+        selection = self.tree.selection()
+        if not selection:
+            return True
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None:
+            return True
+        step_idx = parsed[0]
+        step = self._read_step_form(conditions=self.editing_steps[step_idx].conditions)
+        if step is None:
+            return False
+        self.editing_steps[step_idx] = step
+        self._refresh_steps_tree()
+        return True
+
     def _save_rotation(self):
+        if not self._apply_pending_step_edits():
+            return
         name = self.name_var.get().strip()
         try:
             pause_duration_ms = int(self.pause_duration_var.get())
