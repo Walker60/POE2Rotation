@@ -18,6 +18,7 @@ STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
 STATUS_WAITING_FOCUS = "waiting_focus"
 STATUS_PAUSED = "paused"
+STATUS_RESETTING = "resetting"
 
 _MAX_COLOR_DISTANCE = math.sqrt(3 * 255 ** 2)  # largest possible Euclidean distance between two RGB colors
 
@@ -198,8 +199,10 @@ class RotationRunner:
         self._stop_event.set()
 
     def reset(self):
-        """Immediately abandon whatever step is currently in progress and restart
-        this rotation's step sequence from the beginning. No-op if not running.
+        """Immediately abandon whatever step is currently in progress, then
+        restart this rotation's step sequence from the beginning -- after
+        rotation.reset_delay_ms if set (0 = instant, the default; see
+        _wait_reset_delay). No-op if not running.
 
         Implemented by (ab)using the same stop_event every cooperative wait in
         _run_once already watches for instant wakeup -- no new polling needed --
@@ -248,6 +251,8 @@ class RotationRunner:
                     self._reset_requested = False
                     self._stop_event.clear()
                     resume_index = 0
+                    if self.rotation.reset_delay_ms > 0 and not self._wait_reset_delay():
+                        break  # a genuine stop() arrived during the reset delay
                     continue
                 if self._pause_requested:
                     self._pause_requested = False
@@ -289,6 +294,25 @@ class RotationRunner:
             return True
         finally:
             self._paused.clear()
+            self._notify(STATUS_RUNNING)
+
+    def _wait_reset_delay(self) -> bool:
+        """Blocks for rotation.reset_delay_ms before actually restarting from
+        step 1, cooperatively -- stop()/reset()/pause() all wake it instantly
+        via the shared stop_event. Returns True to let _run's own dispatch
+        proceed -- either the delay elapsed normally, or another reset/pause
+        arrived and will be handled the usual way on the next loop iteration
+        -- and False only for a genuine stop() with nothing else pending."""
+        self._notify(STATUS_RESETTING)
+        try:
+            deadline = time.perf_counter() + self.rotation.reset_delay_ms / 1000
+            while (time.perf_counter() < deadline
+                   and not self._reset_requested and not self._pause_requested):
+                remaining = max(0.0, deadline - time.perf_counter())
+                if self._stop_event.wait(timeout=min(0.1, remaining)):
+                    break
+            return self._reset_requested or self._pause_requested or not self._stop_event.is_set()
+        finally:
             self._notify(STATUS_RUNNING)
 
     def _run_once(self, start_index: int = 0) -> bool:

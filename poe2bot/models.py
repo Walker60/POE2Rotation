@@ -100,6 +100,7 @@ class Rotation:
     hotkey: Optional[str] = None
     cancel_key: Optional[str] = None   # e.g. the dodge key -- immediately stops this rotation if running
     reset_key: Optional[str] = None    # immediately restarts this rotation from its first step if running
+    reset_delay_ms: int = 0            # wait this long after a reset before actually firing step 1 again (0 = instant)
     pause_key: Optional[str] = None    # immediately freezes this rotation in place if running (see pause_mode)
     pause_mode: str = "duration"        # "duration" = auto-resume after pause_duration_ms; "toggle" = press again to resume
     pause_duration_ms: int = 1000       # only used when pause_mode == "duration"
@@ -115,6 +116,7 @@ class Rotation:
             "hotkey": self.hotkey,
             "cancel_key": self.cancel_key,
             "reset_key": self.reset_key,
+            "reset_delay_ms": self.reset_delay_ms,
             "pause_key": self.pause_key,
             "pause_mode": self.pause_mode,
             "pause_duration_ms": self.pause_duration_ms,
@@ -129,6 +131,7 @@ class Rotation:
             hotkey=data.get("hotkey"),
             cancel_key=data.get("cancel_key"),
             reset_key=data.get("reset_key"),
+            reset_delay_ms=int(data.get("reset_delay_ms", 0)),
             pause_key=data.get("pause_key"),
             pause_mode=data.get("pause_mode", "duration"),
             pause_duration_ms=int(data.get("pause_duration_ms", 1000)),
@@ -169,6 +172,8 @@ def validate_rotation(rotation: Rotation) -> List[str]:
             problems.append("Reset key cannot be the same as this rotation's own trigger hotkey.")
         if rotation.reset_key == rotation.cancel_key:
             problems.append("Reset key cannot be the same as this rotation's own cancel key.")
+    if rotation.reset_delay_ms < 0:
+        problems.append("Reset delay cannot be negative.")
 
     if rotation.pause_key:
         if rotation.pause_key == rotation.hotkey:

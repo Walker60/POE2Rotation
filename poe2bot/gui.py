@@ -21,6 +21,7 @@ STATUS_LABELS = {
     "running": " (running)",
     "waiting_focus": " (waiting for game focus)",
     "paused": " (paused)",
+    "resetting": " (resetting)",
 }
 
 
@@ -272,7 +273,10 @@ class App(tk.Tk):
             reset_row, text="Bind Reset Key...", command=self._on_bind_reset_clicked)
         self.bind_reset_btn.pack(side="left")
         ttk.Button(reset_row, text="Clear", command=self._on_clear_reset_key).pack(side="left", padx=(4, 0))
-        ttk.Label(reset_row, text="restarts this rotation from step 1 instantly if pressed",
+        ttk.Label(reset_row, text="Delay (ms)").pack(side="left", padx=(8, 2))
+        self.reset_delay_var = tk.StringVar(value="0")
+        ttk.Entry(reset_row, textvariable=self.reset_delay_var, width=6).pack(side="left")
+        ttk.Label(reset_row, text="restarts this rotation from step 1 if pressed, after the delay above",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         pause_row = ttk.Frame(right)
@@ -577,6 +581,7 @@ class App(tk.Tk):
         self.hotkey_label_var.set(display_name(rotation.hotkey))
         self.cancel_key_label_var.set(display_name(rotation.cancel_key))
         self.reset_key_label_var.set(display_name(rotation.reset_key))
+        self.reset_delay_var.set(str(rotation.reset_delay_ms))
         self.pause_key_label_var.set(display_name(rotation.pause_key))
         self.pause_mode_var.set(rotation.pause_mode)
         self.pause_duration_var.set(str(rotation.pause_duration_ms))
@@ -597,6 +602,7 @@ class App(tk.Tk):
         self.hotkey_label_var.set("(unbound)")
         self.cancel_key_label_var.set("(unbound)")
         self.reset_key_label_var.set("(unbound)")
+        self.reset_delay_var.set("0")
         self.pause_key_label_var.set("(unbound)")
         self.pause_mode_var.set("duration")
         self.pause_duration_var.set("1000")
@@ -632,6 +638,7 @@ class App(tk.Tk):
             hotkey=None,  # can't share the original's hotkey -- bind a new one before saving
             cancel_key=original.cancel_key,  # cancel/reset/pause keys CAN be shared, so these carry over as-is
             reset_key=original.reset_key,
+            reset_delay_ms=original.reset_delay_ms,
             pause_key=original.pause_key,
             pause_mode=original.pause_mode,
             pause_duration_ms=original.pause_duration_ms,
@@ -1545,8 +1552,10 @@ class App(tk.Tk):
         name = self.name_var.get().strip()
         try:
             pause_duration_ms = int(self.pause_duration_var.get())
+            reset_delay_ms = int(self.reset_delay_var.get())
         except ValueError:
-            messagebox.showerror("Cannot save rotation", "Pause duration must be a whole number.")
+            messagebox.showerror(
+                "Cannot save rotation", "Pause duration and reset delay must be whole numbers.")
             return
         rotation = Rotation(
             name=name,
@@ -1554,6 +1563,7 @@ class App(tk.Tk):
             hotkey=self.pending_hotkey,
             cancel_key=self.pending_cancel_key,
             reset_key=self.pending_reset_key,
+            reset_delay_ms=reset_delay_ms,
             pause_key=self.pending_pause_key,
             pause_mode=self.pause_mode_var.get(),
             pause_duration_ms=pause_duration_ms,

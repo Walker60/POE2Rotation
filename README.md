@@ -260,17 +260,26 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    starts or toggles. The one restriction: a rotation's cancel key can't be the
    same as its own trigger hotkey, since that would race a single keypress
    against itself (start and immediately self-cancel).
-4. **Reset Key** (optional) immediately restarts this rotation from its first
-   step if it's currently running — for when a fight phase changes, you
-   misjudged a cast, or anything else where you want to bail back to the top of
-   the sequence rather than either letting it continue from the middle or
-   stopping it outright. Whatever step it was on, and however far into that
-   step's timing it was, is abandoned immediately; if the rotation is in Loop
-   mode it just starts the current lap over, and even in Once mode a reset
-   restarts it rather than ending it. Same sharing rule as the cancel key
-   (multiple rotations can use the same reset key), and the same restriction:
-   it can't be the same as this rotation's own trigger hotkey or its own
-   cancel key, since either would race a single keypress against itself.
+4. **Reset Key** (optional) restarts this rotation from its first step if it's
+   currently running — for when a fight phase changes, you misjudged a cast,
+   or anything else where you want to bail back to the top of the sequence
+   rather than either letting it continue from the middle or stopping it
+   outright. Whatever step it was on, and however far into that step's timing
+   it was, is abandoned immediately; if the rotation is in Loop mode it just
+   starts the current lap over, and even in Once mode a reset restarts it
+   rather than ending it. Same sharing rule as the cancel key (multiple
+   rotations can use the same reset key), and the same restriction: it can't
+   be the same as this rotation's own trigger hotkey or its own cancel key,
+   since either would race a single keypress against itself.
+
+   **Delay (ms)** next to it optionally waits that long *after* a reset before
+   actually firing step 1 again (0, the default, restarts instantly, exactly
+   as before) — for a brief "recovery" beat (e.g. matching a dodge-roll's
+   animation) before the rotation picks back up. The wait is interruptible
+   the same way everything else in this app is: Stop ends the rotation
+   outright instead of restarting, Pause pauses through it (resuming, once
+   unpaused, back at step 1), and pressing Reset again during the delay just
+   restarts the countdown rather than stacking up.
 5. **Pause Key** (optional) immediately freezes this rotation in place if it's
    currently running, then automatically resumes it — from the *same* step it
    was on (re-attempting that step's ready-check/fire from scratch, not
