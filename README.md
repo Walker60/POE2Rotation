@@ -147,15 +147,49 @@ persist across further edits to the step list.
   Selected Condition** to give it a label (e.g. "Bleeding") — it's shown in
   the list instead of the auto-generated "Pixel RGB(...)"/"Image WxH"
   description, purely cosmetic, and survives recalibration.
-- Select a condition and click **Move Up**/**Move Down** (in Step Actions) to
-  reorder it within its own step — the same two buttons used to reorder
-  steps, applied to whichever kind of row is currently selected. Reordering
-  conditions is cosmetic only (all of a step's conditions are still AND'd
-  together regardless of order).
+- Select a condition and click **Move Up**/**Move Down** (in Step Actions), or
+  just drag it, to reorder it within its own step. Reordering conditions is
+  cosmetic only (all of a step's conditions are still AND'd together
+  regardless of order).
 
-Copying a step (Copy Selected, or copying a whole rotation) carries its
+Copying a step (Copy/Paste, or copying a whole rotation) carries its
 conditions along with it. Conditions with an image-match template participate
 in the same template-file portability/cleanup rules described above.
+
+## Multi-select, drag-and-drop, and clipboard
+
+The step list supports multi-select (ctrl/shift-click, same as the rotation
+list on the left) and drag-and-drop, on top of the buttons described above:
+
+- **Drag** one or more selected rows to reorder them — drag a step (or
+  several multi-selected steps) to reposition it in the rotation; drag a
+  condition (or several, multi-selected) to reposition it within its own
+  step. A highlighted row shows where it'll land as you drag. Dragging a mix
+  of steps and conditions together, or conditions from more than one step at
+  once, isn't supported — nothing happens rather than doing something
+  surprising. Move Up/Move Down still work as a click-based alternative.
+- **Copy** copies every currently-selected step (with its conditions) to an
+  in-memory clipboard; **Paste** inserts a copy of the clipboard's contents
+  after whichever step/condition is selected (or at the end, if nothing is).
+  The clipboard isn't tied to the rotation you copied from — copy some steps,
+  switch to a *different* rotation in the left-hand list, and Paste to bring
+  them over, cooldown checks and conditions included (image-match templates
+  are shared by reference, same as everywhere else in this app). Duplicating
+  a step within the same rotation is now Copy then Paste rather than one
+  click on a single "Copy Selected" button.
+- **Remove Selected** deletes every currently-selected step and/or condition
+  at once, not just the first one.
+- Keyboard shortcuts, active whenever the step list has focus: **Ctrl+C**
+  (Copy), **Ctrl+V** (Paste), **Delete** (Remove Selected). These don't
+  interfere with normal copy/paste/delete while typing in the Name/Key/etc.
+  fields — they only fire while the list itself is focused, not the whole
+  window.
+- **Revert to Saved** discards every unsaved edit to whichever rotation is
+  currently open in the form (steps, hotkeys, name, folder — everything),
+  reloading it exactly as it was last saved (or resetting to blank for a
+  rotation you haven't saved yet), after a confirmation prompt. A safety net
+  now that drag-and-drop and multi-select make it easier to mess up a
+  rotation by accident.
 
 ## Organizing rotations into folders
 
@@ -187,9 +221,12 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    either at 0 for exact, fixed timing. The step's Name (e.g. "Fireball") is just
    a label for the steps list — it doesn't affect what gets sent, that's the Key
    field. If you need the same skill more than once in a rotation, select it and
-   click **Copy Selected** rather than re-entering it (and recalibrating its
-   cooldown check, if it has one) from scratch — the copy is inserted right after
-   the original and can be tweaked independently from there. **Add Sleep** adds a
+   click **Copy** then **Paste** rather than re-entering it (and recalibrating
+   its cooldown check, if it has one) from scratch — the copy is inserted right
+   after the original and can be tweaked independently from there (this also
+   works for copying several steps at once, and for pasting into a different
+   rotation entirely — see "Multi-select, drag-and-drop, and clipboard" below).
+   **Add Sleep** adds a
    step with no key at all — just a deliberate pause (Delay ± Jitter, same fields
    as any other step) with nothing pressed, for spacing out a rotation without
    tying the wait to any particular skill. It shows up in the list as "Sleep"

@@ -163,6 +163,12 @@ class App(tk.Tk):
         self.step_ready_region = None         # (left, top, width, height) absolute screen coords, or None
         self.step_ready_pixel_pos = None      # (x, y) absolute screen coords, for pixel-match mode
         self.step_ready_pixel_color = None    # (r, g, b) expected "ready" color, for pixel-match mode
+        self._step_clipboard = []             # list[Step], set by Copy -- lives on the App, so it
+                                               # survives switching rotations (enables cross-rotation paste)
+        self._drag_candidate = None    # list[(step_idx, cond_idx_or_None)] being dragged, or None
+        self._drag_active = False      # True once the mouse has moved past the drag threshold
+        self._drag_start_xy = (0, 0)
+        self._drop_target_iid = None   # currently tag-highlighted row during a drag, if any
 
         self._build_widgets()
         self._load_rotations_from_disk()
@@ -307,6 +313,16 @@ class App(tk.Tk):
         self.tree.pack(fill="both", expand=True, pady=(8, 4))
         self.tree.bind("<<TreeviewSelect>>", self._on_select_step)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
+        # Bound on the tree itself (not the window) so Ctrl+C/Ctrl+V/Delete still behave
+        # as normal text editing inside the Name/Key/etc. entries, which is where keyboard
+        # focus usually is instead -- these only fire while the tree itself has focus.
+        self.tree.bind("<Control-c>", lambda _e: self._on_copy_clicked())
+        self.tree.bind("<Control-v>", lambda _e: self._on_paste_clicked())
+        self.tree.bind("<Delete>", lambda _e: self._remove_selected_step())
+        self.tree.bind("<ButtonPress-1>", self._on_tree_press)
+        self.tree.bind("<B1-Motion>", self._on_tree_motion)
+        self.tree.bind("<ButtonRelease-1>", self._on_tree_release)
+        self.tree.tag_configure("drop_target", background=self._drop_target_color())
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(0, 8))
 
@@ -376,14 +392,17 @@ class App(tk.Tk):
         step_btns.pack(fill="x")
         for text, cmd in (
             ("Add Step", self._add_step), ("Add Sleep", self._add_sleep_step),
-            ("Copy Selected", self._copy_selected_step),
+            ("Copy", self._on_copy_clicked), ("Paste", self._on_paste_clicked),
             ("Update Selected", self._update_selected_step),
             ("Remove Selected", self._remove_selected_step),
             ("Move Up", self._move_step_up), ("Move Down", self._move_step_down),
         ):
             ttk.Button(step_btns, text=text, command=cmd).pack(side="left", padx=(0, 4))
 
-        ttk.Button(right, text="Save Rotation", command=self._save_rotation).pack(anchor="e", pady=(4, 0))
+        save_row = ttk.Frame(right)
+        save_row.pack(fill="x", pady=(4, 0))
+        ttk.Button(save_row, text="Revert to Saved", command=self._on_revert_clicked).pack(side="right", padx=(4, 0))
+        ttk.Button(save_row, text="Save Rotation", command=self._save_rotation).pack(side="right")
 
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(side="bottom", fill="x")
@@ -408,6 +427,7 @@ class App(tk.Tk):
     def _toggle_theme(self):
         sv_ttk.set_theme("light" if sv_ttk.get_theme() == "dark" else "dark")
         self._sync_root_background()
+        self.tree.tag_configure("drop_target", background=self._drop_target_color())
 
     # ---- rotation list / selection --------------------------------------
 
@@ -584,6 +604,22 @@ class App(tk.Tk):
         self._refresh_steps_tree()
         self.rotation_tree.selection_remove(*self.rotation_tree.selection())
 
+    def _on_revert_clicked(self):
+        """Discards unsaved edits to whichever rotation is currently open --
+        a safety net now that drag-and-drop/multi-select make it easier to
+        mess one up by accident."""
+        if self.editing_original_name and self.editing_original_name in self.rotations:
+            if not messagebox.askyesno(
+                    "Discard unsaved changes",
+                    f"Discard unsaved changes to '{self.editing_original_name}'?"):
+                return
+            self._load_rotation_into_form(self.rotations[self.editing_original_name])
+        else:
+            if not messagebox.askyesno(
+                    "Discard unsaved changes", "Discard this new, unsaved rotation?"):
+                return
+            self._new_rotation()
+
     def _copy_rotation(self):
         name = self._selected_rotation_name()
         if name is None:
@@ -693,12 +729,17 @@ class App(tk.Tk):
         return None
 
     def _selected_step_index(self):
-        """For actions that only make sense on a whole step (Copy/Update).
-        Returns None (with an info box explaining why) if nothing or a
-        condition is selected."""
+        """For actions that only make sense on exactly one whole step
+        (Update Selected). Returns None (with an info box explaining why) if
+        nothing, a condition, or more than one row is selected -- there's no
+        bulk-field-edit feature, so silently picking one of several selected
+        steps would be more confusing than asking the user to select just one."""
         selection = self.tree.selection()
         if not selection:
             messagebox.showinfo("No step selected", "Select a step in the list first.")
+            return None
+        if len(selection) > 1:
+            messagebox.showinfo("Select one step", "Select exactly one step for this action.")
             return None
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None or parsed[1] is not None:
@@ -799,14 +840,34 @@ class App(tk.Tk):
         self._refresh_steps_tree()
         self._reset_ready_form()
 
-    def _copy_selected_step(self):
-        i = self._selected_step_index()
-        if i is None:
+    def _on_copy_clicked(self):
+        """Copies every currently-selected step (condition-only selections are
+        ignored -- conditions aren't independently copy/pasteable) to an
+        in-memory clipboard that lives on the App itself, so it survives
+        switching to a different rotation -- that's what makes pasting into a
+        different rotation than the one you copied from work."""
+        selection = self.tree.selection()
+        step_indices = sorted({p[0] for p in (self._parse_tree_iid(iid) for iid in selection)
+                                if p is not None and p[1] is None})
+        if not step_indices:
+            messagebox.showinfo("No step selected", "Select at least one step to copy.")
             return
-        duplicate = copy.deepcopy(self.editing_steps[i])
-        self.editing_steps.insert(i + 1, duplicate)
+        self._step_clipboard = copy.deepcopy([self.editing_steps[i] for i in step_indices])
+
+    def _on_paste_clicked(self):
+        if not self._step_clipboard:
+            messagebox.showinfo("Clipboard is empty", "Copy a step first.")
+            return
+        selection = self.tree.selection()
+        if selection:
+            parsed = self._parse_tree_iid(selection[0])
+            insert_at = parsed[0] + 1 if parsed is not None else len(self.editing_steps)
+        else:
+            insert_at = len(self.editing_steps)
+        pasted = copy.deepcopy(self._step_clipboard)  # independent objects each time, so repeated pastes don't share state
+        self.editing_steps[insert_at:insert_at] = pasted
         self._refresh_steps_tree()
-        self.tree.selection_set(f"step-{i + 1}")
+        self.tree.selection_set(*(f"step-{insert_at + offset}" for offset in range(len(pasted))))
 
     def _update_selected_step(self):
         i = self._selected_step_index()
@@ -822,14 +883,20 @@ class App(tk.Tk):
         selection = self.tree.selection()
         if not selection:
             return
-        parsed = self._parse_tree_iid(selection[0])
-        if parsed is None:
-            return
-        step_idx, cond_idx = parsed
-        if cond_idx is None:
-            del self.editing_steps[step_idx]
-        else:
-            del self.editing_steps[step_idx].conditions[cond_idx]
+        parsed_list = [p for p in (self._parse_tree_iid(iid) for iid in selection) if p is not None]
+        step_indices = {s for s, c in parsed_list if c is None}
+        # Conditions belonging to a step that's also being fully removed are
+        # already handled by removing that step -- skip them to avoid deleting
+        # from a conditions list that's about to disappear anyway.
+        condition_deletions = [(s, c) for s, c in parsed_list if c is not None and s not in step_indices]
+        conditions_by_step = {}
+        for s, c in condition_deletions:
+            conditions_by_step.setdefault(s, []).append(c)
+        for s, cond_indices in conditions_by_step.items():
+            for c in sorted(cond_indices, reverse=True):
+                del self.editing_steps[s].conditions[c]
+        for s in sorted(step_indices, reverse=True):
+            del self.editing_steps[s]
         self._refresh_steps_tree()
 
     def _move_step_up(self):
@@ -881,6 +948,183 @@ class App(tk.Tk):
             conditions[cond_idx + 1], conditions[cond_idx] = conditions[cond_idx], conditions[cond_idx + 1]
             self._refresh_steps_tree()
             self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx + 1}")
+
+    # ---- drag-and-drop reordering -----------------------------------------
+    #
+    # A plain click (Button-1) on ttk.Treeview unconditionally collapses multi-
+    # selection to the single clicked row, synchronously, before any B1-Motion
+    # can fire -- so "what to drag" must be captured in the press handler
+    # itself (which runs before that collapse, since instance bindings fire
+    # before class bindings), not lazily on first motion. If the pressed row
+    # is already part of the current selection, the press handler suppresses
+    # the collapse (returns "break") so the whole multi-selection can be
+    # dragged as a group; the release handler replicates the collapse itself
+    # if it turns out no drag actually happened (a plain click, not a drag).
+    #
+    # The tree is never rebuilt (_refresh_steps_tree) while a drag is in
+    # progress -- only at release, once the reorder is fully resolved -- since
+    # rebuilding would invalidate iids captured earlier in the drag.
+
+    def _drop_target_color(self) -> str:
+        color = ttk.Style().lookup("Treeview", "background", ("selected",))
+        return color or "#4a6984"
+
+    @staticmethod
+    def _is_valid_drag_set(candidate) -> bool:
+        if not candidate:
+            return False
+        cond_entries = [c for s, c in candidate if c is not None]
+        step_entries = [s for s, c in candidate if c is None]
+        if cond_entries and step_entries:
+            return False  # mixed steps + conditions
+        if cond_entries:
+            return len({s for s, c in candidate}) == 1  # all conditions of the same step
+        return True  # all steps
+
+    def _on_tree_press(self, event):
+        if event.state & 0x0005:  # Shift (0x1) or Control (0x4) held -- leave extend/toggle select alone
+            self._drag_candidate = None
+            return
+        self._drag_start_xy = (event.x, event.y)
+        self._drag_active = False
+        self._drop_target_iid = None
+        row = self.tree.identify_row(event.y)
+        if not row:
+            self._drag_candidate = None
+            return
+        current_selection = self.tree.selection()
+        if row in current_selection:
+            candidate = sorted(p for p in (self._parse_tree_iid(iid) for iid in current_selection)
+                                if p is not None)
+            if self._is_valid_drag_set(candidate):
+                self._drag_candidate = candidate
+                self.tree.focus_set()
+                self.tree.focus(row)
+                return "break"
+            self._drag_candidate = None
+            return
+        parsed = self._parse_tree_iid(row)
+        self._drag_candidate = [parsed] if parsed is not None else None
+
+    def _on_tree_motion(self, event):
+        if not self._drag_candidate:
+            return
+        if not self._drag_active:
+            if abs(event.x - self._drag_start_xy[0]) < 4 and abs(event.y - self._drag_start_xy[1]) < 4:
+                return
+            self._drag_active = True
+        target = self._resolve_drop_target(event, self._drag_candidate)
+        new_target_iid = target[0] if target is not None else None
+        if new_target_iid != self._drop_target_iid:
+            if self._drop_target_iid is not None:
+                self.tree.item(self._drop_target_iid, tags=())
+            if new_target_iid is not None:
+                self.tree.item(new_target_iid, tags=("drop_target",))
+            self._drop_target_iid = new_target_iid
+
+    def _on_tree_release(self, event):
+        if self._drop_target_iid is not None:
+            self.tree.item(self._drop_target_iid, tags=())
+            self._drop_target_iid = None
+        candidate = self._drag_candidate
+        self._drag_candidate = None
+        if not candidate:
+            return
+        if not self._drag_active:
+            # No real drag happened -- replicate Tk's own click-to-select (which
+            # the press handler suppressed) so a plain click still behaves normally.
+            row = self.tree.identify_row(event.y)
+            if row:
+                self.tree.selection_set(row)
+                self.tree.focus(row)
+            return
+        self._drag_active = False
+        target = self._resolve_drop_target(event, candidate)
+        if target is None:
+            return
+        _highlight_iid, target_index, after = target
+        dragging_conditions = candidate[0][1] is not None
+        if dragging_conditions:
+            owning_step = candidate[0][0]
+            dragged_indices = sorted(c for s, c in candidate)
+            start = self._reorder(self.editing_steps[owning_step].conditions, dragged_indices, target_index, after)
+            self._refresh_steps_tree()
+            self.tree.selection_set(*(f"step-{owning_step}-cond-{start + k}" for k in range(len(dragged_indices))))
+        else:
+            dragged_indices = sorted(s for s, c in candidate)
+            start = self._reorder(self.editing_steps, dragged_indices, target_index, after)
+            self._refresh_steps_tree()
+            self.tree.selection_set(*(f"step-{start + k}" for k in range(len(dragged_indices))))
+
+    def _resolve_drop_target(self, event, candidate):
+        """Returns (highlight_iid, target_index, after) for the given drag
+        candidate (list[(step_idx, cond_idx_or_None)]), or None if there's no
+        valid drop here. target_index is an index into whichever list is
+        being dragged (self.editing_steps for a step drag, or the owning
+        step's .conditions for a condition drag), referring to a position in
+        that list as it stood *before* removing the dragged items."""
+        dragging_conditions = candidate[0][1] is not None
+        target_row = self.tree.identify_row(event.y)
+        parsed = self._parse_tree_iid(target_row) if target_row else None
+
+        if dragging_conditions:
+            owning_step = candidate[0][0]
+            conditions = self.editing_steps[owning_step].conditions
+            if not conditions:
+                return None
+            if parsed is not None and parsed[0] == owning_step and parsed[1] is not None:
+                if (owning_step, parsed[1]) in candidate:
+                    return None  # dropped on one of the dragged rows itself
+                bbox = self.tree.bbox(target_row)
+                after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
+                return target_row, parsed[1], after
+            if parsed is not None and parsed[0] == owning_step and parsed[1] is None:
+                # Hovering the step's own row -- it sits above its conditions.
+                return f"step-{owning_step}-cond-0", 0, False
+            # Anywhere else is only valid if it's clearly beyond this step's own
+            # condition block (above the first / below the last of *that* step).
+            first_iid, last_iid = f"step-{owning_step}-cond-0", f"step-{owning_step}-cond-{len(conditions) - 1}"
+            first_bbox, last_bbox = self.tree.bbox(first_iid), self.tree.bbox(last_iid)
+            if first_bbox and event.y < first_bbox[1]:
+                return first_iid, 0, False
+            if last_bbox and event.y >= last_bbox[1] + last_bbox[3]:
+                return last_iid, len(conditions) - 1, True
+            return None
+
+        if not self.editing_steps:
+            return None
+        if parsed is not None and parsed[1] is not None:
+            # Hovered a condition row -- treat a step and its conditions as one block.
+            target_row, parsed = f"step-{parsed[0]}", (parsed[0], None)
+        if parsed is not None:
+            if parsed[0] in {s for s, c in candidate}:
+                return None  # dropped on one of the dragged steps itself
+            bbox = self.tree.bbox(target_row)
+            after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
+            return target_row, parsed[0], after
+        last = len(self.editing_steps) - 1
+        first_bbox, last_bbox = self.tree.bbox("step-0"), self.tree.bbox(f"step-{last}")
+        if first_bbox and event.y < first_bbox[1]:
+            return "step-0", 0, False
+        if last_bbox and event.y >= last_bbox[1] + last_bbox[3]:
+            return f"step-{last}", last, True
+        return None
+
+    @staticmethod
+    def _reorder(items: list, dragged_indices, target_index: int, after: bool) -> int:
+        """Moves items at dragged_indices (sorted ascending) to just before/
+        after target_index (an index into items *before* removal), preserving
+        their relative order. Mutates items in place; returns the index the
+        first moved item ends up at, so callers can reselect the moved block."""
+        moved = [items[i] for i in dragged_indices]
+        drop_pos = target_index + (1 if after else 0)
+        removed_before_drop = sum(1 for i in dragged_indices if i < drop_pos)
+        adjusted_drop_pos = drop_pos - removed_before_drop
+        for i in sorted(dragged_indices, reverse=True):
+            del items[i]
+        for offset, item in enumerate(moved):
+            items.insert(adjusted_drop_pos + offset, item)
+        return adjusted_drop_pos
 
     # ---- cooldown-check calibration -----------------------------------------
 
@@ -1278,9 +1522,11 @@ class App(tk.Tk):
         what's currently on screen instead of silently discarding it if the
         user forgot to click Update Selected first. Returns False (leaving an
         error box up from _read_step_form) if the form doesn't parse; True if
-        there was nothing to apply (no step selected) or the apply succeeded."""
+        there was nothing to apply (no step, or more than one row, selected --
+        with several selected there's no single clear target to apply the
+        form to) or the apply succeeded."""
         selection = self.tree.selection()
-        if not selection:
+        if not selection or len(selection) > 1:
             return True
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
