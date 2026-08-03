@@ -12,6 +12,9 @@ pip install -r requirements.txt
 
 `tkinter` ships with the standard python.org Windows installer — verify with
 `python -m tkinter` (should open a small test window). It is not a pip package.
+On Linux, it's usually a separate OS package the system Python doesn't include
+by default (e.g. `sudo apt install python3-tk` on Debian/Ubuntu, `python-tk`
+via pacman on Arch) — the same `python -m tkinter` check applies there too.
 
 The app uses the [Sun Valley ttk theme](https://github.com/rdbende/Sun-Valley-ttk-theme)
 (`sv-ttk`) for a modern, Windows-11-like dark/light look. It starts in dark mode;
@@ -22,7 +25,7 @@ folder rename/move prompts) keep the OS's own light appearance regardless of
 the app's theme, and the Windows title bar doesn't switch color on its own —
 both are Tkinter/Windows limitations, not bugs.
 
-## Running
+## Running on Windows
 
 ```
 python main.py
@@ -35,12 +38,47 @@ process from sending input to a higher-privilege (elevated) window (UIPI). If PO
 or its keystrokes will silently not reach the game. If hotkeys or keystrokes don't
 seem to work at all, try running from an elevated terminal first to rule this out.
 
+## Running on Linux
+
+Same command, `python main.py`. A few things are different from Windows, though:
+
+- **X11 (or Wayland-with-XWayland) is required.** Tk itself has no native Wayland
+  backend (a still-open upstream CPython/Tk request as of this writing), so this
+  app's GUI only ever runs via X11 — either a plain X11 session, or the XWayland
+  compatibility layer that essentially every mainstream Wayland desktop (GNOME,
+  KDE, etc.) runs automatically. Wine/Proton — what POE2 itself runs under on
+  Linux — also defaults to X11/XWayland rather than native Wayland, so in
+  practice this covers the real scenario (playing POE2 via Proton) whether your
+  desktop session itself is X11 or Wayland. What's **not** supported is a
+  hypothetical native-Wayland-only build of the game, since there's no portable
+  "which window is focused" API for that case at all — the app will fail with a
+  clear error at startup rather than silently never detecting focus if it can't
+  find a usable X11/XWayland display.
+- **`keyboard`/`mouse` need `/dev/uinput` access.** These libraries send and
+  receive input via a kernel-level virtual input device (the same mechanism
+  Wayland-compatible tools like `ydotool` use, which is why this works
+  regardless of X11 vs. Wayland) rather than talking to the display server
+  directly. One-time setup: make sure the `uinput` kernel module is loaded, and
+  either run as root or add your user to the `input` group (or add an
+  equivalent udev rule granting it access) — then log out and back in for group
+  membership to take effect. If the app fails to start with a "could not
+  register global hotkeys" error, this is almost always why.
+- **`python-xlib`** (installed automatically via `requirements.txt` on Linux)
+  is what the focus guard uses to ask X11 which window is currently active and
+  which process owns it — the Linux equivalent of the Windows
+  `GetForegroundWindow` call.
+
 ## Configuration
 
-- `POE2BOT_TARGET_PROCESS` — the game executable name the focus guard checks for
-  (default `PathOfExileSteam.exe`). Verify the exact name via Task Manager > Details
-  while POE2 is running — it may differ by storefront (Steam/EGS/standalone). Set
-  this to `notepad.exe` to test the bot against Notepad instead of the game.
+- `POE2BOT_TARGET_PROCESS` — the game process name the focus guard checks for
+  (default `PathOfExileSteam.exe`). On Windows, verify the exact name via Task
+  Manager > Details while POE2 is running — it may differ by storefront
+  (Steam/EGS/standalone). On Linux, use `ps aux | grep -i pathofexile` or
+  `pgrep -i pathofexile` instead — a Proton-run game commonly still shows up
+  with a `.exe`-suffixed name (Wine execs the original Windows binary), but
+  this varies, so check rather than assume. Set this to `notepad.exe` (Windows)
+  or e.g. `gedit` (Linux) to test the bot against a harmless app instead of the
+  game.
 - `POE2BOT_PANIC_KEY` — reserved global hotkey that instantly stops every running
   rotation (default `f12`). Cannot be bound to a rotation.
 

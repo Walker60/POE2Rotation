@@ -5,3 +5,4 @@ psutil>=5.9
 pyautogui>=0.9.54
 Pillow>=10.0
 sv-ttk>=2.6.0
+python-xlib>=0.33 ; sys_platform == "linux"  # focus detection (poe2bot/_focus_x11.py) and pyautogui's own Linux capture backend
