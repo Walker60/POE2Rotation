@@ -346,6 +346,19 @@ class App(tk.Tk):
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(0, 8))
 
+        step_actions_group = ttk.LabelFrame(right, text="Step Actions", padding=6)
+        step_actions_group.pack(fill="x", pady=(0, 6))
+        step_btns = ttk.Frame(step_actions_group)
+        step_btns.pack(fill="x")
+        for text, cmd in (
+            ("Add Step", self._add_step), ("Add Sleep", self._add_sleep_step),
+            ("Copy", self._on_copy_clicked), ("Paste", self._on_paste_clicked),
+            ("Update Selected", self._update_selected_step),
+            ("Remove Selected", self._remove_selected_step),
+            ("Move Up", self._move_step_up), ("Move Down", self._move_step_down),
+        ):
+            ttk.Button(step_btns, text=text, command=cmd).pack(side="left", padx=(0, 4))
+
         step_fields_group = ttk.LabelFrame(right, text="Selected Step", padding=6)
         step_fields_group.pack(fill="x", pady=(0, 6))
         edit_row = ttk.Frame(step_fields_group)
@@ -438,19 +451,6 @@ class App(tk.Tk):
             side="left", padx=(2, 8))
         ttk.Button(condition_name_row, text="Rename Selected Condition",
                    command=self._on_rename_condition_clicked).pack(side="left")
-
-        step_actions_group = ttk.LabelFrame(right, text="Step Actions", padding=6)
-        step_actions_group.pack(fill="x", pady=(0, 6))
-        step_btns = ttk.Frame(step_actions_group)
-        step_btns.pack(fill="x")
-        for text, cmd in (
-            ("Add Step", self._add_step), ("Add Sleep", self._add_sleep_step),
-            ("Copy", self._on_copy_clicked), ("Paste", self._on_paste_clicked),
-            ("Update Selected", self._update_selected_step),
-            ("Remove Selected", self._remove_selected_step),
-            ("Move Up", self._move_step_up), ("Move Down", self._move_step_down),
-        ):
-            ttk.Button(step_btns, text=text, command=cmd).pack(side="left", padx=(0, 4))
 
         save_row = ttk.Frame(right)
         save_row.pack(fill="x", pady=(4, 0))
