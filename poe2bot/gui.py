@@ -319,14 +319,14 @@ class App(tk.Tk):
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         self.tree = ttk.Treeview(
-            right, columns=("key", "delay", "jitter", "hold", "hold_jitter"),
+            right, columns=("key", "delay", "jitter", "hold", "hold_jitter", "repeat"),
             show="tree headings", height=10)
         self.tree.heading("#0", text="Name")
         self.tree.column("#0", width=140)
         for col, label, width in (
             ("key", "Key", 60), ("delay", "Delay (ms)", 90),
             ("jitter", "Jitter (ms)", 90), ("hold", "Hold (ms)", 90),
-            ("hold_jitter", "Hold Jitter (ms)", 100),
+            ("hold_jitter", "Hold Jitter (ms)", 100), ("repeat", "Repeat", 60),
         ):
             self.tree.heading(col, text=label)
             self.tree.column(col, width=width, anchor="center")
@@ -356,14 +356,26 @@ class App(tk.Tk):
         self.step_jitter_var = tk.StringVar(value="5")
         self.step_hold_var = tk.StringVar(value="0")
         self.step_hold_jitter_var = tk.StringVar(value="0")
+        self.step_repeat_var = tk.StringVar(value="1")
         for label, var, width in (
             ("Name", self.step_name_var, 12), ("Key", self.step_key_var, 8),
             ("Delay", self.step_delay_var, 6),
             ("Jitter", self.step_jitter_var, 6), ("Hold", self.step_hold_var, 6),
             ("Hold Jitter", self.step_hold_jitter_var, 6),
+            ("Repeat", self.step_repeat_var, 4),
         ):
             ttk.Label(edit_row, text=label).pack(side="left")
             ttk.Entry(edit_row, textvariable=var, width=width).pack(side="left", padx=(2, 8))
+
+        repeat_row = ttk.Frame(step_fields_group)
+        repeat_row.pack(fill="x", pady=(4, 0))
+        self.step_repeat_combine_hold_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(repeat_row, text="Combine Hold",
+                         variable=self.step_repeat_combine_hold_var).pack(side="left")
+        ttk.Label(repeat_row,
+                  text="(hold the key once for Hold × Repeat ms, then a single Delay, instead of "
+                       "repeating press/release + Delay Repeat times)",
+                  foreground="gray").pack(side="left", padx=(8, 0))
 
         self.step_ready_timeout_var = tk.StringVar(value="0")
         self.step_ready_confidence_var = tk.StringVar(value="0.90")
@@ -754,12 +766,13 @@ class App(tk.Tk):
             step_iid = f"step-{i}"
             self.tree.insert("", tk.END, iid=step_iid, text=label,
                               values=(key_col, step.delay_ms,
-                                      step.jitter_ms, step.hold_ms, step.hold_jitter_ms),
+                                      step.jitter_ms, step.hold_ms, step.hold_jitter_ms,
+                                      step.repeat_count),
                               open=bool(step.conditions))
             for j, condition in enumerate(step.conditions):
                 self.tree.insert(step_iid, tk.END, iid=f"{step_iid}-cond-{j}",
                                   text=self._condition_summary(condition),
-                                  values=("", "", "", "", ""))
+                                  values=("", "", "", "", "", ""))
 
     @staticmethod
     def _condition_summary(condition) -> str:
@@ -830,6 +843,8 @@ class App(tk.Tk):
         self.step_jitter_var.set(str(step.jitter_ms))
         self.step_hold_var.set(str(step.hold_ms))
         self.step_hold_jitter_var.set(str(step.hold_jitter_ms))
+        self.step_repeat_var.set(str(step.repeat_count))
+        self.step_repeat_combine_hold_var.set(step.repeat_combine_hold)
         self.step_ready_match_type = step.ready_match_type
         self.step_ready_template = step.ready_template
         self.step_ready_region = step.ready_region
@@ -855,11 +870,12 @@ class App(tk.Tk):
             buff_delay_text = self.step_buff_delay_var.get().strip()
             buff_hold = int(buff_hold_text) if buff_hold_text else None
             buff_delay = int(buff_delay_text) if buff_delay_text else None
+            repeat = int(self.step_repeat_var.get())
         except ValueError:
             messagebox.showerror(
                 "Invalid step",
-                "Delay/jitter/hold/hold jitter/timeout/buff hold/buff delay must be whole numbers "
-                "(buff hold/delay may be left blank), and confidence must be a decimal (e.g. 0.9).")
+                "Delay/jitter/hold/hold jitter/timeout/buff hold/buff delay/repeat must be whole "
+                "numbers (buff hold/delay may be left blank), and confidence must be a decimal (e.g. 0.9).")
             return None
         step = Step(
             key=self.step_key_var.get().strip(),
@@ -878,6 +894,8 @@ class App(tk.Tk):
             buff_check=self.step_buff_check,
             buff_hold_ms=buff_hold,
             buff_delay_ms=buff_delay,
+            repeat_count=repeat,
+            repeat_combine_hold=self.step_repeat_combine_hold_var.get(),
         )
         if conditions is not None:
             # The form has no fields of its own for conditions -- Update Selected
@@ -904,6 +922,8 @@ class App(tk.Tk):
         self.step_jitter_var.set("5")
         self.step_hold_var.set("0")
         self.step_hold_jitter_var.set("0")
+        self.step_repeat_var.set("1")
+        self.step_repeat_combine_hold_var.set(False)
         self._reset_ready_form()
         self._reset_buff_form()
 

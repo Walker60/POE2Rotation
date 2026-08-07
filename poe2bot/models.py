@@ -67,6 +67,9 @@ class Step:
                                               # step fires at all -- for animation-speed buffs that aren't always up
     buff_hold_ms: Optional[int] = None       # used instead of hold_ms while buff_check matches; None = no override
     buff_delay_ms: Optional[int] = None      # used instead of delay_ms while buff_check matches; None = no override
+    repeat_count: int = 1                    # fire this step this many times per pass; 1 = today's behavior
+    repeat_combine_hold: bool = False        # if the key has a hold > 0, hold once for hold_ms * repeat_count and
+                                              # delay once afterward, instead of repeat_count independent hold+delay cycles
 
     def has_ready_check(self) -> bool:
         """True if this step has a cooldown check configured, via whichever
@@ -98,6 +101,8 @@ class Step:
             buff_check=Condition.from_dict(data["buff_check"]) if data.get("buff_check") else None,
             buff_hold_ms=int(data["buff_hold_ms"]) if data.get("buff_hold_ms") is not None else None,
             buff_delay_ms=int(data["buff_delay_ms"]) if data.get("buff_delay_ms") is not None else None,
+            repeat_count=int(data.get("repeat_count", 1)),
+            repeat_combine_hold=bool(data.get("repeat_combine_hold", False)),
         )
 
 
@@ -284,5 +289,8 @@ def validate_rotation(rotation: Rotation) -> List[str]:
         if (step.buff_hold_ms is not None or step.buff_delay_ms is not None) and not buff_calibrated:
             problems.append(f"Step {i}: buff hold/delay override is set but no buff check is calibrated "
                              f"(it would never apply).")
+
+        if step.repeat_count < 1:
+            problems.append(f"Step {i}: repeat count must be at least 1.")
 
     return problems

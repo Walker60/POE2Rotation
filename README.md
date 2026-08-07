@@ -136,6 +136,29 @@ matches on screen.
   post-cast delay, that delay still finishes out at the buffed value rather
   than switching mid-wait.
 
+## Repeat and Combine Hold (optional, per step)
+
+A step can fire more than once per pass with **Repeat** — set it above 1 and
+the step fires that many times before the rotation moves on. With **Combine
+Hold** off (the default), Repeat is just N independent copies of the step
+back to back: press/hold/release, then Delay, then press/hold/release again,
+and so on, N times. This works for a tap (Hold = 0) too — it just presses the
+key N times with Delay between each.
+
+**Combine Hold** changes this for a step that actually has a Hold: instead of
+N separate hold+release+Delay cycles, the key is pressed once and held
+continuously for Hold × Repeat, then Delay applies exactly once at the end.
+For example, a step with a 50ms Delay, a 500ms Hold, and Repeat set to 3 —
+with Combine Hold on — holds the key for 1500ms straight, then waits 50ms,
+instead of holding-releasing-waiting three separate times. This is for skills
+where holding longer does more (a charge-up attack, for instance) rather than
+skills that need a fresh, discrete press each time. Combine Hold has no effect
+(and isn't needed) on a tap, or when Repeat is 1.
+
+Repeat only fires once through the step's own cooldown check and any
+Conditions — they aren't re-checked between reps, the same "checked once,
+right before firing" rule Conditions and the Buff Check already follow.
+
 ## Conditions (optional, per step)
 
 A step can also have any number of **conditions** — extra image/pixel-match
@@ -239,7 +262,8 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
 1. Click **New**, give the rotation a name and, optionally, a Folder to group it
    under, add steps (optional display name,
    key, delay in ms, optional jitter, optional hold duration, optional hold
-   jitter), and choose **Once** (single pass) or **Loop** (repeats until
+   jitter, optional repeat count — see "Repeat and Combine Hold" below), and
+   choose **Once** (single pass) or **Loop** (repeats until
    re-triggered or the panic key is pressed). Jitter randomizes the delay ± that
    many ms each time; Hold Jitter does the same for how long the key is held
    down — both make timing look less like a perfectly repeating macro. Leave

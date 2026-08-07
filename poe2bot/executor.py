@@ -2,6 +2,7 @@ import math
 import random
 import threading
 import time
+from typing import Optional
 
 import keyboard
 import mss
@@ -335,20 +336,21 @@ class RotationRunner:
                 return False
             if not step.key:
                 # Sleep step: no key to check readiness for or fire, just pause for
-                # delay_ms (+/- jitter_ms) like any other step's post-fire wait.
-                log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms")
-                if not self._sleep_delay(step, _check_buff_active(step)):
+                # delay_ms (+/- jitter_ms) like any other step's post-fire wait,
+                # repeat_count times if set.
+                log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms"
+                          + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
+                if not self._fire_repeats(step, _check_buff_active(step)):
                     return False
                 continue
             ready = self._wait_until_ready(step)
             if ready and all(_check_condition(c, step.key) for c in step.conditions):
                 buff_active = _check_buff_active(step)
-                self._fire_step(step, buff_active)
                 # Only pay the post-cast delay/jitter after an actual fire -- there's no
                 # cast animation to wait out for a step that was skipped, so a skipped
                 # cast falls straight through to the next step instead of also eating
                 # this step's full delay on top of the ready-check/condition-check time.
-                if not self._sleep_delay(step, buff_active):
+                if not self._fire_repeats(step, buff_active):
                     return False
             elif not self._stop_event.is_set():
                 if not ready:
@@ -385,8 +387,9 @@ class RotationRunner:
                 return False
         return True
 
-    def _fire_step(self, step: Step, buff_active: bool = False):
-        base_hold = step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms
+    def _fire_step(self, step: Step, buff_active: bool = False, hold_override: Optional[int] = None):
+        base_hold = hold_override if hold_override is not None else (
+            step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms)
         if base_hold > 0:
             hold = base_hold
             if step.hold_jitter_ms:
@@ -408,6 +411,32 @@ class RotationRunner:
         if step.jitter_ms:
             delay += random.uniform(-step.jitter_ms, step.jitter_ms)
         return not self._stop_event.wait(timeout=max(0, delay) / 1000)
+
+    def _fire_repeats(self, step: Step, buff_active: bool) -> bool:
+        """Fires `step` step.repeat_count times, then applies the post-fire
+        delay -- either as repeat_count independent press/hold/release +
+        delay cycles, or, when repeat_combine_hold is set and there's an
+        actual hold to combine, as one continuous hold for the combined
+        duration followed by a single delay (see README for the worked
+        example). The step's own cooldown check and Conditions are only
+        ever evaluated once, by the caller, before this runs -- reps never
+        re-check either. Returns False the moment stop_event fires, mirroring
+        _sleep_delay's contract, so _run_once can bail out immediately."""
+        if self._stop_event.is_set():
+            return False
+        repeat = max(1, step.repeat_count)
+        base_hold = step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms
+        if step.key and step.repeat_combine_hold and base_hold > 0 and repeat > 1:
+            self._fire_step(step, buff_active, hold_override=base_hold * repeat)
+            return self._sleep_delay(step, buff_active)
+        for _ in range(repeat):
+            if self._stop_event.is_set():
+                return False
+            if step.key:
+                self._fire_step(step, buff_active)
+            if not self._sleep_delay(step, buff_active):
+                return False
+        return True
 
 
 class RotationManager:
