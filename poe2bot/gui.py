@@ -872,7 +872,28 @@ class App(tk.Tk):
             step.conditions = conditions
         return step
 
+    def _discard_selected_step_edits(self):
+        """If a tree row is currently selected, its data was loaded into the
+        step form by _on_select_step for potential Update Selected -- Add
+        Step/Add Sleep must not silently read that as if it were a fresh
+        step (that's how "Add Step" ends up cloning whatever's highlighted),
+        so clear the selection and reset every step field to blank defaults
+        first. No-op if nothing is selected, so typing values and clicking
+        Add Step repeatedly to add several similarly-timed steps still works."""
+        if not self.tree.selection():
+            return
+        self.tree.selection_remove(*self.tree.selection())
+        self.step_name_var.set("")
+        self.step_key_var.set("")
+        self.step_delay_var.set("100")
+        self.step_jitter_var.set("0")
+        self.step_hold_var.set("0")
+        self.step_hold_jitter_var.set("0")
+        self._reset_ready_form()
+        self._reset_buff_form()
+
     def _add_step(self):
+        self._discard_selected_step_edits()
         step = self._read_step_form()
         if step is None:
             return
@@ -885,6 +906,7 @@ class App(tk.Tk):
         """A sleep step has no key -- it's just a pause of delay_ms (+/- jitter_ms)
         with nothing pressed, for a deliberate wait that isn't tied to any skill.
         Reuses the same form fields as Add Step; whatever's in Key is ignored."""
+        self._discard_selected_step_edits()
         step = self._read_step_form()
         if step is None:
             return
