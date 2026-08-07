@@ -334,6 +334,12 @@ class RotationRunner:
                 return False
             if not self._wait_for_focus_or_stop():
                 return False
+            if step.key is None:
+                # No keybind assigned yet -- skip this step entirely, the same as a
+                # not-ready/conditions-not-met skip below: no fire, no delay, straight
+                # to the next step. Distinct from a "" (sleep) step, which still waits.
+                log.info(f"[{self.rotation.name}] step {i + 1} has no keybind assigned; skipping")
+                continue
             if not step.key:
                 # Sleep step: no key to check readiness for or fire, just pause for
                 # delay_ms (+/- jitter_ms) like any other step's post-fire wait,

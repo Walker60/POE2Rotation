@@ -152,7 +152,6 @@ class App(tk.Tk):
 
         self.rotations = {}          # name -> Rotation, mirrors what's on disk
         self.editing_original_name = None    # name of rotation being edited, or None if new/unsaved
-        self.editing_original_hotkey = None  # hotkey it had when editing started
         self.editing_steps = []              # working list[Step] for the form
         self.pending_hotkey = None            # hotkey chosen in this edit session (may be unchanged)
         self.pending_cancel_key = None        # cancel key chosen in this edit session (may be unchanged)
@@ -366,7 +365,7 @@ class App(tk.Tk):
         step_fields_group.pack(fill="x", pady=(0, 6))
         edit_row = ttk.Frame(step_fields_group)
         edit_row.pack(fill="x")
-        self.step_name_var = tk.StringVar()
+        self.step_name_var = tk.StringVar(value="Skill")
         self.step_key_var = tk.StringVar()
         self.step_delay_var = tk.StringVar(value="20")
         self.step_jitter_var = tk.StringVar(value="10")
@@ -518,8 +517,12 @@ class App(tk.Tk):
                 self.rotations[n].folder == "", self.rotations[n].folder.lower(), n.lower())):
             rotation = self.rotations[name]
             parent_id = ensure_folder_node(rotation.folder)
+            shared_suffix = ""
+            if rotation.hotkey and len(self.hotkey_manager.bound_to(rotation.hotkey)) > 1:
+                shared_suffix = f" (shared {display_name(rotation.hotkey)})"
             suffix = STATUS_LABELS.get(self.rotation_manager.status(name), "")
-            self.rotation_tree.insert(parent_id, tk.END, iid=f"rotation:{name}", text=f"{name}{suffix}")
+            self.rotation_tree.insert(
+                parent_id, tk.END, iid=f"rotation:{name}", text=f"{name}{shared_suffix}{suffix}")
 
         if selected:
             item_id = f"rotation:{selected}"
@@ -621,7 +624,6 @@ class App(tk.Tk):
 
     def _load_rotation_into_form(self, rotation: Rotation):
         self.editing_original_name = rotation.name
-        self.editing_original_hotkey = rotation.hotkey
         self.pending_hotkey = rotation.hotkey
         self.pending_cancel_key = rotation.cancel_key
         self.pending_reset_key = rotation.reset_key
@@ -643,7 +645,6 @@ class App(tk.Tk):
 
     def _new_rotation(self):
         self.editing_original_name = None
-        self.editing_original_hotkey = None
         self.pending_hotkey = None
         self.pending_cancel_key = None
         self.pending_reset_key = None
@@ -747,8 +748,7 @@ class App(tk.Tk):
         if not messagebox.askyesno("Delete rotation", f"Delete '{name}'?"):
             return
         rotation = self.rotations.pop(name)
-        if rotation.hotkey:
-            self.hotkey_manager.unbind(rotation.hotkey)
+        self.hotkey_manager.unbind(name)
         self.hotkey_manager.set_cancel_key(name, None)
         self.hotkey_manager.set_reset_key(name, None)
         self.hotkey_manager.set_pause_key(name, None)
@@ -763,9 +763,13 @@ class App(tk.Tk):
     def _refresh_steps_tree(self):
         self.tree.delete(*self.tree.get_children())
         for i, step in enumerate(self.editing_steps):
-            is_sleep = not step.key
-            label = step.name or ("Sleep" if is_sleep else step.key)
-            key_col = "(sleep)" if is_sleep else step.key
+            if step.key is None:
+                key_col, fallback_label = "(no key)", "No Key"
+            elif step.key == "":
+                key_col, fallback_label = "(sleep)", "Sleep"
+            else:
+                key_col, fallback_label = step.key, step.key
+            label = step.name or fallback_label
             step_iid = f"step-{i}"
             self.tree.insert("", tk.END, iid=step_iid, text=label,
                               values=(key_col, step.delay_ms,
@@ -841,7 +845,7 @@ class App(tk.Tk):
         step = self.editing_steps[parsed[0]]
         self.condition_name_var.set(step.conditions[parsed[1]].name if parsed[1] is not None else "")
         self.step_name_var.set(step.name)
-        self.step_key_var.set(step.key)
+        self.step_key_var.set(step.key or "")
         self.step_delay_var.set(str(step.delay_ms))
         self.step_jitter_var.set(str(step.jitter_ms))
         self.step_hold_var.set(str(step.hold_ms))
@@ -945,7 +949,7 @@ class App(tk.Tk):
         self.tree.selection_remove(*self.tree.selection())
         if self._current_step_form_snapshot() != self._selected_step_snapshot:
             return
-        self.step_name_var.set("")
+        self.step_name_var.set("Skill")
         self.step_key_var.set("")
         self.step_delay_var.set("20")
         self.step_jitter_var.set("10")
@@ -961,6 +965,12 @@ class App(tk.Tk):
         step = self._read_step_form()
         if step is None:
             return
+        if not step.key:
+            # Add Step never creates a sleep step -- an empty Key here means no
+            # keybind has been assigned, which is skipped entirely at runtime
+            # (see RotationRunner._run_once), not waited on. Use Add Sleep for
+            # a deliberate keyless pause, or type a key into this step later.
+            step.key = None
         self.editing_steps.append(step)
         self._refresh_steps_tree()
         self._reset_ready_form()
@@ -1615,12 +1625,11 @@ class App(tk.Tk):
                 "Each will be saved immediately."):
             return
         for rotation in bound:
-            self.hotkey_manager.unbind(rotation.hotkey)
+            self.hotkey_manager.unbind(rotation.name)
             rotation.hotkey = None
             storage.save_rotation(rotation)
         if self.editing_original_name in self.rotations:
             self.pending_hotkey = None
-            self.editing_original_hotkey = None
             self.hotkey_label_var.set(display_name(None))
         self._refresh_rotation_tree()
 
@@ -1734,23 +1743,27 @@ class App(tk.Tk):
         problems = validate_rotation(rotation)
         if name != self.editing_original_name and name in self.rotations:
             problems.append(f"A rotation named '{name}' already exists.")
-        if rotation.hotkey:
-            if rotation.hotkey == self.hotkey_manager.panic_key:
-                problems.append(f"'{display_name(rotation.hotkey)}' is reserved as the panic/stop-all key.")
-            else:
-                owner = self.hotkey_manager.bound_to(rotation.hotkey)
-                if owner is not None and owner != self.editing_original_name:
-                    problems.append(f"'{display_name(rotation.hotkey)}' is already bound to '{owner}'.")
+        if rotation.hotkey and rotation.hotkey == self.hotkey_manager.panic_key:
+            problems.append(f"'{display_name(rotation.hotkey)}' is reserved as the panic/stop-all key.")
         if problems:
             messagebox.showerror("Cannot save rotation", "\n".join(problems))
             return
 
+        if rotation.hotkey:
+            sharing_with = [n for n in self.hotkey_manager.bound_to(rotation.hotkey)
+                             if n != self.editing_original_name]
+            if sharing_with and not messagebox.askyesno(
+                    "Hotkey already in use",
+                    f"'{display_name(rotation.hotkey)}' is already bound to "
+                    f"{', '.join(sharing_with)}. Also bind it to this rotation?"):
+                return
+
         # Rebind hotkey first (release whatever this rotation held before, bind the new
         # choice) -- before any destructive rename/move step, so a conflict here (shouldn't
-        # happen given the pre-check above, but kept as a defensive guard) can't leave
+        # happen given the pre-checks above, but kept as a defensive guard) can't leave
         # the old file deleted with nothing saved in its place.
         try:
-            self.hotkey_manager.rebind(self.editing_original_hotkey, rotation.hotkey, rotation.name)
+            self.hotkey_manager.rebind(rotation.hotkey, rotation.name)
         except ValueError as e:
             messagebox.showerror("Hotkey conflict", str(e))
             return
@@ -1763,6 +1776,7 @@ class App(tk.Tk):
         if moved:
             storage.delete_rotation(old_rotation.name, old_rotation.folder)
             self.rotation_manager.unload(old_rotation.name)
+            self.hotkey_manager.unbind(old_rotation.name)
             self.hotkey_manager.set_cancel_key(old_rotation.name, None)
             self.hotkey_manager.set_reset_key(old_rotation.name, None)
             self.hotkey_manager.set_pause_key(old_rotation.name, None)

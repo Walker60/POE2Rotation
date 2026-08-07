@@ -45,19 +45,21 @@ class HotkeyManager:
     """Maps global hotkeys (keyboard keys or mouse buttons) to rotation names and
     dispatches into a RotationManager.
 
-    Keyboard hotkeys are plain key name strings (e.g. "f6"), wrapping `keyboard`'s
-    own dynamic add_hotkey/remove_hotkey. Mouse hotkeys are encoded as
-    "mouse:<button>" (e.g. "mouse:right") and wrap the `mouse` library's
-    on_button/unhook, since `keyboard` has no concept of mouse buttons at all.
-    Both dispatch through the same bind/unbind/rebind/enable_all/disable_all API
-    since bindings are added/changed/removed at runtime from the GUI.
+    Keyboard hotkeys are plain key name strings (e.g. "f6"); mouse hotkeys are
+    encoded as "mouse:<button>" (e.g. "mouse:right"). Multiple rotations may
+    share the same trigger hotkey -- pressing it fires every rotation bound to
+    it -- so, like the cancel/reset/pause keys below, trigger-key registration
+    wraps `keyboard.hook()`/`mouse.on_button()` directly (via
+    _register_action_key/_unregister_action_key) rather than
+    `keyboard.add_hotkey()`, which only tracks one remover per hotkey string
+    and would leak earlier registrations when several rotations share a key.
     """
 
     def __init__(self, rotation_manager, panic_key: str = config.PANIC_KEY):
         self._rotation_manager = rotation_manager
         self._panic_key = panic_key
-        self._bound = {}           # hotkey -> rotation name
-        self._mouse_handlers = {}  # hotkey -> handler object returned by mouse.on_button, for unhook()
+        self._trigger_keys = {}     # rotation name -> hotkey (config, survives enable/disable)
+        self._trigger_handlers = {} # rotation name -> ("keyboard"|"mouse", live handler), only while enabled
         self._cancel_keys = {}     # rotation name -> cancel key (config, survives enable/disable)
         self._cancel_handlers = {} # rotation name -> ("keyboard"|"mouse", live handler), only while enabled
         self._reset_keys = {}      # rotation name -> reset key (config, survives enable/disable)
@@ -72,10 +74,11 @@ class HotkeyManager:
     def panic_key(self) -> str:
         return self._panic_key
 
-    def bound_to(self, hotkey: str):
-        """Name of the rotation currently owning `hotkey`, or None if unbound.
-        Read-only pre-check -- does not touch the OS hook."""
-        return self._bound.get(hotkey)
+    def bound_to(self, hotkey: str) -> list:
+        """Names of every rotation currently bound to `hotkey` (may be more
+        than one, since multiple rotations are allowed to share a trigger
+        hotkey). Read-only pre-check -- does not touch the OS hook."""
+        return [name for name, key in self._trigger_keys.items() if key == hotkey]
 
     def cancel_key_for(self, rotation_name: str):
         return self._cancel_keys.get(rotation_name)
@@ -83,10 +86,9 @@ class HotkeyManager:
     def set_cancel_key(self, rotation_name: str, cancel_key):
         """Configure (or clear, if cancel_key is falsy) the key that immediately
         stops `rotation_name` if it's running -- e.g. the game's dodge key, so any
-        rotation can be interrupted mid-cast. Unlike bind()/the trigger hotkey,
-        multiple rotations may share the same cancel key: pressing it just stops
-        whichever of them happens to be running, so there's nothing to
-        conflict-check the way there is for the exclusive trigger hotkey."""
+        rotation can be interrupted mid-cast. Multiple rotations may share the
+        same cancel key: pressing it just stops whichever of them happen to be
+        running."""
         self._unregister_action_key(self._cancel_handlers, rotation_name)
         self._cancel_keys[rotation_name] = cancel_key
         if cancel_key and self._enabled:
@@ -125,10 +127,10 @@ class HotkeyManager:
                 lambda n=rotation_name: self._rotation_manager.pause(n))
 
     def _register_action_key(self, handlers: dict, rotation_name: str, action_key: str, callback):
-        """Shared machinery behind set_cancel_key()/set_reset_key(): both need a
-        many-rotations-to-one-key registration (unlike the exclusive trigger
-        hotkey), so both wrap keyboard.hook()/mouse.on_button() directly rather
-        than keyboard.add_hotkey(), which assumes one callback per key combo."""
+        """Shared machinery behind bind()/set_cancel_key()/set_reset_key()/
+        set_pause_key(): all need a many-rotations-to-one-key registration, so
+        all wrap keyboard.hook()/mouse.on_button() directly rather than
+        keyboard.add_hotkey(), which assumes one callback per key combo."""
         if is_mouse_hotkey(action_key):
             button = mouse_button_of(action_key)
             handler = mouse.on_button(callback, buttons=(button,), types=(mouse.DOWN,))
@@ -150,51 +152,37 @@ class HotkeyManager:
         else:
             keyboard.unhook(handler)
 
-    def _register_hotkey(self, hotkey: str, rotation_name: str):
-        handler = lambda n=rotation_name: self._rotation_manager.trigger(n)
-        if is_mouse_hotkey(hotkey):
-            button = mouse_button_of(hotkey)
-            self._mouse_handlers[hotkey] = mouse.on_button(handler, buttons=(button,), types=(mouse.DOWN,))
-        else:
-            keyboard.add_hotkey(hotkey, handler)
-
-    def _unregister_hotkey(self, hotkey: str):
-        if is_mouse_hotkey(hotkey):
-            registered = self._mouse_handlers.pop(hotkey, None)
-            if registered is not None:
-                mouse.unhook(registered)
-        else:
-            keyboard.remove_hotkey(hotkey)
-
     def _register_panic_key(self):
         # Always a keyboard key (config.PANIC_KEY, default 'f12') -- kept keyboard-only
         # since it's a fixed reserved key, not something the user rebinds to a mouse button.
         keyboard.add_hotkey(self._panic_key, self._rotation_manager.stop_all)
 
     def bind(self, hotkey: str, rotation_name: str):
+        """Bind `rotation_name` to `hotkey`. Multiple rotations may be bound to
+        the same hotkey -- pressing it fires all of them -- so, unlike the old
+        exclusive design, this never rejects a hotkey just because another
+        rotation already uses it."""
         if hotkey == self._panic_key:
             raise ValueError(f"'{display_name(hotkey)}' is reserved as the panic/stop-all key")
-        existing = self._bound.get(hotkey)
-        if existing is not None and existing != rotation_name:
-            raise ValueError(f"'{display_name(hotkey)}' is already bound to '{existing}'")
-        if existing == rotation_name:
-            return  # already bound to this rotation, nothing to do
+        if self._trigger_keys.get(rotation_name) == hotkey:
+            return  # already bound to this hotkey, nothing to do
+        self._unregister_action_key(self._trigger_handlers, rotation_name)
+        self._trigger_keys[rotation_name] = hotkey
         if self._enabled:
-            self._register_hotkey(hotkey, rotation_name)
-        self._bound[hotkey] = rotation_name
+            self._register_action_key(
+                self._trigger_handlers, rotation_name, hotkey,
+                lambda n=rotation_name: self._rotation_manager.trigger(n))
         log.info(f"bound '{hotkey}' -> '{rotation_name}'")
 
-    def unbind(self, hotkey: str):
-        if hotkey not in self._bound:
+    def unbind(self, rotation_name: str):
+        if rotation_name not in self._trigger_keys:
             return
-        if self._enabled:
-            self._unregister_hotkey(hotkey)
-        name = self._bound.pop(hotkey)
-        log.info(f"unbound '{hotkey}' (was '{name}')")
+        hotkey = self._trigger_keys.pop(rotation_name)
+        self._unregister_action_key(self._trigger_handlers, rotation_name)
+        log.info(f"unbound '{hotkey}' (was '{rotation_name}')")
 
-    def rebind(self, old_hotkey, new_hotkey, rotation_name: str):
-        if old_hotkey:
-            self.unbind(old_hotkey)
+    def rebind(self, new_hotkey, rotation_name: str):
+        self.unbind(rotation_name)
         if new_hotkey:
             self.bind(new_hotkey, rotation_name)
 
@@ -202,8 +190,11 @@ class HotkeyManager:
         if self._enabled:
             return
         self._register_panic_key()
-        for hotkey, name in self._bound.items():
-            self._register_hotkey(hotkey, name)
+        for rotation_name, hotkey in self._trigger_keys.items():
+            if hotkey:
+                self._register_action_key(
+                    self._trigger_handlers, rotation_name, hotkey,
+                    lambda n=rotation_name: self._rotation_manager.trigger(n))
         for rotation_name, cancel_key in self._cancel_keys.items():
             if cancel_key:
                 self._register_action_key(
@@ -226,10 +217,13 @@ class HotkeyManager:
             return
         keyboard.unhook_all_hotkeys()
         mouse.unhook_all()
-        self._mouse_handlers.clear()
-        # mouse-based cancel/reset/pause-key handlers were already released by
-        # mouse.unhook_all() above; keyboard-hook-based ones are a separate
+        # mouse-based trigger/cancel/reset/pause-key handlers were already released
+        # by mouse.unhook_all() above; keyboard-hook-based ones are a separate
         # registry keyboard doesn't touch, so those still need releasing explicitly.
+        for kind, handler in self._trigger_handlers.values():
+            if kind == "keyboard":
+                keyboard.unhook(handler)
+        self._trigger_handlers.clear()
         for kind, handler in self._cancel_handlers.values():
             if kind == "keyboard":
                 keyboard.unhook(handler)
@@ -254,8 +248,8 @@ class HotkeyManager:
         a keyboard press, or "mouse:<button>" for a mouse click.
         """
         if self._enabled:
-            for hotkey in list(self._bound.keys()):
-                self._unregister_hotkey(hotkey)
+            for rotation_name in list(self._trigger_keys.keys()):
+                self._unregister_action_key(self._trigger_handlers, rotation_name)
 
         result = {}
         done = threading.Event()
@@ -280,5 +274,7 @@ class HotkeyManager:
             keyboard.unhook(on_key_event)
             mouse.unhook(on_mouse_event)
             if self._enabled:
-                for hotkey, name in self._bound.items():
-                    self._register_hotkey(hotkey, name)
+                for rotation_name, hotkey in self._trigger_keys.items():
+                    self._register_action_key(
+                        self._trigger_handlers, rotation_name, hotkey,
+                        lambda n=rotation_name: self._rotation_manager.trigger(n))

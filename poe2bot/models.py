@@ -48,7 +48,9 @@ class Condition:
 
 @dataclass
 class Step:
-    key: str
+    key: Optional[str] = None   # None = no keybind assigned yet -- skipped entirely at runtime (no fire,
+                                 # no delay); "" = a deliberate sleep/pause (waits out delay_ms, presses
+                                 # nothing); anything else = the actual key to press
     name: str = ""   # optional display label (e.g. "Fireball"); falls back to `key` in the GUI if blank
     delay_ms: int = 100
     jitter_ms: int = 0
@@ -84,7 +86,7 @@ class Step:
         pixel_pos = data.get("ready_pixel_pos")
         pixel_color = data.get("ready_pixel_color")
         return Step(
-            key=data["key"],
+            key=data.get("key"),
             name=data.get("name", ""),
             delay_ms=int(data.get("delay_ms", 100)),
             jitter_ms=int(data.get("jitter_ms", 0)),
@@ -209,8 +211,11 @@ def validate_rotation(rotation: Rotation) -> List[str]:
         problems.append("Rotation must have at least one step.")
 
     for i, step in enumerate(rotation.steps, start=1):
-        # A blank key means this step is a sleep/pause: no key to press, it just
-        # waits out delay_ms (+/- jitter_ms) like any other step's post-fire wait.
+        # key is None -- no keybind assigned yet -- means this step is skipped
+        # entirely at runtime (not an error; the GUI's Add Step defaults to this).
+        # key == "" means this step is a deliberate sleep/pause: no key to press,
+        # it just waits out delay_ms (+/- jitter_ms) like any other step's
+        # post-fire wait. Both are falsy, so this check is skipped for either.
         if step.key and step.key.strip():
             try:
                 keyboard.key_to_scan_codes(step.key)

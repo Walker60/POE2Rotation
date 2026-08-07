@@ -281,7 +281,19 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    tying the wait to any particular skill. It shows up in the list as "Sleep"
    unless you give it its own Name. You can also turn any existing step into a
    sleep by clearing its Key field and clicking Update Selected, or turn a sleep
-   back into a real step by typing a key into it. **Save Rotation** always
+   back into a real step by typing a key into it.
+
+   **Add Step** with an empty Key field is different from a sleep step: it
+   creates a step with no keybind *assigned yet*, shown as "(no key)" in the
+   list (Name defaults to "Skill" so it's easy to find and rename). A step
+   with no keybind assigned is skipped entirely when the rotation runs — no
+   key pressed, no Delay waited out, straight to the next step — rather than
+   pausing like a sleep step does. Type a key into it whenever you're ready
+   and it behaves like any other step from then on. This only applies to
+   **Add Step**; **Add Sleep** always creates a real, deliberate pause
+   regardless of what's in the Key field.
+
+   **Save Rotation** always
    applies whatever's currently in the step form to the selected step first, as
    if Update Selected had just been clicked — so editing a step's fields (or
    recalibrating its cooldown check) and going straight to Save Rotation is
