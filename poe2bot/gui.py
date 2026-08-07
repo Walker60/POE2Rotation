@@ -352,8 +352,8 @@ class App(tk.Tk):
         edit_row.pack(fill="x")
         self.step_name_var = tk.StringVar()
         self.step_key_var = tk.StringVar()
-        self.step_delay_var = tk.StringVar(value="100")
-        self.step_jitter_var = tk.StringVar(value="0")
+        self.step_delay_var = tk.StringVar(value="10")
+        self.step_jitter_var = tk.StringVar(value="5")
         self.step_hold_var = tk.StringVar(value="0")
         self.step_hold_jitter_var = tk.StringVar(value="0")
         for label, var, width in (
@@ -365,7 +365,7 @@ class App(tk.Tk):
             ttk.Label(edit_row, text=label).pack(side="left")
             ttk.Entry(edit_row, textvariable=var, width=width).pack(side="left", padx=(2, 8))
 
-        self.step_ready_timeout_var = tk.StringVar(value="300")
+        self.step_ready_timeout_var = tk.StringVar(value="0")
         self.step_ready_confidence_var = tk.StringVar(value="0.90")
         self.step_ready_status_var = tk.StringVar(value="No cooldown check")
 
@@ -701,7 +701,7 @@ class App(tk.Tk):
         self.step_ready_region = None
         self.step_ready_pixel_pos = None
         self.step_ready_pixel_color = None
-        self.step_ready_timeout_var.set("300")
+        self.step_ready_timeout_var.set("0")
         self.step_ready_confidence_var.set("0.90")
         self._refresh_ready_status()
 
@@ -900,8 +900,8 @@ class App(tk.Tk):
         self.tree.selection_remove(*self.tree.selection())
         self.step_name_var.set("")
         self.step_key_var.set("")
-        self.step_delay_var.set("100")
-        self.step_jitter_var.set("0")
+        self.step_delay_var.set("10")
+        self.step_jitter_var.set("5")
         self.step_hold_var.set("0")
         self.step_hold_jitter_var.set("0")
         self._reset_ready_form()
