@@ -247,9 +247,16 @@ class RotationRunner:
         self.rotation = rotation
         self.on_status_change = on_status_change
         self._stop_event = threading.Event()
-        # These three are written only by reset()/pause() (another thread) and
+        # These four are written only by stop()/reset()/pause() (another thread) and
         # read/cleared only by _run's own thread, except _paused which pause()
         # also reads/clears directly (see pause() for why that one's safe).
+        # _stop_requested exists separately from _stop_event because stop()/reset()/
+        # pause() all set the same _stop_event to wake any in-flight cooperative wait
+        # instantly -- without a flag recording *which* of them was actually asked
+        # for, a reset()/pause() that lands around the same instant as a stop() would
+        # look identical to _run() afterward, and a real stop() could be silently
+        # swallowed (see stop()/pause()/_do_pause()/_wait_reset_delay() below).
+        self._stop_requested = False
         self._reset_requested = False
         self._pause_requested = False
         self._paused = threading.Event()
@@ -264,6 +271,7 @@ class RotationRunner:
         if self.is_running:
             return
         self._stop_event.clear()
+        self._stop_requested = False
         self._reset_requested = False
         self._pause_requested = False
         self._paused.clear()
@@ -273,6 +281,7 @@ class RotationRunner:
         self._thread.start()
 
     def stop(self):
+        self._stop_requested = True
         self._stop_event.set()
 
     def reset(self):
@@ -284,7 +293,10 @@ class RotationRunner:
         Implemented by (ab)using the same stop_event every cooperative wait in
         _run_once already watches for instant wakeup -- no new polling needed --
         with _reset_requested marking that this particular wakeup should restart
-        the step sequence rather than actually stop the thread."""
+        the step sequence rather than actually stop the thread. If stop() also
+        lands around the same instant, stop() wins (see _run/_do_pause/
+        _wait_reset_delay's _stop_requested checks) -- a reset can't override
+        an explicit stop."""
         if self.is_running:
             self._reset_requested = True
             self._stop_event.set()
@@ -300,7 +312,9 @@ class RotationRunner:
         second call is what this method's `if self._paused.is_set()` branch
         handles, distinguishing "start a pause" from "end one already in
         progress" (for "duration" mode a second press while already paused is
-        just a no-op; it's already counting down to auto-resume)."""
+        just a no-op; it's already counting down to auto-resume). Same
+        stop()-wins guarantee as reset() if a stop() lands around the same
+        instant."""
         if not self.is_running:
             return
         if self._paused.is_set():
@@ -320,9 +334,16 @@ class RotationRunner:
         resume_index = 0
         try:
             while True:
-                if self._stop_event.is_set() and not self._reset_requested and not self._pause_requested:
+                if self._stop_requested:
                     break
                 completed = self._run_once(resume_index)
+                # A genuine stop() always wins over a reset()/pause() that happened to
+                # arrive around the same instant -- all three share the same stop_event
+                # to wake any in-flight cooperative wait instantly, so without this
+                # check first, an unluckily-timed reset/pause hotkey could silently
+                # swallow the user's stop request and leave the rotation running.
+                if self._stop_requested:
+                    break
                 if self._reset_requested:
                     log.info(f"[{self.rotation.name}] reset to start")
                     self._reset_requested = False
@@ -351,24 +372,22 @@ class RotationRunner:
         reset()/stop() interrupts it. Returns True if _run's main loop should
         continue -- either to resume normally, or because a reset() arrived
         while paused and needs _run's own reset-handling to take over -- and
-        False only for a genuine, non-reset stop() (reset() also sets
-        stop_event to wake this wait instantly, so it must be told apart from
-        a real stop rather than treated as one)."""
+        False only if a genuine stop() was requested, even if a reset/pause
+        also raced in alongside it (a real stop always wins)."""
         log.info(f"[{self.rotation.name}] paused ({self.rotation.pause_mode})")
         self._paused.set()
         self._notify(STATUS_PAUSED)
         try:
             if self.rotation.pause_mode == "toggle":
-                while self._paused.is_set() and not self._reset_requested:
-                    if self._stop_event.wait(timeout=0.1) and not self._reset_requested:
-                        return False
+                while self._paused.is_set() and not self._reset_requested and not self._stop_requested:
+                    self._stop_event.wait(timeout=0.1)
             else:
                 deadline = time.perf_counter() + self.rotation.pause_duration_ms / 1000
-                while time.perf_counter() < deadline and not self._reset_requested:
+                while (time.perf_counter() < deadline
+                       and not self._reset_requested and not self._stop_requested):
                     remaining = max(0.0, deadline - time.perf_counter())
-                    if self._stop_event.wait(timeout=min(0.1, remaining)) and not self._reset_requested:
-                        return False
-            return True
+                    self._stop_event.wait(timeout=min(0.1, remaining))
+            return not self._stop_requested
         finally:
             self._paused.clear()
             self._notify(STATUS_RUNNING)
@@ -379,16 +398,17 @@ class RotationRunner:
         via the shared stop_event. Returns True to let _run's own dispatch
         proceed -- either the delay elapsed normally, or another reset/pause
         arrived and will be handled the usual way on the next loop iteration
-        -- and False only for a genuine stop() with nothing else pending."""
+        -- and False only if a genuine stop() was requested, even if a
+        reset/pause also raced in alongside it (a real stop always wins)."""
         self._notify(STATUS_RESETTING)
         try:
             deadline = time.perf_counter() + self.rotation.reset_delay_ms / 1000
             while (time.perf_counter() < deadline
-                   and not self._reset_requested and not self._pause_requested):
+                   and not self._reset_requested and not self._pause_requested
+                   and not self._stop_requested):
                 remaining = max(0.0, deadline - time.perf_counter())
-                if self._stop_event.wait(timeout=min(0.1, remaining)):
-                    break
-            return self._reset_requested or self._pause_requested or not self._stop_event.is_set()
+                self._stop_event.wait(timeout=min(0.1, remaining))
+            return not self._stop_requested
         finally:
             self._notify(STATUS_RUNNING)
 
@@ -409,7 +429,13 @@ class RotationRunner:
             if not step.key:
                 # Sleep step: no key to check readiness for or fire, just pause for
                 # delay_ms (+/- jitter_ms) like any other step's post-fire wait,
-                # repeat_count times if set.
+                # repeat_count times if set. Conditions still gate it exactly like a
+                # normal step's do (checked once, no polling) -- a failing condition
+                # skips the wait entirely rather than pausing anyway.
+                if not all(_check_condition(c, step.key or "sleep") for c in step.conditions):
+                    if not self._stop_event.is_set():
+                        log.info(f"[{self.rotation.name}] sleep step's conditions not met; skipping")
+                    continue
                 log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms"
                           + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
                 if not self._fire_repeats(step, _check_buff_active(step)):
