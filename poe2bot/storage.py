@@ -28,7 +28,13 @@ def _folder_parts(folder: str) -> list:
     return parts
 
 
-def _path_for(name: str, folder: str = "") -> str:
+def path_for(name: str, folder: str = "") -> str:
+    """Where `name` in `folder` actually lives on disk. Public (not `_path_for`)
+    because callers outside this module need it too -- e.g. the GUI's save
+    validation compares this across every existing rotation to catch two
+    different display names that sanitize to the same file (see _slugify:
+    it folds case and punctuation, so "Fire Ball" and "Fire-Ball" collide
+    here even though they're clearly different names to a human)."""
     return os.path.join(config.ROTATIONS_DIR, *_folder_parts(folder), f"{_slugify(name)}.json")
 
 
@@ -50,7 +56,12 @@ def list_rotations() -> list:
     for path, folder in _iter_rotation_files():
         try:
             rotation = load_rotation_from_file(path)
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
+            # TypeError included alongside the obvious parse-failure types because
+            # dict.get(key, default) only substitutes `default` when `key` is
+            # *absent* -- an explicit JSON null (e.g. a hand-edited "delay_ms":
+            # null) makes int(None)/tuple(None-ish) raise TypeError instead, and
+            # one bad file must not take down every other valid rotation with it.
             continue
         names.append(rotation.name)
     return names
@@ -62,7 +73,7 @@ def load_rotation_from_file(path: str) -> Rotation:
 
 
 def load_rotation(name: str, folder: str = "") -> Rotation:
-    rotation = load_rotation_from_file(_path_for(name, folder))
+    rotation = load_rotation_from_file(path_for(name, folder))
     rotation.folder = folder
     return rotation
 
@@ -72,7 +83,12 @@ def load_all_rotations() -> dict:
     for path, folder in _iter_rotation_files():
         try:
             rotation = load_rotation_from_file(path)
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
+            # TypeError included alongside the obvious parse-failure types because
+            # dict.get(key, default) only substitutes `default` when `key` is
+            # *absent* -- an explicit JSON null (e.g. a hand-edited "delay_ms":
+            # null) makes int(None)/tuple(None-ish) raise TypeError instead, and
+            # one bad file must not take down every other valid rotation with it.
             continue
         rotation.folder = folder
         rotations[rotation.name] = rotation
@@ -80,7 +96,7 @@ def load_all_rotations() -> dict:
 
 
 def save_rotation(rotation: Rotation) -> None:
-    path = _path_for(rotation.name, rotation.folder)
+    path = path_for(rotation.name, rotation.folder)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -89,7 +105,7 @@ def save_rotation(rotation: Rotation) -> None:
 
 
 def delete_rotation(name: str, folder: str = "") -> None:
-    path = _path_for(name, folder)
+    path = path_for(name, folder)
     if os.path.exists(path):
         os.remove(path)
     _prune_empty_dirs(folder)
