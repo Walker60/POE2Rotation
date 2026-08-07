@@ -10,6 +10,37 @@ VALID_MODES = ("once", "loop")
 VALID_PAUSE_MODES = ("duration", "toggle")
 VALID_READY_MATCH_TYPES = ("image", "pixel")
 VALID_SEARCH_MODES = ("exact", "area")
+MAX_REPEAT_COUNT = 50
+
+
+def _int_or(data: dict, key: str, default: int) -> int:
+    """int(data.get(key, default)), but also falls back to `default` when the
+    key is present with an explicit JSON null -- dict.get's own default only
+    kicks in when the key is absent entirely, so a hand-edited/stale rotation
+    file with e.g. "delay_ms": null would otherwise raise int(None) -> TypeError,
+    a type storage.py's loaders don't catch, crashing the whole app on launch
+    instead of just skipping that one bad file."""
+    value = data.get(key)
+    return default if value is None else int(value)
+
+
+def _float_or(data: dict, key: str, default: float) -> float:
+    """Same null-safety as _int_or, for float fields (e.g. confidence)."""
+    value = data.get(key)
+    return default if value is None else float(value)
+
+
+def _int_tuple(values) -> Optional[tuple]:
+    """Coerce a JSON-decoded region/point/color into a tuple of ints, or None
+    if `values` itself is None. Element-wise int() (rather than a bare
+    tuple()) fixes numerically-valid-but-string-typed hand-edited JSON (e.g.
+    "100" instead of 100), and turns genuinely bad data (non-numeric strings,
+    wrong element types) into a clean ValueError/TypeError here at load time
+    -- caught by storage.py and treated as "skip this bad file" -- instead of
+    a confusing failure deep inside a match function much later at runtime."""
+    if values is None:
+        return None
+    return tuple(int(v) for v in values)
 
 
 @dataclass
@@ -37,20 +68,16 @@ class Condition:
 
     @staticmethod
     def from_dict(data: dict) -> "Condition":
-        region = data.get("region")
-        search_region = data.get("search_region")
-        pixel_pos = data.get("pixel_pos")
-        pixel_color = data.get("pixel_color")
         return Condition(
             match_type=data.get("match_type", "image"),
             name=data.get("name", ""),
             template=data.get("template"),
-            region=tuple(region) if region is not None else None,
+            region=_int_tuple(data.get("region")),
             search_mode=data.get("search_mode", "exact"),
-            search_region=tuple(search_region) if search_region is not None else None,
-            pixel_pos=tuple(pixel_pos) if pixel_pos is not None else None,
-            pixel_color=tuple(pixel_color) if pixel_color is not None else None,
-            confidence=float(data.get("confidence", 0.9)),
+            search_region=_int_tuple(data.get("search_region")),
+            pixel_pos=_int_tuple(data.get("pixel_pos")),
+            pixel_color=_int_tuple(data.get("pixel_color")),
+            confidence=_float_or(data, "confidence", 0.9),
         )
 
 
@@ -94,31 +121,34 @@ class Step:
 
     @staticmethod
     def from_dict(data: dict) -> "Step":
-        region = data.get("ready_region")
-        search_region = data.get("ready_search_region")
-        pixel_pos = data.get("ready_pixel_pos")
-        pixel_color = data.get("ready_pixel_color")
+        # A whitespace-only key (e.g. a hand-edited "key": "   ") is truthy, so it
+        # would otherwise slip past both the sleep-step check (`not step.key`) and
+        # validate_rotation's `step.key.strip()` guard as a third, unintended
+        # pseudo-state -- normalizing it to "" here (a real, deliberate sleep step)
+        # or leaving None alone means those two checks never need to know about it.
+        raw_key = data.get("key")
+        key = raw_key.strip() if isinstance(raw_key, str) else raw_key
         return Step(
-            key=data.get("key"),
+            key=key,
             name=data.get("name", ""),
-            delay_ms=int(data.get("delay_ms", 100)),
-            jitter_ms=int(data.get("jitter_ms", 0)),
-            hold_ms=int(data.get("hold_ms", 0)),
-            hold_jitter_ms=int(data.get("hold_jitter_ms", 0)),
+            delay_ms=_int_or(data, "delay_ms", 100),
+            jitter_ms=_int_or(data, "jitter_ms", 0),
+            hold_ms=_int_or(data, "hold_ms", 0),
+            hold_jitter_ms=_int_or(data, "hold_jitter_ms", 0),
             ready_match_type=data.get("ready_match_type", "image"),
             ready_template=data.get("ready_template"),
-            ready_region=tuple(region) if region is not None else None,  # JSON round-trips tuples as lists
+            ready_region=_int_tuple(data.get("ready_region")),  # JSON round-trips tuples as lists
             ready_search_mode=data.get("ready_search_mode", "exact"),
-            ready_search_region=tuple(search_region) if search_region is not None else None,
-            ready_pixel_pos=tuple(pixel_pos) if pixel_pos is not None else None,
-            ready_pixel_color=tuple(pixel_color) if pixel_color is not None else None,
-            ready_confidence=float(data.get("ready_confidence", 0.9)),
-            ready_timeout_ms=int(data.get("ready_timeout_ms", 300)),
+            ready_search_region=_int_tuple(data.get("ready_search_region")),
+            ready_pixel_pos=_int_tuple(data.get("ready_pixel_pos")),
+            ready_pixel_color=_int_tuple(data.get("ready_pixel_color")),
+            ready_confidence=_float_or(data, "ready_confidence", 0.9),
+            ready_timeout_ms=_int_or(data, "ready_timeout_ms", 300),
             conditions=[Condition.from_dict(c) for c in data.get("conditions", [])],
             buff_check=Condition.from_dict(data["buff_check"]) if data.get("buff_check") else None,
             buff_hold_ms=int(data["buff_hold_ms"]) if data.get("buff_hold_ms") is not None else None,
             buff_delay_ms=int(data["buff_delay_ms"]) if data.get("buff_delay_ms") is not None else None,
-            repeat_count=int(data.get("repeat_count", 1)),
+            repeat_count=_int_or(data, "repeat_count", 1),
             repeat_combine_hold=bool(data.get("repeat_combine_hold", False)),
         )
 
@@ -161,10 +191,10 @@ class Rotation:
             hotkey=data.get("hotkey"),
             cancel_key=data.get("cancel_key"),
             reset_key=data.get("reset_key"),
-            reset_delay_ms=int(data.get("reset_delay_ms", 0)),
+            reset_delay_ms=_int_or(data, "reset_delay_ms", 0),
             pause_key=data.get("pause_key"),
             pause_mode=data.get("pause_mode", "duration"),
-            pause_duration_ms=int(data.get("pause_duration_ms", 1000)),
+            pause_duration_ms=_int_or(data, "pause_duration_ms", 1000),
             steps=[Step.from_dict(step) for step in data.get("steps", [])],
         )
 
@@ -289,6 +319,12 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                     f"Step {i}", "", step.ready_search_mode, step.ready_search_region, step.ready_region))
 
         for j, condition in enumerate(step.conditions, start=1):
+            if not condition.has_check():
+                # Not yet calibrated -- treated as "this condition is off," the same
+                # as an uncalibrated cooldown check or buff check just above/below,
+                # not as an error. Only reachable via hand-edited JSON; the GUI's
+                # own Add Condition flow always produces a fully-calibrated one.
+                continue
             if condition.match_type not in VALID_READY_MATCH_TYPES:
                 problems.append(f"Step {i}, condition {j}: match_type must be one of {VALID_READY_MATCH_TYPES}.")
             if not (0 < condition.confidence <= 1):
@@ -339,5 +375,9 @@ def validate_rotation(rotation: Rotation) -> List[str]:
 
         if step.repeat_count < 1:
             problems.append(f"Step {i}: repeat count must be at least 1.")
+        elif step.repeat_count > MAX_REPEAT_COUNT:
+            problems.append(f"Step {i}: repeat count of {step.repeat_count} is over the sanity limit of "
+                             f"{MAX_REPEAT_COUNT} -- with Combine Hold this would hold a key down for a "
+                             f"very long time. Lower it, or split this into a Loop rotation instead.")
 
     return problems
