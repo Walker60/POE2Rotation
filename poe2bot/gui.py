@@ -1,4 +1,5 @@
 import copy
+import os
 import queue
 import threading
 import tkinter as tk
@@ -165,9 +166,18 @@ class App(tk.Tk):
         self.step_ready_pixel_pos = None      # (x, y) absolute screen coords, for pixel-match mode
         self.step_ready_pixel_color = None    # (r, g, b) expected "ready" color, for pixel-match mode
         self.step_buff_check = None           # Condition for the step being edited's buff check, or None
-        self._selected_step_snapshot = None   # _current_step_form_snapshot() as of the last _on_select_step,
-                                               # so Add Step/Add Sleep can tell an untouched selection (clone
-                                               # risk) apart from one the user has since edited (see below)
+        # Snapshots of the form's core/ready-check/buff-check fields as of the last
+        # _on_select_step, kept independently (not one combined snapshot) so Add
+        # Step/Add Sleep can tell exactly which *section* of the form the user has
+        # touched since selecting -- e.g. changing only the Key must not also carry
+        # a stale, untouched Cooldown Check over onto what's meant to be a new step
+        # (see _discard_selected_step_edits).
+        self._selected_step_core_snapshot = None
+        self._selected_step_ready_snapshot = None
+        self._selected_step_buff_snapshot = None
+        self._steps_tree_render_order = []    # editing_steps order as of the last _refresh_steps_tree,
+                                               # so a manual row collapse/expand can be re-attached to the
+                                               # right Step object (by identity) even after a reorder
         self._step_clipboard = []             # list[Step], set by Copy -- lives on the App, so it
                                                # survives switching rotations (enables cross-rotation paste)
         self._drag_candidate = None    # list[(step_idx, cond_idx_or_None)] being dragged, or None
@@ -641,6 +651,7 @@ class App(tk.Tk):
         self.pause_key_label_var.set(display_name(rotation.pause_key))
         self.pause_mode_var.set(rotation.pause_mode)
         self.pause_duration_var.set(str(rotation.pause_duration_ms))
+        self._reset_step_core_fields()
         self._reset_ready_form()
         self._reset_buff_form()
         self._refresh_steps_tree()
@@ -662,6 +673,7 @@ class App(tk.Tk):
         self.pause_key_label_var.set("(unbound)")
         self.pause_mode_var.set("duration")
         self.pause_duration_var.set("1000")
+        self._reset_step_core_fields()
         self._reset_ready_form()
         self._reset_buff_form()
         self._refresh_steps_tree()
@@ -712,6 +724,23 @@ class App(tk.Tk):
         while f"{base_name} {n}" in self.rotations:
             n += 1
         return f"{base_name} {n}"
+
+    def _reset_step_core_fields(self):
+        """Blank defaults for a step not yet filled in. Shared by every place
+        that must guarantee the step-editing form isn't showing stale data
+        left over from whatever step or rotation was previously open --
+        _discard_selected_step_edits (an untouched selection), and
+        _new_rotation/_load_rotation_into_form (switching rotations), which
+        for the same reason also call _reset_ready_form/_reset_buff_form."""
+        self.step_name_var.set("Skill")
+        self.step_key_var.set("")
+        self.step_delay_var.set("20")
+        self.step_jitter_var.set("10")
+        self.step_hold_var.set("30")
+        self.step_hold_jitter_var.set("10")
+        self.step_repeat_var.set("1")
+        self.step_repeat_combine_hold_var.set(False)
+        self.condition_name_var.set("")
 
     def _reset_ready_form(self):
         self.step_ready_match_type = "image"
@@ -769,6 +798,23 @@ class App(tk.Tk):
     # ---- step editing ----------------------------------------------------
 
     def _refresh_steps_tree(self):
+        # Steps don't have stable ids of their own, only a position that shifts on
+        # every add/remove/reorder -- so "was this step's row open?" is tracked by
+        # the Step object's identity (stable across a reorder/move, since those
+        # just relocate the same objects) rather than by index, otherwise a manual
+        # collapse/expand would silently jump to whatever step next lands at that
+        # same row number instead of following the step the user actually toggled.
+        # The tree's current rows still reflect whatever order self.editing_steps
+        # was in on the *previous* call (cached below), not its current order --
+        # e.g. right after a reorder, "step-0" on screen right now is still the
+        # step that used to be first, so that previous order (not today's) is
+        # what must be used to look up each row's current open/closed state.
+        previously_open = set()
+        previously_closed = set()
+        for i, step in enumerate(getattr(self, "_steps_tree_render_order", [])):
+            iid = f"step-{i}"
+            if self.tree.exists(iid):
+                (previously_open if self.tree.item(iid, "open") else previously_closed).add(id(step))
         self.tree.delete(*self.tree.get_children())
         for i, step in enumerate(self.editing_steps):
             if step.key is None:
@@ -779,15 +825,22 @@ class App(tk.Tk):
                 key_col, fallback_label = step.key, step.key
             label = step.name or fallback_label
             step_iid = f"step-{i}"
+            if id(step) in previously_closed:
+                is_open = False
+            elif id(step) in previously_open:
+                is_open = True
+            else:
+                is_open = bool(step.conditions)  # a step never shown before -- today's default
             self.tree.insert("", tk.END, iid=step_iid, text=label,
                               values=(key_col, step.delay_ms,
                                       step.jitter_ms, step.hold_ms, step.hold_jitter_ms,
                                       step.repeat_count),
-                              open=bool(step.conditions))
+                              open=is_open)
             for j, condition in enumerate(step.conditions):
                 self.tree.insert(step_iid, tk.END, iid=f"{step_iid}-cond-{j}",
                                   text=self._condition_summary(condition),
                                   values=("", "", "", "", "", ""))
+        self._steps_tree_render_order = list(self.editing_steps)
 
     @staticmethod
     def _condition_summary(condition) -> str:
@@ -841,6 +894,9 @@ class App(tk.Tk):
         if not selection:
             messagebox.showinfo("No step selected", "Select a step (or one of its conditions) first.")
             return None
+        if len(selection) > 1:
+            messagebox.showinfo("Select one step", "Select exactly one step (or one of its conditions) for this action.")
+            return None
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return None
@@ -877,28 +933,48 @@ class App(tk.Tk):
         self.step_buff_hold_var.set("" if step.buff_hold_ms is None else str(step.buff_hold_ms))
         self.step_buff_delay_var.set("" if step.buff_delay_ms is None else str(step.buff_delay_ms))
         self._refresh_buff_status()
-        self._selected_step_snapshot = self._current_step_form_snapshot()
+        self._selected_step_core_snapshot = self._core_step_form_snapshot()
+        self._selected_step_ready_snapshot = self._ready_check_form_snapshot()
+        self._selected_step_buff_snapshot = self._buff_check_form_snapshot()
 
-    def _current_step_form_snapshot(self) -> tuple:
-        """A cheap, side-effect-free snapshot of every step-editing widget's
-        raw value (deliberately raw strings/attrs, not parsed ints -- this
+    def _core_step_form_snapshot(self) -> tuple:
+        """A cheap, side-effect-free snapshot of the Name/Key/Delay/.../Repeat
+        fields' raw values (deliberately raw strings, not parsed ints -- this
         must never risk popping the "Invalid step" dialog just from being
-        computed). Used only to tell whether the form still exactly matches
-        whatever _on_select_step last loaded into it, or the user has since
-        changed something (see _discard_selected_step_edits)."""
+        computed). See _discard_selected_step_edits for how this, plus the
+        ready-check/buff-check snapshots below, are used."""
         return (
             self.step_name_var.get(), self.step_key_var.get(),
             self.step_delay_var.get(), self.step_jitter_var.get(),
             self.step_hold_var.get(), self.step_hold_jitter_var.get(),
             self.step_repeat_var.get(), self.step_repeat_combine_hold_var.get(),
+        )
+
+    def _ready_check_form_snapshot(self) -> tuple:
+        """Same idea as _core_step_form_snapshot, for the Cooldown Check group."""
+        return (
             self.step_ready_match_type, self.step_ready_template, self.step_ready_region,
             self.step_ready_search_mode, self.step_ready_search_region,
             self.step_ready_pixel_pos, self.step_ready_pixel_color,
             self.step_ready_timeout_var.get(), self.step_ready_confidence_var.get(),
-            self.step_buff_check, self.step_buff_hold_var.get(), self.step_buff_delay_var.get(),
         )
 
-    def _read_step_form(self, conditions=None):
+    def _buff_check_form_snapshot(self) -> tuple:
+        """Same idea as _core_step_form_snapshot, for the Buff Check group."""
+        return self.step_buff_check, self.step_buff_hold_var.get(), self.step_buff_delay_var.get()
+
+    def _read_step_form(self, conditions=None, is_new_step=True, original_key=None):
+        """Builds a Step from the form's current contents. `original_key`
+        (the key the step being *replaced* already had; ignored when
+        is_new_step) resolves what a blank Key field means, since the Entry
+        shows the same blank text for both "not yet assigned" (None) and "a
+        deliberate sleep step" (""). A brand new step (is_new_step, e.g. Add
+        Step) left blank means "not yet assigned" (None). An *existing* step
+        left blank means: still unassigned if it already was (original_key is
+        None) -- editing other fields shouldn't accidentally turn an
+        unassigned step into a sleep step -- otherwise a deliberate sleep
+        step (""), preserving the documented "clear Key + Update Selected"
+        conversion for a step that had a real key before."""
         try:
             delay = int(self.step_delay_var.get())
             jitter = int(self.step_jitter_var.get())
@@ -917,8 +993,15 @@ class App(tk.Tk):
                 "Delay/jitter/hold/hold jitter/timeout/buff hold/buff delay/repeat must be whole "
                 "numbers (buff hold/delay may be left blank), and confidence must be a decimal (e.g. 0.9).")
             return None
+        key_text = self.step_key_var.get().strip()
+        if key_text:
+            key = key_text
+        elif is_new_step:
+            key = None   # a brand new step (Add Step) with no Key typed -- not yet assigned
+        else:
+            key = original_key if original_key is None else ""
         step = Step(
-            key=self.step_key_var.get().strip(),
+            key=key,
             name=self.step_name_var.get().strip(),
             delay_ms=delay,
             jitter_ms=jitter,
@@ -948,45 +1031,38 @@ class App(tk.Tk):
         return step
 
     def _discard_selected_step_edits(self):
-        """If a tree row is currently selected AND the form still exactly
-        matches whatever _on_select_step loaded into it (the user hasn't
-        touched anything since), Add Step/Add Sleep must not silently read
-        that as if it were a fresh step -- that's how "Add Step" used to end
-        up cloning whatever's highlighted -- so clear the selection and reset
-        every step field to blank defaults first. But if the form no longer
-        matches (the user has since typed a new key, changed the delay,
-        recalibrated a check, etc.), that's a deliberate edit meant to become
-        a new step, not something to discard -- only the tree's own selection
-        highlight is cleared, the field values are left exactly as typed.
-        No-op entirely if nothing is selected, so typing values and clicking
-        Add Step repeatedly to add several similarly-timed steps still works."""
+        """If a tree row is currently selected, Add Step/Add Sleep must not
+        silently read whatever _on_select_step loaded into the form as if it
+        were a fresh step -- that's how "Add Step" used to end up cloning
+        whatever's highlighted. Checked independently per section (core
+        fields / Cooldown Check / Buff Check), not as one all-or-nothing
+        snapshot: changing just the Key to build a similar-but-new step must
+        still discard a stale, untouched Cooldown Check from the step that
+        was selected, rather than silently carrying someone else's calibrated
+        icon over onto what's meant to be an unrelated new step. Any section
+        the user *did* touch since selecting (recalibrated a check, edited a
+        core field, etc.) is left exactly as they left it -- only untouched
+        sections reset to blank. No-op entirely if nothing is selected, so
+        typing values and clicking Add Step repeatedly to add several
+        similarly-timed steps still works."""
         if not self.tree.selection():
             return
         self.tree.selection_remove(*self.tree.selection())
-        if self._current_step_form_snapshot() != self._selected_step_snapshot:
-            return
-        self.step_name_var.set("Skill")
-        self.step_key_var.set("")
-        self.step_delay_var.set("20")
-        self.step_jitter_var.set("10")
-        self.step_hold_var.set("30")
-        self.step_hold_jitter_var.set("10")
-        self.step_repeat_var.set("1")
-        self.step_repeat_combine_hold_var.set(False)
-        self._reset_ready_form()
-        self._reset_buff_form()
+        if self._core_step_form_snapshot() == self._selected_step_core_snapshot:
+            self._reset_step_core_fields()
+        if self._ready_check_form_snapshot() == self._selected_step_ready_snapshot:
+            self._reset_ready_form()
+        if self._buff_check_form_snapshot() == self._selected_step_buff_snapshot:
+            self._reset_buff_form()
 
     def _add_step(self):
         self._discard_selected_step_edits()
+        # No original_key -- this is a brand new step, so a blank Key field means
+        # "not yet assigned" (None, skipped at runtime), never a sleep step. Use
+        # Add Sleep for a deliberate keyless pause.
         step = self._read_step_form()
         if step is None:
             return
-        if not step.key:
-            # Add Step never creates a sleep step -- an empty Key here means no
-            # keybind has been assigned, which is skipped entirely at runtime
-            # (see RotationRunner._run_once), not waited on. Use Add Sleep for
-            # a deliberate keyless pause, or type a key into this step later.
-            step.key = None
         self.editing_steps.append(step)
         self._refresh_steps_tree()
         self._reset_ready_form()
@@ -1024,12 +1100,15 @@ class App(tk.Tk):
         if not self._step_clipboard:
             messagebox.showinfo("Clipboard is empty", "Copy a step first.")
             return
+        # Captured before _apply_pending_step_edits, which -- if it actually applies
+        # an edit -- calls _refresh_steps_tree and clears the tree's selection, so
+        # re-reading it afterward would silently paste at the end instead of after
+        # whatever was selected.
         selection = self.tree.selection()
-        if selection:
-            parsed = self._parse_tree_iid(selection[0])
-            insert_at = parsed[0] + 1 if parsed is not None else len(self.editing_steps)
-        else:
-            insert_at = len(self.editing_steps)
+        parsed = self._parse_tree_iid(selection[0]) if selection else None
+        if not self._apply_pending_step_edits():
+            return
+        insert_at = parsed[0] + 1 if parsed is not None else len(self.editing_steps)
         pasted = copy.deepcopy(self._step_clipboard)  # independent objects each time, so repeated pastes don't share state
         self.editing_steps[insert_at:insert_at] = pasted
         self._refresh_steps_tree()
@@ -1039,7 +1118,9 @@ class App(tk.Tk):
         i = self._selected_step_index()
         if i is None:
             return
-        step = self._read_step_form(conditions=self.editing_steps[i].conditions)
+        step = self._read_step_form(
+            conditions=self.editing_steps[i].conditions,
+            is_new_step=False, original_key=self.editing_steps[i].key)
         if step is None:
             return
         self.editing_steps[i] = step
@@ -1074,6 +1155,11 @@ class App(tk.Tk):
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return
+        # Apply whatever's pending in the step form first (e.g. an edit the user
+        # was about to click Update Selected for) so moving the step doesn't
+        # silently discard it -- same protection Save Rotation already has.
+        if not self._apply_pending_step_edits():
+            return
         step_idx, cond_idx = parsed
         if cond_idx is None:
             if step_idx == 0:
@@ -1098,6 +1184,10 @@ class App(tk.Tk):
             return
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
+            return
+        # See _move_step_up: apply any pending form edit before moving, so it
+        # isn't silently discarded.
+        if not self._apply_pending_step_edits():
             return
         step_idx, cond_idx = parsed
         if cond_idx is None:
@@ -1205,6 +1295,16 @@ class App(tk.Tk):
                 self.tree.focus(row)
             return
         self._drag_active = False
+        # If the row(s) being dragged are exactly what's currently selected (the
+        # common case -- you select a step, then drag that same step), apply any
+        # pending form edit first so reordering it doesn't silently discard an
+        # edit still sitting in the form. Skipped when they don't match (e.g.
+        # dragging a row that isn't the current selection) -- there's no single
+        # unambiguous step to apply the form to in that case, so leave it as-is
+        # rather than risk applying it to the wrong step.
+        expected_iids = {f"step-{s}" if c is None else f"step-{s}-cond-{c}" for s, c in candidate}
+        if expected_iids == set(self.tree.selection()) and not self._apply_pending_step_edits():
+            return
         target = self._resolve_drop_target(event, candidate)
         if target is None:
             return
@@ -1613,6 +1713,9 @@ class App(tk.Tk):
         if not selection:
             messagebox.showinfo("No condition selected", "Select a condition in the list first.")
             return
+        if len(selection) > 1:
+            messagebox.showinfo("Select one condition", "Select exactly one condition to rename.")
+            return
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None or parsed[1] is None:
             messagebox.showinfo("Select a condition", "Select a condition (not a step) to rename.")
@@ -1798,7 +1901,9 @@ class App(tk.Tk):
         if parsed is None:
             return True
         step_idx = parsed[0]
-        step = self._read_step_form(conditions=self.editing_steps[step_idx].conditions)
+        step = self._read_step_form(
+            conditions=self.editing_steps[step_idx].conditions,
+            is_new_step=False, original_key=self.editing_steps[step_idx].key)
         if step is None:
             return False
         self.editing_steps[step_idx] = step
@@ -1832,6 +1937,23 @@ class App(tk.Tk):
         problems = validate_rotation(rotation)
         if name != self.editing_original_name and name in self.rotations:
             problems.append(f"A rotation named '{name}' already exists.")
+        else:
+            # Two different display names can still sanitize to the same filename
+            # (storage._slugify folds case/punctuation, e.g. "Fire Ball" and
+            # "Fire-Ball" both become fire_ball.json) -- saving would silently
+            # overwrite whichever rotation got there first, with no warning, so
+            # this is checked by comparing actual on-disk paths, not just names.
+            new_path = os.path.normcase(os.path.normpath(storage.path_for(name, rotation.folder)))
+            for other_name, other_rotation in self.rotations.items():
+                if other_name == self.editing_original_name:
+                    continue
+                other_path = os.path.normcase(os.path.normpath(
+                    storage.path_for(other_name, other_rotation.folder)))
+                if other_path == new_path:
+                    problems.append(
+                        f"'{name}' would save to the same file as existing rotation '{other_name}' "
+                        f"(both simplify to the same filename) -- choose a more distinct name.")
+                    break
         if rotation.hotkey and rotation.hotkey == self.hotkey_manager.panic_key:
             problems.append(f"'{display_name(rotation.hotkey)}' is reserved as the panic/stop-all key.")
         if problems:
