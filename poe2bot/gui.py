@@ -164,6 +164,7 @@ class App(tk.Tk):
         self.step_ready_region = None         # (left, top, width, height) absolute screen coords, or None
         self.step_ready_pixel_pos = None      # (x, y) absolute screen coords, for pixel-match mode
         self.step_ready_pixel_color = None    # (r, g, b) expected "ready" color, for pixel-match mode
+        self.step_buff_check = None           # Condition for the step being edited's buff check, or None
         self._step_clipboard = []             # list[Step], set by Copy -- lives on the App, so it
                                                # survives switching rotations (enables cross-rotation paste)
         self._drag_candidate = None    # list[(step_idx, cond_idx_or_None)] being dragged, or None
@@ -367,6 +368,27 @@ class App(tk.Tk):
         ttk.Button(ready_row, text="Pixel Match...", command=self._on_pixel_match_clicked).pack(
             side="left", padx=(0, 4))
         ttk.Button(ready_row, text="Clear", command=self._clear_ready_check).pack(side="left")
+
+        self.step_buff_status_var = tk.StringVar(value="No buff check")
+        buff_group = ttk.LabelFrame(right, text="Buff Check (alternate hold/delay while active)", padding=6)
+        buff_group.pack(fill="x", pady=(0, 6))
+        buff_row = ttk.Frame(buff_group)
+        buff_row.pack(fill="x")
+        ttk.Label(buff_row, textvariable=self.step_buff_status_var, width=20).pack(side="left")
+        ttk.Button(buff_row, text="Image Match...", command=self._on_buff_image_match_clicked).pack(
+            side="left", padx=(8, 4))
+        ttk.Button(buff_row, text="Pixel Match...", command=self._on_buff_pixel_match_clicked).pack(
+            side="left", padx=(0, 4))
+        ttk.Button(buff_row, text="Clear", command=self._clear_buff_check).pack(side="left", padx=(0, 8))
+        ttk.Label(buff_row, text="Hold (ms)").pack(side="left", padx=(0, 2))
+        self.step_buff_hold_var = tk.StringVar(value="")
+        ttk.Entry(buff_row, textvariable=self.step_buff_hold_var, width=6).pack(side="left", padx=(0, 8))
+        ttk.Label(buff_row, text="Delay (ms)").pack(side="left", padx=(0, 2))
+        self.step_buff_delay_var = tk.StringVar(value="")
+        ttk.Entry(buff_row, textvariable=self.step_buff_delay_var, width=6).pack(side="left")
+        ttk.Label(buff_group,
+                  text="Blank Hold/Delay = keep the normal value even while the buff is active.",
+                  foreground="gray").pack(anchor="w", pady=(4, 0))
 
         conditions_group = ttk.LabelFrame(right, text="Conditions", padding=6)
         conditions_group.pack(fill="x", pady=(0, 6))
@@ -586,6 +608,7 @@ class App(tk.Tk):
         self.pause_mode_var.set(rotation.pause_mode)
         self.pause_duration_var.set(str(rotation.pause_duration_ms))
         self._reset_ready_form()
+        self._reset_buff_form()
         self._refresh_steps_tree()
 
     def _new_rotation(self):
@@ -607,6 +630,7 @@ class App(tk.Tk):
         self.pause_mode_var.set("duration")
         self.pause_duration_var.set("1000")
         self._reset_ready_form()
+        self._reset_buff_form()
         self._refresh_steps_tree()
         self.rotation_tree.selection_remove(*self.rotation_tree.selection())
 
@@ -675,6 +699,16 @@ class App(tk.Tk):
             self.step_ready_status_var.set(f"Image: {w}x{h}")
         else:
             self.step_ready_status_var.set("No cooldown check")
+
+    def _reset_buff_form(self):
+        self.step_buff_check = None
+        self.step_buff_hold_var.set("")
+        self.step_buff_delay_var.set("")
+        self._refresh_buff_status()
+
+    def _refresh_buff_status(self):
+        self.step_buff_status_var.set(
+            self._condition_summary(self.step_buff_check) if self.step_buff_check else "No buff check")
 
     def _delete_rotation(self):
         name = self._selected_rotation_name()
@@ -789,6 +823,10 @@ class App(tk.Tk):
         self.step_ready_timeout_var.set(str(step.ready_timeout_ms))
         self.step_ready_confidence_var.set(f"{step.ready_confidence:.2f}")
         self._refresh_ready_status()
+        self.step_buff_check = step.buff_check
+        self.step_buff_hold_var.set("" if step.buff_hold_ms is None else str(step.buff_hold_ms))
+        self.step_buff_delay_var.set("" if step.buff_delay_ms is None else str(step.buff_delay_ms))
+        self._refresh_buff_status()
 
     def _read_step_form(self, conditions=None):
         try:
@@ -798,11 +836,15 @@ class App(tk.Tk):
             hold_jitter = int(self.step_hold_jitter_var.get())
             timeout = int(self.step_ready_timeout_var.get())
             confidence = float(self.step_ready_confidence_var.get())
+            buff_hold_text = self.step_buff_hold_var.get().strip()
+            buff_delay_text = self.step_buff_delay_var.get().strip()
+            buff_hold = int(buff_hold_text) if buff_hold_text else None
+            buff_delay = int(buff_delay_text) if buff_delay_text else None
         except ValueError:
             messagebox.showerror(
                 "Invalid step",
-                "Delay/jitter/hold/hold jitter/timeout must be whole numbers, and "
-                "confidence must be a decimal (e.g. 0.9).")
+                "Delay/jitter/hold/hold jitter/timeout/buff hold/buff delay must be whole numbers "
+                "(buff hold/delay may be left blank), and confidence must be a decimal (e.g. 0.9).")
             return None
         step = Step(
             key=self.step_key_var.get().strip(),
@@ -818,6 +860,9 @@ class App(tk.Tk):
             ready_pixel_color=self.step_ready_pixel_color,
             ready_confidence=confidence,
             ready_timeout_ms=timeout,
+            buff_check=self.step_buff_check,
+            buff_hold_ms=buff_hold,
+            buff_delay_ms=buff_delay,
         )
         if conditions is not None:
             # The form has no fields of its own for conditions -- Update Selected
@@ -834,6 +879,7 @@ class App(tk.Tk):
         self.editing_steps.append(step)
         self._refresh_steps_tree()
         self._reset_ready_form()
+        self._reset_buff_form()
 
     def _add_sleep_step(self):
         """A sleep step has no key -- it's just a pause of delay_ms (+/- jitter_ms)
@@ -846,6 +892,7 @@ class App(tk.Tk):
         self.editing_steps.append(step)
         self._refresh_steps_tree()
         self._reset_ready_form()
+        self._reset_buff_form()
 
     def _on_copy_clicked(self):
         """Copies every currently-selected step (condition-only selections are
@@ -1146,6 +1193,28 @@ class App(tk.Tk):
     def _on_image_match_clicked(self):
         self._start_image_capture()
 
+    # ---- buff-check calibration ----------------------------------------------
+
+    def _clear_buff_check(self):
+        self.step_buff_check = None
+        self._refresh_buff_status()
+
+    def _on_buff_image_match_clicked(self):
+        default_confidence = self.step_buff_check.confidence if self.step_buff_check else 0.90
+        self._start_image_capture(on_use=self._set_buff_image_match, default_confidence=default_confidence)
+
+    def _on_buff_pixel_match_clicked(self):
+        default_confidence = self.step_buff_check.confidence if self.step_buff_check else 0.90
+        self._start_pixel_capture(on_use=self._set_buff_pixel_match, default_confidence=default_confidence)
+
+    def _set_buff_image_match(self, filename, region, confidence):
+        self.step_buff_check = Condition(match_type="image", template=filename, region=region, confidence=confidence)
+        self._refresh_buff_status()
+
+    def _set_buff_pixel_match(self, point, color, confidence):
+        self.step_buff_check = Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)
+        self._refresh_buff_status()
+
     def _start_image_capture(self, on_use=None, default_confidence=0.90):
         """Runs the region-capture-overlay flow, ending in an image-match preview.
         With `on_use` set, "Use This" calls on_use(filename, region, confidence)
@@ -1408,14 +1477,20 @@ class App(tk.Tk):
                 for condition in step.conditions:
                     if condition.template:
                         keep.add(condition.template)
+                if step.buff_check and step.buff_check.template:
+                    keep.add(step.buff_check.template)
         for step in self.editing_steps:
             if step.ready_template:
                 keep.add(step.ready_template)
             for condition in step.conditions:
                 if condition.template:
                     keep.add(condition.template)
+            if step.buff_check and step.buff_check.template:
+                keep.add(step.buff_check.template)
         if self.step_ready_template:
             keep.add(self.step_ready_template)
+        if self.step_buff_check and self.step_buff_check.template:
+            keep.add(self.step_buff_check.template)
         return keep
 
     def _sweep_templates(self):

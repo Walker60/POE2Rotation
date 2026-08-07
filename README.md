@@ -112,6 +112,30 @@ they're already portable with no matching file to copy.
 
 Known limitation: calibration only supports the primary monitor.
 
+## Buff-based hold/delay override (optional, per step)
+
+Some skills' animation time changes while a particular buff is up (faster or
+slower attack/cast speed, etc.), and that buff isn't always active. A step can
+have one **Buff Check** — the same Image Match/Pixel Match calibration flow as
+the cooldown check above — plus a **Hold (ms)** and/or **Delay (ms)** value to
+use *instead of* the step's normal Hold/Delay whenever that check currently
+matches on screen.
+
+- Calibrate it the same way as a cooldown check or condition: click **Image
+  Match...** or **Pixel Match...** in the Buff Check group, capture the
+  buff's icon or a distinct pixel, and confirm.
+- Fill in **Hold (ms)** and/or **Delay (ms)** with the values to use while the
+  buff is active. Leaving either blank means that particular value is never
+  overridden — the step keeps its normal Hold or Delay even while the buff
+  check matches. A buff check with both left blank would never have any
+  effect, so saving is blocked until at least one is set.
+- Unlike the cooldown check, this is read **once, instantly**, right before
+  firing — same as a Condition — not polled or waited on.
+- The buff state is read once per cast and used for both that cast's hold
+  *and* its following delay, so if the buff expires partway through the
+  post-cast delay, that delay still finishes out at the buffed value rather
+  than switching mid-wait.
+
 ## Conditions (optional, per step)
 
 A step can also have any number of **conditions** — extra image/pixel-match
@@ -153,7 +177,8 @@ persist across further edits to the step list.
   regardless of order).
 
 Copying a step (Copy/Paste, or copying a whole rotation) carries its
-conditions along with it. Conditions with an image-match template participate
+conditions along with it, along with its buff check and hold/delay overrides
+if any. Conditions and buff checks with an image-match template participate
 in the same template-file portability/cleanup rules described above.
 
 ## Multi-select, drag-and-drop, and clipboard

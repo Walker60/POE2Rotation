@@ -89,6 +89,16 @@ def _check_condition(condition: Condition, label: str) -> bool:
     return _image_matches(condition.template, condition.region, condition.confidence, label)
 
 
+def _check_buff_active(step: Step) -> bool:
+    """True if step's calibrated buff_check currently matches on screen --
+    reuses _check_condition since a buff check is shaped exactly like a
+    Condition, but its result picks an alternate hold/delay in _fire_step/
+    _sleep_delay instead of gating whether the step fires at all."""
+    if step.buff_check is None or not step.buff_check.has_check():
+        return False
+    return _check_condition(step.buff_check, step.key or "buff")
+
+
 def _image_matches(template_filename, region, confidence: float, label: str) -> bool:
     """True if a screenshot of exactly `region` currently matches the cached
     `template_filename` (mean pixel difference) -- shared by both a step's own
@@ -121,14 +131,14 @@ def _image_matches(template_filename, region, confidence: float, label: str) -> 
         screenshot = _capture_region(region).convert("L")
         if screenshot.size != template.size:
             log.error(
-                f"ready-check for '{label}': captured region {screenshot.size} doesn't "
+                f"match check for '{label}': captured region {screenshot.size} doesn't "
                 f"match calibrated template {template.size} -- recalibrate this step")
             return False
         mean_diff = ImageStat.Stat(ImageChops.difference(screenshot, template)).mean[0]
         max_allowed_diff = (1 - confidence) * 255
         return mean_diff <= max_allowed_diff
     except Exception as e:
-        log.error(f"ready-check for '{label}' failed ({type(e).__name__}: {e}); treating as not ready")
+        log.error(f"match check for '{label}' failed ({type(e).__name__}: {e}); treating as not matching")
         return False
 
 
@@ -154,7 +164,7 @@ def _pixel_matches(pixel_pos, pixel_color, confidence: float, label: str) -> boo
         max_allowed_distance = (1 - confidence) * _MAX_COLOR_DISTANCE
         return distance <= max_allowed_distance
     except Exception as e:
-        log.error(f"pixel ready-check for '{label}' failed ({type(e).__name__}: {e}); treating as not ready")
+        log.error(f"pixel match check for '{label}' failed ({type(e).__name__}: {e}); treating as not matching")
         return False
 
 
@@ -327,17 +337,18 @@ class RotationRunner:
                 # Sleep step: no key to check readiness for or fire, just pause for
                 # delay_ms (+/- jitter_ms) like any other step's post-fire wait.
                 log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms")
-                if not self._sleep_delay(step):
+                if not self._sleep_delay(step, _check_buff_active(step)):
                     return False
                 continue
             ready = self._wait_until_ready(step)
             if ready and all(_check_condition(c, step.key) for c in step.conditions):
-                self._fire_step(step)
+                buff_active = _check_buff_active(step)
+                self._fire_step(step, buff_active)
                 # Only pay the post-cast delay/jitter after an actual fire -- there's no
                 # cast animation to wait out for a step that was skipped, so a skipped
                 # cast falls straight through to the next step instead of also eating
                 # this step's full delay on top of the ready-check/condition-check time.
-                if not self._sleep_delay(step):
+                if not self._sleep_delay(step, buff_active):
                     return False
             elif not self._stop_event.is_set():
                 if not ready:
@@ -374,13 +385,15 @@ class RotationRunner:
                 return False
         return True
 
-    def _fire_step(self, step: Step):
-        if step.hold_ms > 0:
-            hold = step.hold_ms
+    def _fire_step(self, step: Step, buff_active: bool = False):
+        base_hold = step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms
+        if base_hold > 0:
+            hold = base_hold
             if step.hold_jitter_ms:
                 hold += random.uniform(-step.hold_jitter_ms, step.hold_jitter_ms)
             hold = max(0, hold)
-            log.debug(f"[{self.rotation.name}] key={step.key} hold_ms={hold:.0f}")
+            log.debug(f"[{self.rotation.name}] key={step.key} hold_ms={hold:.0f}"
+                      + (" (buff)" if buff_active and step.buff_hold_ms is not None else ""))
             try:
                 keyboard.press(step.key)
                 self._stop_event.wait(timeout=hold / 1000)
@@ -390,8 +403,8 @@ class RotationRunner:
             log.debug(f"[{self.rotation.name}] key={step.key} (tap)")
             keyboard.send(step.key)
 
-    def _sleep_delay(self, step: Step) -> bool:
-        delay = step.delay_ms
+    def _sleep_delay(self, step: Step, buff_active: bool = False) -> bool:
+        delay = step.buff_delay_ms if (buff_active and step.buff_delay_ms is not None) else step.delay_ms
         if step.jitter_ms:
             delay += random.uniform(-step.jitter_ms, step.jitter_ms)
         return not self._stop_event.wait(timeout=max(0, delay) / 1000)

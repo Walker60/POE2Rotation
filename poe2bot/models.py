@@ -62,6 +62,11 @@ class Step:
     ready_confidence: float = 0.9
     ready_timeout_ms: int = 300
     conditions: List[Condition] = field(default_factory=list)   # extra gates, checked once, instantly, before firing
+    buff_check: Optional[Condition] = None   # same instant image/pixel check as a Condition, but its result swaps
+                                              # in buff_hold_ms/buff_delay_ms below instead of gating whether this
+                                              # step fires at all -- for animation-speed buffs that aren't always up
+    buff_hold_ms: Optional[int] = None       # used instead of hold_ms while buff_check matches; None = no override
+    buff_delay_ms: Optional[int] = None      # used instead of delay_ms while buff_check matches; None = no override
 
     def has_ready_check(self) -> bool:
         """True if this step has a cooldown check configured, via whichever
@@ -90,6 +95,9 @@ class Step:
             ready_confidence=float(data.get("ready_confidence", 0.9)),
             ready_timeout_ms=int(data.get("ready_timeout_ms", 300)),
             conditions=[Condition.from_dict(c) for c in data.get("conditions", [])],
+            buff_check=Condition.from_dict(data["buff_check"]) if data.get("buff_check") else None,
+            buff_hold_ms=int(data["buff_hold_ms"]) if data.get("buff_hold_ms") is not None else None,
+            buff_delay_ms=int(data["buff_delay_ms"]) if data.get("buff_delay_ms") is not None else None,
         )
 
 
@@ -247,5 +255,34 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                     problems.append(f"Step {i}, condition {j}: has no calibrated region (recalibrate).")
                 if not condition.template or not os.path.isfile(templates.template_path(condition.template)):
                     problems.append(f"Step {i}, condition {j}: calibrated template image is missing on disk (recalibrate).")
+
+        buff_check = step.buff_check
+        buff_calibrated = buff_check is not None and buff_check.has_check()
+        if buff_calibrated:
+            if buff_check.match_type not in VALID_READY_MATCH_TYPES:
+                problems.append(f"Step {i}: buff check match_type must be one of {VALID_READY_MATCH_TYPES}.")
+            if not (0 < buff_check.confidence <= 1):
+                problems.append(f"Step {i}: buff check confidence must be greater than 0 and at most 1.")
+            if buff_check.match_type == "pixel":
+                if not (isinstance(buff_check.pixel_pos, tuple) and len(buff_check.pixel_pos) == 2):
+                    problems.append(f"Step {i}: buff check has no calibrated point (recalibrate).")
+                if not (isinstance(buff_check.pixel_color, tuple) and len(buff_check.pixel_color) == 3):
+                    problems.append(f"Step {i}: buff check has no calibrated color (recalibrate).")
+            else:
+                if not (isinstance(buff_check.region, tuple) and len(buff_check.region) == 4):
+                    problems.append(f"Step {i}: buff check has no calibrated region (recalibrate).")
+                if not buff_check.template or not os.path.isfile(templates.template_path(buff_check.template)):
+                    problems.append(f"Step {i}: buff check calibrated template image is missing on disk (recalibrate).")
+            if step.buff_hold_ms is None and step.buff_delay_ms is None:
+                problems.append(f"Step {i}: buff check is calibrated but neither Buff Hold nor Buff Delay is set, "
+                                 f"so it would never have any effect.")
+
+        if step.buff_hold_ms is not None and step.buff_hold_ms < 0:
+            problems.append(f"Step {i}: buff hold_ms cannot be negative.")
+        if step.buff_delay_ms is not None and step.buff_delay_ms < 0:
+            problems.append(f"Step {i}: buff delay_ms cannot be negative.")
+        if (step.buff_hold_ms is not None or step.buff_delay_ms is not None) and not buff_calibrated:
+            problems.append(f"Step {i}: buff hold/delay override is set but no buff check is calibrated "
+                             f"(it would never apply).")
 
     return problems
