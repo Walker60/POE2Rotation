@@ -164,6 +164,9 @@ class App(tk.Tk):
         self.step_ready_pixel_pos = None      # (x, y) absolute screen coords, for pixel-match mode
         self.step_ready_pixel_color = None    # (r, g, b) expected "ready" color, for pixel-match mode
         self.step_buff_check = None           # Condition for the step being edited's buff check, or None
+        self._selected_step_snapshot = None   # _current_step_form_snapshot() as of the last _on_select_step,
+                                               # so Add Step/Add Sleep can tell an untouched selection (clone
+                                               # risk) apart from one the user has since edited (see below)
         self._step_clipboard = []             # list[Step], set by Copy -- lives on the App, so it
                                                # survives switching rotations (enables cross-rotation paste)
         self._drag_candidate = None    # list[(step_idx, cond_idx_or_None)] being dragged, or None
@@ -857,6 +860,25 @@ class App(tk.Tk):
         self.step_buff_hold_var.set("" if step.buff_hold_ms is None else str(step.buff_hold_ms))
         self.step_buff_delay_var.set("" if step.buff_delay_ms is None else str(step.buff_delay_ms))
         self._refresh_buff_status()
+        self._selected_step_snapshot = self._current_step_form_snapshot()
+
+    def _current_step_form_snapshot(self) -> tuple:
+        """A cheap, side-effect-free snapshot of every step-editing widget's
+        raw value (deliberately raw strings/attrs, not parsed ints -- this
+        must never risk popping the "Invalid step" dialog just from being
+        computed). Used only to tell whether the form still exactly matches
+        whatever _on_select_step last loaded into it, or the user has since
+        changed something (see _discard_selected_step_edits)."""
+        return (
+            self.step_name_var.get(), self.step_key_var.get(),
+            self.step_delay_var.get(), self.step_jitter_var.get(),
+            self.step_hold_var.get(), self.step_hold_jitter_var.get(),
+            self.step_repeat_var.get(), self.step_repeat_combine_hold_var.get(),
+            self.step_ready_match_type, self.step_ready_template, self.step_ready_region,
+            self.step_ready_pixel_pos, self.step_ready_pixel_color,
+            self.step_ready_timeout_var.get(), self.step_ready_confidence_var.get(),
+            self.step_buff_check, self.step_buff_hold_var.get(), self.step_buff_delay_var.get(),
+        )
 
     def _read_step_form(self, conditions=None):
         try:
@@ -906,16 +928,23 @@ class App(tk.Tk):
         return step
 
     def _discard_selected_step_edits(self):
-        """If a tree row is currently selected, its data was loaded into the
-        step form by _on_select_step for potential Update Selected -- Add
-        Step/Add Sleep must not silently read that as if it were a fresh
-        step (that's how "Add Step" ends up cloning whatever's highlighted),
-        so clear the selection and reset every step field to blank defaults
-        first. No-op if nothing is selected, so typing values and clicking
+        """If a tree row is currently selected AND the form still exactly
+        matches whatever _on_select_step loaded into it (the user hasn't
+        touched anything since), Add Step/Add Sleep must not silently read
+        that as if it were a fresh step -- that's how "Add Step" used to end
+        up cloning whatever's highlighted -- so clear the selection and reset
+        every step field to blank defaults first. But if the form no longer
+        matches (the user has since typed a new key, changed the delay,
+        recalibrated a check, etc.), that's a deliberate edit meant to become
+        a new step, not something to discard -- only the tree's own selection
+        highlight is cleared, the field values are left exactly as typed.
+        No-op entirely if nothing is selected, so typing values and clicking
         Add Step repeatedly to add several similarly-timed steps still works."""
         if not self.tree.selection():
             return
         self.tree.selection_remove(*self.tree.selection())
+        if self._current_step_form_snapshot() != self._selected_step_snapshot:
+            return
         self.step_name_var.set("")
         self.step_key_var.set("")
         self.step_delay_var.set("20")
