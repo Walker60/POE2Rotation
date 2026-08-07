@@ -354,8 +354,8 @@ class App(tk.Tk):
         self.step_key_var = tk.StringVar()
         self.step_delay_var = tk.StringVar(value="10")
         self.step_jitter_var = tk.StringVar(value="5")
-        self.step_hold_var = tk.StringVar(value="0")
-        self.step_hold_jitter_var = tk.StringVar(value="0")
+        self.step_hold_var = tk.StringVar(value="30")
+        self.step_hold_jitter_var = tk.StringVar(value="10")
         self.step_repeat_var = tk.StringVar(value="1")
         for label, var, width in (
             ("Name", self.step_name_var, 12), ("Key", self.step_key_var, 8),
@@ -920,8 +920,8 @@ class App(tk.Tk):
         self.step_key_var.set("")
         self.step_delay_var.set("10")
         self.step_jitter_var.set("5")
-        self.step_hold_var.set("0")
-        self.step_hold_jitter_var.set("0")
+        self.step_hold_var.set("30")
+        self.step_hold_jitter_var.set("10")
         self.step_repeat_var.set("1")
         self.step_repeat_combine_hold_var.set(False)
         self._reset_ready_form()
