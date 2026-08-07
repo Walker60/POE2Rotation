@@ -76,20 +76,34 @@ is enough time to absorb normal check jitter without noticeably delaying the res
 of the rotation; only raise it for a specific step if you'd genuinely rather wait
 a bit than skip that particular cast.
 
-**Matching is a direct comparison against exactly the calibrated spot, not a
-search.** An image-match check takes a screenshot of precisely the region you
-drew during calibration and compares it directly against the saved template
-(mean pixel difference, scaled by the Confidence field — higher Confidence
-demands a closer match). A pixel-match check reads the single calibrated pixel
-and compares its color to the saved color (Euclidean RGB distance, scaled by
-the same Confidence field), which is cheaper still since there's no image to
-decode or diff. Neither mode searches elsewhere on screen for the icon — this
-is deliberately cheap: no sliding-window matching, so check speed doesn't scale
-with region size the way it used to, and a single check can no longer blow past
-a very low Timeout on its own. The trade-off is that both assume the icon/pixel
-is still exactly where it was when calibrated — if the game window moves,
-resizes, or the UI scale changes afterward, the check will stop matching (never
-crash, it'll just always read as "not ready") and that step needs recalibrating.
+**Image matching defaults to a direct comparison against exactly the
+calibrated spot, not a search.** In this default "exact" mode, a check takes a
+screenshot of precisely the region you drew during calibration and compares it
+directly against the saved template (mean pixel difference, scaled by the
+Confidence field — higher Confidence demands a closer match). A pixel-match
+check reads the single calibrated pixel and compares its color to the saved
+color (Euclidean RGB distance, scaled by the same Confidence field), which is
+cheaper still since there's no image to decode or diff. Neither mode searches
+elsewhere on screen for the icon by default — this is deliberately cheap: no
+sliding-window matching, so check speed doesn't scale with region size, and a
+single check can no longer blow past a very low Timeout on its own. The
+trade-off is that both assume the icon/pixel is still exactly where it was
+when calibrated — if the game window moves, resizes, or the UI scale changes
+afterward, the check will stop matching (never crash, it'll just always read
+as "not ready") and that step needs recalibrating.
+
+**Image matching can optionally search a larger area instead.** After
+confirming the tight icon capture, check "Search a larger area" and click-drag
+a second, larger rectangle — the check then searches anywhere within that
+rectangle for the icon (via OpenCV template matching) rather than comparing
+only the one exact spot. Use this for an icon that can visibly shift position
+slightly (e.g. a UI panel that reflows when other buffs appear/disappear)
+instead of recalibrating every time it moves. This costs more per check than
+exact mode, scaling with how large the search area is, so keep it as tight as
+you reasonably can — don't reach for it as a default. It's also a different
+matching algorithm than exact mode (normalized cross-correlation, not mean
+pixel difference), so a Confidence value tuned for exact mode is only a
+starting point after switching a step to area mode; expect to retune it.
 
 **Screenshots go through `mss`, not `pyautogui`.** On Windows, `pyautogui`
 (and even Pillow's own `ImageGrab.grab()` used directly) always captures the

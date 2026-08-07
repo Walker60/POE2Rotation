@@ -4,8 +4,10 @@ import threading
 import time
 from typing import Optional
 
+import cv2
 import keyboard
 import mss
+import numpy as np
 from PIL import Image, ImageChops, ImageStat
 
 from poe2bot import templates
@@ -24,6 +26,7 @@ STATUS_RESETTING = "resetting"
 _MAX_COLOR_DISTANCE = math.sqrt(3 * 255 ** 2)  # largest possible Euclidean distance between two RGB colors
 
 _template_image_cache = {}   # filename -> grayscale PIL.Image.Image, decoded once and reused
+_template_array_cache = {}   # filename -> grayscale np.ndarray, decoded once -- area search only
 _thread_local = threading.local()
 
 
@@ -36,6 +39,17 @@ def _load_template_image(filename: str) -> Image.Image:
         image.load()  # force-read pixel data now, so later use never touches the file again
         _template_image_cache[filename] = image
     return image
+
+
+def _load_template_array(filename: str) -> np.ndarray:
+    """Same caching as _load_template_image, but as a numpy array for
+    cv2.matchTemplate -- used only by area-search matching, kept separate so
+    the far more common exact-mode path never pays for a numpy conversion."""
+    array = _template_array_cache.get(filename)
+    if array is None:
+        array = np.array(_load_template_image(filename))
+        _template_array_cache[filename] = array
+    return array
 
 
 def _screen_capture():
@@ -77,7 +91,8 @@ def _check_ready(step: Step) -> bool:
     is configured to use."""
     if step.ready_match_type == "pixel":
         return _pixel_matches(step.ready_pixel_pos, step.ready_pixel_color, step.ready_confidence, step.key)
-    return _image_matches(step.ready_template, step.ready_region, step.ready_confidence, step.key)
+    return _image_matches(step.ready_template, step.ready_region, step.ready_confidence, step.key,
+                           step.ready_search_mode, step.ready_search_region)
 
 
 def _check_condition(condition: Condition, label: str) -> bool:
@@ -87,7 +102,8 @@ def _check_condition(condition: Condition, label: str) -> bool:
     RotationRunner._run_once)."""
     if condition.match_type == "pixel":
         return _pixel_matches(condition.pixel_pos, condition.pixel_color, condition.confidence, label)
-    return _image_matches(condition.template, condition.region, condition.confidence, label)
+    return _image_matches(condition.template, condition.region, condition.confidence, label,
+                           condition.search_mode, condition.search_region)
 
 
 def _check_buff_active(step: Step) -> bool:
@@ -100,10 +116,26 @@ def _check_buff_active(step: Step) -> bool:
     return _check_condition(step.buff_check, step.key or "buff")
 
 
-def _image_matches(template_filename, region, confidence: float, label: str) -> bool:
+def _image_matches(template_filename, region, confidence: float, label: str,
+                    search_mode: str = "exact", search_region=None) -> bool:
+    """Dispatches to the fast exact-region compare (default, unchanged) or, when
+    search_mode == "area", a sliding-window search over a larger calibrated
+    search_region. Shared by both a step's own cooldown check and any
+    image-match Condition."""
+    if not template_filename:
+        return False
+    if search_mode == "area":
+        if not (isinstance(search_region, tuple) and len(search_region) == 4):
+            log.error(f"match check for '{label}': search mode is 'area' but no valid "
+                      f"search region is calibrated -- recalibrate this step")
+            return False
+        return _image_matches_area(template_filename, search_region, confidence, label)
+    return _image_matches_exact(template_filename, region, confidence, label)
+
+
+def _image_matches_exact(template_filename, region, confidence: float, label: str) -> bool:
     """True if a screenshot of exactly `region` currently matches the cached
-    `template_filename` (mean pixel difference) -- shared by both a step's own
-    cooldown check and any image-match Condition.
+    `template_filename` (mean pixel difference).
 
     Compares directly against the calibrated region instead of searching for
     the template's position with OpenCV. Calibration already tells us precisely
@@ -111,8 +143,9 @@ def _image_matches(template_filename, region, confidence: float, label: str) -> 
     sliding-window correlation search entirely is what actually makes this
     fast, not just a lower confidence threshold. Trade-off: this assumes the
     icon hasn't moved since calibration (e.g. the game window resizing or UI
-    scale changing) -- if it has, recalibrate rather than expecting this to
-    still find it elsewhere in the region.
+    scale changing) -- if it has, recalibrate (or switch to area-search mode,
+    see _image_matches_area) rather than expecting this to still find it
+    elsewhere in the region.
 
     `confidence` (0-1, higher = stricter) is mapped onto an equivalent
     max-allowed mean pixel difference so existing calibrated steps keep behaving
@@ -125,8 +158,6 @@ def _image_matches(template_filename, region, confidence: float, label: str) -> 
     region that no longer matches the template's size, etc.) is logged and
     treated as not-ready rather than propagating out of the thread.
     """
-    if not template_filename:
-        return False
     try:
         template = _load_template_image(template_filename)
         screenshot = _capture_region(region).convert("L")
@@ -140,6 +171,41 @@ def _image_matches(template_filename, region, confidence: float, label: str) -> 
         return mean_diff <= max_allowed_diff
     except Exception as e:
         log.error(f"match check for '{label}' failed ({type(e).__name__}: {e}); treating as not matching")
+        return False
+
+
+def _image_matches_area(template_filename, search_region, confidence: float, label: str) -> bool:
+    """True if `template_filename` is found anywhere within a screenshot of the
+    larger `search_region`, via OpenCV's cv2.matchTemplate -- used only when a
+    step/condition is calibrated in area-search mode. Unlike _image_matches_exact
+    this pays for an actual sliding-window correlation search, so it costs more
+    per check the larger search_region is; use it for icons that can visibly
+    shift position slightly (e.g. a UI panel that reflows), not as a default.
+
+    TM_CCOEFF_NORMED is used because it's mean-normalized (robust to minor
+    brightness shifts between calibration time and runtime) and its best-match
+    score is bounded to roughly -1..1 (1 = perfect correlation), so the existing
+    0-1 "confidence, higher = stricter" meaning maps directly onto it: a match is
+    found if the best correlation anywhere in the search region is >= confidence.
+    This is a different distance metric than _image_matches_exact's mean pixel
+    difference, so a confidence value tuned for exact mode is only a starting
+    point after switching a step to area mode -- expect to retune it.
+    """
+    try:
+        template_array = _load_template_array(template_filename)
+        screenshot = _capture_region(search_region).convert("L")
+        template_h, template_w = template_array.shape
+        if screenshot.width < template_w or screenshot.height < template_h:
+            log.error(
+                f"match check for '{label}': search area {screenshot.size} is smaller than "
+                f"calibrated template {(template_w, template_h)} -- recalibrate this step")
+            return False
+        screenshot_array = np.array(screenshot)
+        result = cv2.matchTemplate(screenshot_array, template_array, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
+        return max_val >= confidence
+    except Exception as e:
+        log.error(f"area match check for '{label}' failed ({type(e).__name__}: {e}); treating as not matching")
         return False
 
 

@@ -160,6 +160,8 @@ class App(tk.Tk):
         self.step_ready_match_type = "image"  # "image" or "pixel" -- which method the step being edited uses
         self.step_ready_template = None       # cooldown-check filename pending for the step being edited
         self.step_ready_region = None         # (left, top, width, height) absolute screen coords, or None
+        self.step_ready_search_mode = "exact"  # "exact" or "area" -- which image-match strategy the step being edited uses
+        self.step_ready_search_region = None  # (left, top, width, height) absolute screen coords, only when search_mode == "area"
         self.step_ready_pixel_pos = None      # (x, y) absolute screen coords, for pixel-match mode
         self.step_ready_pixel_color = None    # (r, g, b) expected "ready" color, for pixel-match mode
         self.step_buff_check = None           # Condition for the step being edited's buff check, or None
@@ -715,6 +717,8 @@ class App(tk.Tk):
         self.step_ready_match_type = "image"
         self.step_ready_template = None
         self.step_ready_region = None
+        self.step_ready_search_mode = "exact"
+        self.step_ready_search_region = None
         self.step_ready_pixel_pos = None
         self.step_ready_pixel_color = None
         self.step_ready_timeout_var.set("0")
@@ -727,7 +731,11 @@ class App(tk.Tk):
             self.step_ready_status_var.set(f"Pixel: RGB({r},{g},{b})")
         elif self.step_ready_match_type == "image" and self.step_ready_template and self.step_ready_region:
             w, h = self.step_ready_region[2], self.step_ready_region[3]
-            self.step_ready_status_var.set(f"Image: {w}x{h}")
+            if self.step_ready_search_mode == "area" and self.step_ready_search_region:
+                sw, sh = self.step_ready_search_region[2], self.step_ready_search_region[3]
+                self.step_ready_status_var.set(f"Image: {w}x{h} (searching {sw}x{sh} area)")
+            else:
+                self.step_ready_status_var.set(f"Image: {w}x{h}")
         else:
             self.step_ready_status_var.set("No cooldown check")
 
@@ -790,6 +798,9 @@ class App(tk.Tk):
             return f"Condition: Pixel RGB({r},{g},{b})"
         if condition.match_type == "image" and condition.region:
             w, h = condition.region[2], condition.region[3]
+            if condition.search_mode == "area" and condition.search_region:
+                sw, sh = condition.search_region[2], condition.search_region[3]
+                return f"Condition: Image {w}x{h} (searching {sw}x{sh} area)"
             return f"Condition: Image {w}x{h}"
         return "Condition: (not calibrated)"
 
@@ -855,6 +866,8 @@ class App(tk.Tk):
         self.step_ready_match_type = step.ready_match_type
         self.step_ready_template = step.ready_template
         self.step_ready_region = step.ready_region
+        self.step_ready_search_mode = step.ready_search_mode
+        self.step_ready_search_region = step.ready_search_region
         self.step_ready_pixel_pos = step.ready_pixel_pos
         self.step_ready_pixel_color = step.ready_pixel_color
         self.step_ready_timeout_var.set(str(step.ready_timeout_ms))
@@ -879,6 +892,7 @@ class App(tk.Tk):
             self.step_hold_var.get(), self.step_hold_jitter_var.get(),
             self.step_repeat_var.get(), self.step_repeat_combine_hold_var.get(),
             self.step_ready_match_type, self.step_ready_template, self.step_ready_region,
+            self.step_ready_search_mode, self.step_ready_search_region,
             self.step_ready_pixel_pos, self.step_ready_pixel_color,
             self.step_ready_timeout_var.get(), self.step_ready_confidence_var.get(),
             self.step_buff_check, self.step_buff_hold_var.get(), self.step_buff_delay_var.get(),
@@ -913,6 +927,8 @@ class App(tk.Tk):
             ready_match_type=self.step_ready_match_type,
             ready_template=self.step_ready_template,
             ready_region=self.step_ready_region,
+            ready_search_mode=self.step_ready_search_mode,
+            ready_search_region=self.step_ready_search_region,
             ready_pixel_pos=self.step_ready_pixel_pos,
             ready_pixel_color=self.step_ready_pixel_color,
             ready_confidence=confidence,
@@ -1282,6 +1298,8 @@ class App(tk.Tk):
         self.step_ready_match_type = "image"
         self.step_ready_template = None
         self.step_ready_region = None
+        self.step_ready_search_mode = "exact"
+        self.step_ready_search_region = None
         self.step_ready_pixel_pos = None
         self.step_ready_pixel_color = None
         self._refresh_ready_status()
@@ -1303,8 +1321,9 @@ class App(tk.Tk):
         default_confidence = self.step_buff_check.confidence if self.step_buff_check else 0.90
         self._start_pixel_capture(on_use=self._set_buff_pixel_match, default_confidence=default_confidence)
 
-    def _set_buff_image_match(self, filename, region, confidence):
-        self.step_buff_check = Condition(match_type="image", template=filename, region=region, confidence=confidence)
+    def _set_buff_image_match(self, filename, region, confidence, search_mode="exact", search_region=None):
+        self.step_buff_check = Condition(match_type="image", template=filename, region=region, confidence=confidence,
+                                          search_mode=search_mode, search_region=search_region)
         self._refresh_buff_status()
 
     def _set_buff_pixel_match(self, point, color, confidence):
@@ -1313,10 +1332,13 @@ class App(tk.Tk):
 
     def _start_image_capture(self, on_use=None, default_confidence=0.90):
         """Runs the region-capture-overlay flow, ending in an image-match preview.
-        With `on_use` set, "Use This" calls on_use(filename, region, confidence)
-        and shows a Confidence field (pre-filled from `default_confidence`)
-        instead of the default behavior of staging the step's own cooldown
-        check into self.step_ready_* (used for Add/Recalibrate Condition)."""
+        With `on_use` set, "Use This" calls on_use(filename, region, confidence,
+        search_mode, search_region) and shows a Confidence field (pre-filled from
+        `default_confidence`) instead of the default behavior of staging the
+        step's own cooldown check into self.step_ready_* (used for Add/
+        Recalibrate Condition). search_mode/search_region come from the optional
+        second click-drag pass offered in the preview dialog -- see
+        _show_image_match_preview and _start_search_area_capture."""
         messagebox.showinfo(
             "Calibrate image match",
             "After you click OK, the bot window will hide.\n\n"
@@ -1374,30 +1396,32 @@ class App(tk.Tk):
             confidence_var = tk.StringVar(value=f"{default_confidence:.2f}")
             ttk.Entry(conf_row, textvariable=confidence_var, width=5).pack(side="left")
 
+        area_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(preview, variable=area_var,
+                        text="Search a larger area (icon may shift slightly)").pack(pady=(4, 0))
+
         btns = ttk.Frame(preview, padding=8)
         btns.pack(pady=(4, 0))
 
         def use_this():
+            confidence = default_confidence
             if on_use is not None:
                 try:
                     confidence = float(confidence_var.get())
                 except ValueError:
                     messagebox.showerror("Invalid confidence", "Confidence must be a decimal (e.g. 0.9).")
                     return
+            if area_var.get():
+                # NOT deleting the template file -- it's confirmed, it just still
+                # needs a search area before this calibration can be finalized.
                 preview.destroy()
-                on_use(filename, region, confidence)
+                self._start_search_area_capture(filename, region, confidence, on_use)
                 return
-            # Deliberately does NOT delete any previously-calibrated file for this
-            # step -- that file may still be referenced by a committed Step until
-            # "Update Selected"/"Save Rotation" runs. Orphans are cleaned up by the
-            # periodic sweep instead (see _sweep_templates).
-            self.step_ready_match_type = "image"
-            self.step_ready_template = filename
-            self.step_ready_region = region
-            self.step_ready_pixel_pos = None
-            self.step_ready_pixel_color = None
-            self._refresh_ready_status()
             preview.destroy()
+            if on_use is not None:
+                on_use(filename, region, confidence, "exact", None)
+                return
+            self._apply_image_match_to_ready_form(filename, region, "exact", None)
 
         def retry():
             templates.delete_template(filename)  # safe: nothing has ever referenced it
@@ -1411,6 +1435,69 @@ class App(tk.Tk):
         ttk.Button(btns, text="Use This", command=use_this).pack(side="left", padx=4)
         ttk.Button(btns, text="Retry", command=retry).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", command=cancel).pack(side="left", padx=4)
+
+    def _apply_image_match_to_ready_form(self, filename, region, search_mode, search_region):
+        """Finalizes an image-match calibration into the step's own cooldown
+        check (the on_use-is-None path through _show_image_match_preview /
+        _on_search_area_captured). Deliberately does NOT delete any
+        previously-calibrated file for this step -- that file may still be
+        referenced by a committed Step until "Update Selected"/"Save Rotation"
+        runs. Orphans are cleaned up by the periodic sweep instead (see
+        _sweep_templates)."""
+        self.step_ready_match_type = "image"
+        self.step_ready_template = filename
+        self.step_ready_region = region
+        self.step_ready_search_mode = search_mode
+        self.step_ready_search_region = search_region
+        self.step_ready_pixel_pos = None
+        self.step_ready_pixel_color = None
+        self._refresh_ready_status()
+
+    def _start_search_area_capture(self, filename, region, confidence, on_use):
+        """Second calibration pass, run only when the "search a larger area"
+        checkbox was ticked in _show_image_match_preview: click-drag a larger
+        rectangle to search within instead of comparing only the exact
+        calibrated spot. filename/region/confidence/on_use are the
+        already-confirmed values from that first pass, carried through
+        unchanged so they can be finalized once this second rectangle is
+        captured, or so the confirmation dialog can be redisplayed unchanged
+        (with `confidence` as its new default) if this pass is cancelled or
+        the rectangle turns out too small."""
+        messagebox.showinfo(
+            "Calibrate search area",
+            "After you click OK, the bot window will hide again.\n\n"
+            "Click-drag a LARGER rectangle that comfortably contains the icon, "
+            "giving it room to be found even if it shifts slightly. It must be "
+            "at least as large as the icon you just captured.\n\n"
+            "Press Escape to cancel and return to the previous confirmation.")
+        self.withdraw()
+        self.after(150, lambda: self._open_search_area_overlay(filename, region, confidence, on_use))
+
+    def _open_search_area_overlay(self, filename, region, confidence, on_use):
+        RegionCaptureOverlay(self, on_done=lambda search_region: self._on_search_area_captured(
+            search_region, filename, region, confidence, on_use))
+
+    def _on_search_area_captured(self, search_region, filename, region, confidence, on_use):
+        self.deiconify()
+        if search_region is None:
+            messagebox.showinfo(
+                "Search area cancelled",
+                "Search area capture was cancelled. The icon capture from before is "
+                "still confirmed -- check the box and click \"Use This\" again to "
+                "retry the search area, or leave it unchecked to use exact mode instead.")
+            self._show_image_match_preview(filename, region, on_use, confidence)
+            return
+        if search_region[2] < region[2] or search_region[3] < region[3]:
+            messagebox.showerror(
+                "Search area too small",
+                f"The search area ({search_region[2]}x{search_region[3]}) must be at least as "
+                f"large as the icon ({region[2]}x{region[3]}) in both dimensions. Try again.")
+            self._show_image_match_preview(filename, region, on_use, confidence)
+            return
+        if on_use is not None:
+            on_use(filename, region, confidence, "area", search_region)
+            return
+        self._apply_image_match_to_ready_form(filename, region, "area", search_region)
 
     def _on_pixel_match_clicked(self):
         self._start_pixel_capture()
@@ -1506,8 +1593,9 @@ class App(tk.Tk):
         step_idx = self._selected_owning_step_index()
         if step_idx is None:
             return
-        self._start_image_capture(on_use=lambda filename, region, confidence: self._add_condition(
-            step_idx, Condition(match_type="image", template=filename, region=region, confidence=confidence)))
+        self._start_image_capture(on_use=lambda filename, region, confidence, search_mode, search_region: self._add_condition(
+            step_idx, Condition(match_type="image", template=filename, region=region, confidence=confidence,
+                                 search_mode=search_mode, search_region=search_region)))
 
     def _on_add_pixel_condition_clicked(self):
         step_idx = self._selected_owning_step_index()
@@ -1560,8 +1648,9 @@ class App(tk.Tk):
                 default_confidence=condition.confidence)
         else:
             self._start_image_capture(
-                on_use=lambda filename, region, confidence: replace(
-                    Condition(match_type="image", template=filename, region=region, confidence=confidence)),
+                on_use=lambda filename, region, confidence, search_mode, search_region: replace(
+                    Condition(match_type="image", template=filename, region=region, confidence=confidence,
+                              search_mode=search_mode, search_region=search_region)),
                 default_confidence=condition.confidence)
 
     def _referenced_templates(self) -> set:

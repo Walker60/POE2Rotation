@@ -9,6 +9,7 @@ from poe2bot import templates
 VALID_MODES = ("once", "loop")
 VALID_PAUSE_MODES = ("duration", "toggle")
 VALID_READY_MATCH_TYPES = ("image", "pixel")
+VALID_SEARCH_MODES = ("exact", "area")
 
 
 @dataclass
@@ -21,6 +22,10 @@ class Condition:
     name: str = ""   # optional display label (e.g. "Bleeding"); falls back to an auto description in the GUI if blank
     template: Optional[str] = None                              # filename only, resolved via templates.template_path()
     region: Optional[Tuple[int, int, int, int]] = None          # (left, top, width, height), absolute screen px -- image mode
+    search_mode: str = "exact"                                   # "exact" (compare `region` directly) or "area" (search
+                                                                  # for the template anywhere within `search_region`) -- image mode only
+    search_region: Optional[Tuple[int, int, int, int]] = None   # (left, top, width, height), absolute screen px -- only used
+                                                                  # when search_mode == "area"; must be >= `region` in both dimensions
     pixel_pos: Optional[Tuple[int, int]] = None                  # (x, y) absolute screen px -- pixel mode
     pixel_color: Optional[Tuple[int, int, int]] = None           # expected (r, g, b) -- pixel mode
     confidence: float = 0.9
@@ -33,6 +38,7 @@ class Condition:
     @staticmethod
     def from_dict(data: dict) -> "Condition":
         region = data.get("region")
+        search_region = data.get("search_region")
         pixel_pos = data.get("pixel_pos")
         pixel_color = data.get("pixel_color")
         return Condition(
@@ -40,6 +46,8 @@ class Condition:
             name=data.get("name", ""),
             template=data.get("template"),
             region=tuple(region) if region is not None else None,
+            search_mode=data.get("search_mode", "exact"),
+            search_region=tuple(search_region) if search_region is not None else None,
             pixel_pos=tuple(pixel_pos) if pixel_pos is not None else None,
             pixel_color=tuple(pixel_color) if pixel_color is not None else None,
             confidence=float(data.get("confidence", 0.9)),
@@ -59,6 +67,10 @@ class Step:
     ready_match_type: str = "image"                             # "image" or "pixel" -- which method below is active
     ready_template: Optional[str] = None                       # filename only, resolved via templates.template_path()
     ready_region: Optional[Tuple[int, int, int, int]] = None   # (left, top, width, height), absolute screen px -- image mode
+    ready_search_mode: str = "exact"                            # "exact" (compare `ready_region` directly) or "area" (search
+                                                                 # for the template anywhere within `ready_search_region`) -- image mode only
+    ready_search_region: Optional[Tuple[int, int, int, int]] = None   # (left, top, width, height), absolute screen px -- only
+                                                                 # used when ready_search_mode == "area"; must be >= `ready_region` in both dimensions
     ready_pixel_pos: Optional[Tuple[int, int]] = None           # (x, y) absolute screen px -- pixel mode
     ready_pixel_color: Optional[Tuple[int, int, int]] = None    # expected (r, g, b) when "ready" -- pixel mode
     ready_confidence: float = 0.9
@@ -83,6 +95,7 @@ class Step:
     @staticmethod
     def from_dict(data: dict) -> "Step":
         region = data.get("ready_region")
+        search_region = data.get("ready_search_region")
         pixel_pos = data.get("ready_pixel_pos")
         pixel_color = data.get("ready_pixel_color")
         return Step(
@@ -95,6 +108,8 @@ class Step:
             ready_match_type=data.get("ready_match_type", "image"),
             ready_template=data.get("ready_template"),
             ready_region=tuple(region) if region is not None else None,  # JSON round-trips tuples as lists
+            ready_search_mode=data.get("ready_search_mode", "exact"),
+            ready_search_region=tuple(search_region) if search_region is not None else None,
             ready_pixel_pos=tuple(pixel_pos) if pixel_pos is not None else None,
             ready_pixel_color=tuple(pixel_color) if pixel_color is not None else None,
             ready_confidence=float(data.get("ready_confidence", 0.9)),
@@ -167,6 +182,27 @@ def folder_path_problem(folder: str) -> Optional[str]:
         if part in (".", ".."):
             return "Folder path cannot contain '.' or '..' segments."
     return None
+
+
+def _search_area_problems(label: str, subject: str, search_mode: str, search_region, region) -> List[str]:
+    """Shared by the three image-mode validation blocks below (step's own ready
+    check, each condition, buff_check) -- all three calibrate search_mode/
+    search_region the same way, so this avoids repeating the same checks three
+    times. `subject` is an optional noun phrase (e.g. "buff check ") inserted
+    right after `label`, matching how the existing messages around each call
+    site are worded."""
+    problems = []
+    if search_mode not in VALID_SEARCH_MODES:
+        problems.append(f"{label}: {subject}search mode must be one of {VALID_SEARCH_MODES}.")
+    elif search_mode == "area":
+        region_ok = isinstance(region, tuple) and len(region) == 4
+        if not (isinstance(search_region, tuple) and len(search_region) == 4):
+            problems.append(f"{label}: {subject}search mode is 'area' but no valid search area is calibrated (recalibrate).")
+        elif region_ok and (search_region[2] < region[2] or search_region[3] < region[3]):
+            problems.append(
+                f"{label}: {subject}search area ({search_region[2]}x{search_region[3]}) must be at least as "
+                f"large as the calibrated icon ({region[2]}x{region[3]}).")
+    return problems
 
 
 def validate_rotation(rotation: Rotation) -> List[str]:
@@ -249,6 +285,8 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                     problems.append(f"Step {i}: has an image cooldown check but no calibrated region (recalibrate).")
                 if not step.ready_template or not os.path.isfile(templates.template_path(step.ready_template)):
                     problems.append(f"Step {i}: calibrated template image is missing on disk (recalibrate).")
+                problems.extend(_search_area_problems(
+                    f"Step {i}", "", step.ready_search_mode, step.ready_search_region, step.ready_region))
 
         for j, condition in enumerate(step.conditions, start=1):
             if condition.match_type not in VALID_READY_MATCH_TYPES:
@@ -265,6 +303,8 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                     problems.append(f"Step {i}, condition {j}: has no calibrated region (recalibrate).")
                 if not condition.template or not os.path.isfile(templates.template_path(condition.template)):
                     problems.append(f"Step {i}, condition {j}: calibrated template image is missing on disk (recalibrate).")
+                problems.extend(_search_area_problems(
+                    f"Step {i}, condition {j}", "", condition.search_mode, condition.search_region, condition.region))
 
         buff_check = step.buff_check
         buff_calibrated = buff_check is not None and buff_check.has_check()
@@ -283,6 +323,8 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                     problems.append(f"Step {i}: buff check has no calibrated region (recalibrate).")
                 if not buff_check.template or not os.path.isfile(templates.template_path(buff_check.template)):
                     problems.append(f"Step {i}: buff check calibrated template image is missing on disk (recalibrate).")
+                problems.extend(_search_area_problems(
+                    f"Step {i}", "buff check ", buff_check.search_mode, buff_check.search_region, buff_check.region))
             if step.buff_hold_ms is None and step.buff_delay_ms is None:
                 problems.append(f"Step {i}: buff check is calibrated but neither Buff Hold nor Buff Delay is set, "
                                  f"so it would never have any effect.")
