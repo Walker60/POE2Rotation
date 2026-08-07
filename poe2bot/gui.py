@@ -141,7 +141,6 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("POE2 Rotation Bot")
-        self.geometry("920x600")
 
         sv_ttk.set_theme("dark")
         self._sync_root_background()
@@ -177,6 +176,7 @@ class App(tk.Tk):
         self._sweep_templates()
         self._refresh_rotation_tree()
         self._new_rotation()
+        self._size_to_fit_contents()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(200, self._poll_status_queue)
@@ -198,6 +198,21 @@ class App(tk.Tk):
                 self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
             if rotation.pause_key:
                 self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
+
+    def _size_to_fit_contents(self):
+        """Open large enough to show every widget without the user having to
+        resize on every launch. The step editor has steadily grown new groups
+        (cooldown check, buff check, conditions, step actions, ...), so a
+        hardcoded pixel size drifts stale each time -- asking Tk for the
+        window's actual natural size (after everything is built and laid out)
+        stays correct as more UI gets added later. Clamped to the screen so it
+        never opens larger than the display, and never smaller than that
+        natural size so nothing ends up clipped with no way to scroll to it."""
+        self.update_idletasks()
+        width = min(self.winfo_reqwidth(), self.winfo_screenwidth())
+        height = min(self.winfo_reqheight(), self.winfo_screenheight())
+        self.geometry(f"{width}x{height}")
+        self.minsize(width, height)
 
     # ---- widget layout -------------------------------------------------
 
