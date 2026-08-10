@@ -1,6 +1,7 @@
 import copy
 import os
 import queue
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -8,11 +9,12 @@ import keyboard
 import sv_ttk
 
 from poe2bot import storage
-from poe2bot.executor import RotationManager
+from poe2bot.executor import RotationManager, STATUS_RUNNING
 from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Rotation, validate_rotation
 
+from poe2bot.gui.activity_window import ActivityWindow
 from poe2bot.gui.rotation_list import RotationListMixin
 from poe2bot.gui.step_editor import StepEditorMixin
 from poe2bot.gui.drag_drop import DragDropMixin
@@ -33,7 +35,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self._sync_root_background()
 
         self.status_queue = queue.Queue()
-        self.rotation_manager = RotationManager(on_status_change=self._queue_status)
+        self.activity_queue = queue.Queue()
+        self.activity_window = None  # ActivityWindow, created lazily on first STATUS_RUNNING
+        self.rotation_manager = RotationManager(
+            on_status_change=self._queue_status, on_activity=self._queue_activity)
         self.hotkey_manager = HotkeyManager(self.rotation_manager)
         self.bot_enabled = True
 
@@ -525,6 +530,14 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # Called from a RotationRunner's worker thread -- never touch widgets here.
         self.status_queue.put((name, status))
 
+    def _queue_activity(self, name: str, message: str):
+        # Called from a RotationRunner's worker thread -- never touch widgets here.
+        self.activity_queue.put((name, message, time.time()))
+
+    def _ensure_activity_window(self):
+        if self.activity_window is None or not self.activity_window.winfo_exists():
+            self.activity_window = ActivityWindow(self)
+
     def _poll_status_queue(self):
         try:
             while True:
@@ -543,7 +556,24 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                 elif name == "__pause_capture__":
                     self._on_pause_key_captured(payload)
                 else:
+                    status = payload
                     self._refresh_rotation_tree()
+                    if status == STATUS_RUNNING:
+                        self._ensure_activity_window()
+                        self.activity_window.ensure_pane(name)
+                    if self.activity_window is not None and self.activity_window.winfo_exists():
+                        self.activity_window.set_pane_state(name, status)
+        except queue.Empty:
+            pass
+        # Drained only after status_queue is fully drained above, so a
+        # rotation's pane (created on its STATUS_RUNNING status message) always
+        # exists by the time its own activity messages -- necessarily enqueued
+        # after that status change -- are processed.
+        try:
+            while True:
+                name, message, ts = self.activity_queue.get_nowait()
+                if self.activity_window is not None and self.activity_window.winfo_exists():
+                    self.activity_window.append(name, message, ts)
         except queue.Empty:
             pass
         self.after(200, self._poll_status_queue)

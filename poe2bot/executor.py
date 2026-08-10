@@ -243,9 +243,10 @@ class RotationRunner:
     wakes the thread within milliseconds instead of waiting out a full sleep.
     """
 
-    def __init__(self, rotation: Rotation, on_status_change=None):
+    def __init__(self, rotation: Rotation, on_status_change=None, on_activity=None):
         self.rotation = rotation
         self.on_status_change = on_status_change
+        self.on_activity = on_activity
         self._stop_event = threading.Event()
         # These four are written only by stop()/reset()/pause() (another thread) and
         # read/cleared only by _run's own thread, except _paused which pause()
@@ -328,9 +329,14 @@ class RotationRunner:
         if self.on_status_change:
             self.on_status_change(self.rotation.name, status)
 
+    def _notify_activity(self, message: str):
+        if self.on_activity:
+            self.on_activity(self.rotation.name, message)
+
     def _run(self):
         log.info(f"[{self.rotation.name}] starting ({self.rotation.mode})")
         self._notify(STATUS_RUNNING)
+        self._notify_activity(f"Rotation started ({self.rotation.mode} mode)")
         resume_index = 0
         try:
             while True:
@@ -346,6 +352,7 @@ class RotationRunner:
                     break
                 if self._reset_requested:
                     log.info(f"[{self.rotation.name}] reset to start")
+                    self._notify_activity("Reset to step 1")
                     self._reset_requested = False
                     self._stop_event.clear()
                     resume_index = 0
@@ -365,6 +372,7 @@ class RotationRunner:
         finally:
             _close_screen_capture()
             log.info(f"[{self.rotation.name}] stopped")
+            self._notify_activity("Rotation stopped")
             self._notify(STATUS_IDLE)
 
     def _do_pause(self) -> bool:
@@ -375,6 +383,7 @@ class RotationRunner:
         False only if a genuine stop() was requested, even if a reset/pause
         also raced in alongside it (a real stop always wins)."""
         log.info(f"[{self.rotation.name}] paused ({self.rotation.pause_mode})")
+        self._notify_activity(f"Paused ({self.rotation.pause_mode})")
         self._paused.set()
         self._notify(STATUS_PAUSED)
         try:
@@ -391,6 +400,7 @@ class RotationRunner:
         finally:
             self._paused.clear()
             self._notify(STATUS_RUNNING)
+            self._notify_activity("Resumed")
 
     def _wait_reset_delay(self) -> bool:
         """Blocks for rotation.reset_delay_ms before actually restarting from
@@ -425,6 +435,7 @@ class RotationRunner:
                 # not-ready/conditions-not-met skip below: no fire, no delay, straight
                 # to the next step. Distinct from a "" (sleep) step, which still waits.
                 log.info(f"[{self.rotation.name}] step {i + 1} has no keybind assigned; skipping")
+                self._notify_activity(f"Step {i + 1}: no key assigned, skipping")
                 continue
             if not step.key:
                 # Sleep step: no key to check readiness for or fire, just pause for
@@ -435,15 +446,21 @@ class RotationRunner:
                 if not all(_check_condition(c, step.key or "sleep") for c in step.conditions):
                     if not self._stop_event.is_set():
                         log.info(f"[{self.rotation.name}] sleep step's conditions not met; skipping")
+                        self._notify_activity(f"Step {i + 1}: sleep conditions not met, skipping")
                     continue
                 log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms"
                           + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
+                self._notify_activity(
+                    f"Step {i + 1}: sleeping {step.delay_ms}ms"
+                    + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
                 if not self._fire_repeats(step, _check_buff_active(step)):
                     return False
                 continue
             ready = self._wait_until_ready(step)
             if ready and all(_check_condition(c, step.key) for c in step.conditions):
                 buff_active = _check_buff_active(step)
+                self._notify_activity(
+                    f"Step {i + 1} ('{step.key}'): casting" + (" (buff active)" if buff_active else ""))
                 # Only pay the post-cast delay/jitter after an actual fire -- there's no
                 # cast animation to wait out for a step that was skipped, so a skipped
                 # cast falls straight through to the next step instead of also eating
@@ -454,8 +471,11 @@ class RotationRunner:
                 if not ready:
                     log.warning(f"[{self.rotation.name}] '{step.key}' not ready after "
                                 f"{step.ready_timeout_ms}ms; skipping this cast")
+                    self._notify_activity(
+                        f"Step {i + 1} ('{step.key}'): not ready after {step.ready_timeout_ms}ms, skipping")
                 else:
                     log.info(f"[{self.rotation.name}] '{step.key}' conditions not met; skipping this cast")
+                    self._notify_activity(f"Step {i + 1} ('{step.key}'): conditions not met, skipping")
         return True
 
     def _wait_for_focus_or_stop(self) -> bool:
@@ -463,11 +483,13 @@ class RotationRunner:
         while not is_game_focused():
             if not notified_waiting:
                 self._notify(STATUS_WAITING_FOCUS)
+                self._notify_activity("Waiting for game focus...")
                 notified_waiting = True
             if self._stop_event.wait(timeout=0.1):
                 return False
         if notified_waiting:
             self._notify(STATUS_RUNNING)
+            self._notify_activity("Game focus regained, resuming")
         return True
 
     def _wait_until_ready(self, step: Step) -> bool:
@@ -500,9 +522,13 @@ class RotationRunner:
                 self._stop_event.wait(timeout=hold / 1000)
             finally:
                 keyboard.release(step.key)
+            self._notify_activity(
+                f"Held '{step.key}' {hold:.0f}ms"
+                + (" (buff)" if buff_active and step.buff_hold_ms is not None else ""))
         else:
             log.debug(f"[{self.rotation.name}] key={step.key} (tap)")
             keyboard.send(step.key)
+            self._notify_activity(f"Tapped '{step.key}'")
 
     def _sleep_delay(self, step: Step, buff_active: bool = False) -> bool:
         delay = step.buff_delay_ms if (buff_active and step.buff_delay_ms is not None) else step.delay_ms
@@ -525,6 +551,8 @@ class RotationRunner:
         repeat = max(1, step.repeat_count)
         base_hold = step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms
         if step.key and step.repeat_combine_hold and base_hold > 0 and repeat > 1:
+            self._notify_activity(
+                f"Combining {repeat} reps into one {base_hold * repeat}ms hold on '{step.key}'")
             self._fire_step(step, buff_active, hold_override=base_hold * repeat)
             return self._sleep_delay(step, buff_active)
         for _ in range(repeat):
@@ -541,8 +569,9 @@ class RotationManager:
     """Owns one RotationRunner per loaded rotation; the single object the
     GUI and hotkey manager both talk to."""
 
-    def __init__(self, on_status_change=None):
+    def __init__(self, on_status_change=None, on_activity=None):
         self._external_callback = on_status_change
+        self._activity_callback = on_activity
         self._runners = {}
         self._status = {}
 
@@ -551,9 +580,14 @@ class RotationManager:
         if self._external_callback:
             self._external_callback(name, status)
 
+    def _handle_activity(self, name: str, message: str):
+        if self._activity_callback:
+            self._activity_callback(name, message)
+
     def load(self, rotation: Rotation):
         self.unload(rotation.name)
-        self._runners[rotation.name] = RotationRunner(rotation, on_status_change=self._handle_status)
+        self._runners[rotation.name] = RotationRunner(
+            rotation, on_status_change=self._handle_status, on_activity=self._handle_activity)
         self._status[rotation.name] = STATUS_IDLE
 
     def unload(self, name: str):
