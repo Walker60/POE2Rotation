@@ -32,7 +32,15 @@ from poe2bot.log_setup import get_logger
 
 
 def main():
-    log = get_logger()
+    try:
+        log = get_logger()
+    except OSError as e:
+        messagebox.showerror(
+            "Failed to start",
+            "Could not set up logging (the logs folder or log file may be unwritable, "
+            "locked by another running copy of this app, or the disk may be full).\n\n"
+            f"Details: {e}")
+        return
     log.info("Starting POE2 Rotation Bot")
     try:
         app = App()

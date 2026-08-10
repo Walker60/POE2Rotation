@@ -1,7 +1,10 @@
 from tkinter import messagebox
 
-from poe2bot import templates
+from poe2bot import storage, templates
+from poe2bot.log_setup import get_logger
 from poe2bot.models import Condition
+
+log = get_logger()
 
 
 class ConditionsMixin:
@@ -104,4 +107,15 @@ class ConditionsMixin:
         return keep
 
     def _sweep_templates(self):
+        # A rotation file that currently fails to load contributes nothing to
+        # _referenced_templates() (self.rotations only holds successfully-
+        # loaded ones), so its calibration images would otherwise look
+        # orphaned and get deleted -- abstain from the whole sweep rather
+        # than risk destroying something a merely-temporarily-broken (not
+        # actually abandoned) rotation still needs.
+        if storage.has_unparseable_rotations():
+            log.warning("Skipping template cleanup: at least one rotation file failed to load "
+                        "(its templates might still be in use) -- fix or remove it, and cleanup "
+                        "will resume normally.")
+            return
         templates.sweep_unreferenced(self._referenced_templates())

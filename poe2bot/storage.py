@@ -5,7 +5,7 @@ import re
 from poe2bot import config
 from poe2bot.models import Rotation
 
-_ILLEGAL_FOLDER_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
+_ILLEGAL_FOLDER_CHARS = re.compile(r'[<>:"|?*\\\x00-\x1f]')
 
 
 def _slugify(name: str) -> str:
@@ -109,6 +109,37 @@ def delete_rotation(name: str, folder: str = "") -> None:
     if os.path.exists(path):
         os.remove(path)
     _prune_empty_dirs(folder)
+
+
+def move_rotation(rotation: Rotation, old_name: str, old_folder: str) -> None:
+    """Rename/move a rotation from (old_name, old_folder) to rotation's
+    current name/folder. Writes the new file *before* removing the old one --
+    the reverse of a naive delete-then-save -- so a crash in between leaves
+    the rotation recoverable (present at both the old and new paths) rather
+    than lost entirely (present at neither). Not fully atomic (that would
+    need a journal/two-phase commit, overkill here), but this ordering turns
+    "permanent silent data loss" into "a stray duplicate file to notice and
+    clean up," which is the tradeoff that matters for a crash mid-move."""
+    old_path = os.path.normcase(os.path.normpath(path_for(old_name, old_folder)))
+    new_path = os.path.normcase(os.path.normpath(path_for(rotation.name, rotation.folder)))
+    save_rotation(rotation)
+    if old_path != new_path:
+        delete_rotation(old_name, old_folder)
+
+
+def has_unparseable_rotations() -> bool:
+    """True if any rotation JSON file under ROTATIONS_DIR currently fails to
+    load. Used to make the template GC abstain rather than risk deleting a
+    calibration image that a merely-temporarily-broken (not genuinely gone)
+    rotation still references -- a broken file's own template references
+    never make it into the "still referenced" set the sweep uses, since
+    list_rotations()/load_all_rotations() silently skip it."""
+    for path, _folder in _iter_rotation_files():
+        try:
+            load_rotation_from_file(path)
+        except (OSError, ValueError, KeyError, TypeError):
+            return True
+    return False
 
 
 def _prune_empty_dirs(folder: str) -> None:

@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from typing import List, Optional, Tuple
 
 import keyboard
@@ -153,6 +153,17 @@ class Step:
         )
 
 
+def replace_step_fields(target: Step, source: Step) -> None:
+    """Copy every field of `source` onto `target` in place, preserving
+    `target`'s identity. The step-editing form always builds a brand-new Step
+    via _read_step_form, even when the user changed nothing -- applying it
+    with a plain `editing_steps[i] = new_step` would silently break anything
+    that tracks a step by id() across an update, such as the GUI's manual
+    row collapse/expand state (see StepEditorMixin._refresh_steps_tree)."""
+    for f in fields(Step):
+        setattr(target, f.name, getattr(source, f.name))
+
+
 @dataclass
 class Rotation:
     name: str
@@ -202,9 +213,18 @@ class Rotation:
 def folder_path_problem(folder: str) -> Optional[str]:
     """None if `folder` is a valid '/'-separated group path, else a human-readable
     reason it isn't. Shared by rotation validation and the GUI's rename/move-to-folder
-    dialogs, so both reject the same things the same way."""
+    dialogs, so both reject the same things the same way.
+
+    Backslashes are rejected outright (not just split on) because '/' is the
+    only documented separator -- a stray backslash (e.g. a pasted Windows path
+    like "..\\..\\Desktop") would otherwise pass through as a single segment
+    here, undetected as a '..' traversal attempt, and only get sanitized (not
+    rejected) by storage._folder_parts, which is meant as defense-in-depth,
+    not the primary check a user actually sees an error message from."""
     if not folder:
         return None
+    if "\\" in folder:
+        return "Folder path cannot contain backslashes -- use '/' to separate subfolders."
     for part in folder.split("/"):
         part = part.strip()
         if not part:
@@ -275,6 +295,16 @@ def validate_rotation(rotation: Rotation) -> List[str]:
 
     if not rotation.steps:
         problems.append("Rotation must have at least one step.")
+    elif rotation.mode == "loop" and all(step.key is None for step in rotation.steps):
+        # A step with key=None (unassigned) has no wait of any kind at runtime --
+        # it's just skipped instantly, unlike a real key or a deliberate ""
+        # sleep step. If *every* step in a Loop rotation is like that, the
+        # runner would spin one full pass after another with no delay
+        # anywhere, pegging a CPU core forever -- catch it here rather than
+        # letting it reach the runtime.
+        problems.append(
+            "A Loop rotation needs at least one step with a key assigned (or a Sleep step) -- "
+            "otherwise it would repeat with no delay between passes.")
 
     for i, step in enumerate(rotation.steps, start=1):
         # key is None -- no keybind assigned yet -- means this step is skipped

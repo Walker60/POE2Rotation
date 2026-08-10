@@ -315,13 +315,25 @@ class RotationRunner:
         progress" (for "duration" mode a second press while already paused is
         just a no-op; it's already counting down to auto-resume). Same
         stop()-wins guarantee as reset() if a stop() lands around the same
-        instant."""
+        instant.
+
+        The `_pause_requested` check below (distinct from `_paused.is_set()`)
+        guards a narrow but real race: `_paused` isn't actually set until
+        `_do_pause()` runs a couple of lines into its own body, so a second
+        pause() (e.g. an OS key-repeat firing the pause hotkey twice) landing
+        after the first request but before `_do_pause` has started would
+        otherwise fall through to the same "start a new pause" branch again --
+        re-setting `_stop_event` a second time *after* `_run`'s dispatch loop
+        already cleared it to enter `_do_pause`, which that method's own wait
+        loops never clear again on their own, spinning them continuously."""
         if not self.is_running:
             return
         if self._paused.is_set():
             if self.rotation.pause_mode == "toggle":
                 self._paused.clear()
             return
+        if self._pause_requested:
+            return  # a pause is already pending -- let it resolve, don't queue a second one
         self._pause_requested = True
         self._stop_event.set()
 
@@ -334,6 +346,20 @@ class RotationRunner:
             self.on_activity(self.rotation.name, message)
 
     def _run(self):
+        if self.rotation.mode == "loop" and (
+                not self.rotation.steps or all(step.key is None for step in self.rotation.steps)):
+            # Same condition validate_rotation now rejects at save time -- kept
+            # here too since a rotation can reach the runtime without ever
+            # passing through it (a pre-existing file saved before that check
+            # existed, or a hand-edited one). Without this, a Loop rotation
+            # with no step that ever fires or sleeps would spin one full pass
+            # after another with no delay anywhere, pegging a CPU core forever.
+            log.error(f"[{self.rotation.name}] refusing to start: a Loop rotation needs at least "
+                      f"one step with a key assigned (or a Sleep step), or it would spin with no delay")
+            self._notify_activity(
+                "Refused to start: no step has a key assigned -- a Loop rotation would spin with no delay")
+            self._notify(STATUS_IDLE)
+            return
         log.info(f"[{self.rotation.name}] starting ({self.rotation.mode})")
         self._notify(STATUS_RUNNING)
         self._notify_activity(f"Rotation started ({self.rotation.mode} mode)")
@@ -369,6 +395,17 @@ class RotationRunner:
                 if not completed or self.rotation.mode != "loop":
                     break
                 resume_index = 0
+        except Exception as e:
+            # Anything escaping here (e.g. an unrecognized key name reaching
+            # keyboard.press/send -- validate_rotation only runs at GUI save
+            # time, never at load or trigger time, so a stale/hand-edited
+            # rotation can still reach this point) would otherwise kill this
+            # thread silently: Python's default threading.excepthook only
+            # prints to stderr, invisible for a windowed launch, and the
+            # finally block below still reports a normal "stopped" -- making a
+            # crash indistinguishable from the user pressing Stop.
+            log.exception(f"[{self.rotation.name}] crashed: {e}")
+            self._notify_activity(f"Rotation crashed: {type(e).__name__}: {e}")
         finally:
             _close_screen_capture()
             log.info(f"[{self.rotation.name}] stopped")

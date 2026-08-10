@@ -23,8 +23,22 @@ class HotkeysMixin:
 
     # ---- hotkey binding ----------------------------------------------------
 
+    def _set_bind_buttons_enabled(self, enabled: bool):
+        """capture_next_key() is a single blocking call shared by all four of
+        these buttons and only one can meaningfully be in flight at a time
+        (HotkeyManager now serializes it internally too) -- disabling all
+        four, not just the one clicked, makes that exclusivity visible rather
+        than letting a second click silently queue up behind the first with
+        no feedback."""
+        state = "normal" if enabled else "disabled"
+        self.bind_hotkey_btn.config(state=state)
+        self.bind_cancel_btn.config(state=state)
+        self.bind_reset_btn.config(state=state)
+        self.bind_pause_btn.config(state=state)
+
     def _on_bind_hotkey_clicked(self):
-        self.bind_hotkey_btn.config(text="Press a key or click...", state="disabled")
+        self.bind_hotkey_btn.config(text="Press a key or click...")
+        self._set_bind_buttons_enabled(False)
         threading.Thread(target=self._capture_hotkey_worker, daemon=True).start()
 
     def _capture_hotkey_worker(self):
@@ -34,7 +48,8 @@ class HotkeysMixin:
     def _on_hotkey_captured(self, key: str):
         self.pending_hotkey = key
         self.hotkey_label_var.set(display_name(key))
-        self.bind_hotkey_btn.config(text="Bind Hotkey...", state="normal")
+        self.bind_hotkey_btn.config(text="Bind Hotkey...")
+        self._set_bind_buttons_enabled(True)
 
     def _on_unbind_clicked(self):
         # Clears and immediately saves, so freeing this hotkey up for another
@@ -65,7 +80,8 @@ class HotkeysMixin:
     # ---- cancel key -----------------------------------------------------------
 
     def _on_bind_cancel_clicked(self):
-        self.bind_cancel_btn.config(text="Press a key or click...", state="disabled")
+        self.bind_cancel_btn.config(text="Press a key or click...")
+        self._set_bind_buttons_enabled(False)
         threading.Thread(target=self._capture_cancel_key_worker, daemon=True).start()
 
     def _capture_cancel_key_worker(self):
@@ -75,7 +91,8 @@ class HotkeysMixin:
     def _on_cancel_key_captured(self, key: str):
         self.pending_cancel_key = key
         self.cancel_key_label_var.set(display_name(key))
-        self.bind_cancel_btn.config(text="Bind Cancel Key...", state="normal")
+        self.bind_cancel_btn.config(text="Bind Cancel Key...")
+        self._set_bind_buttons_enabled(True)
 
     def _on_clear_cancel_key(self):
         self.pending_cancel_key = None
@@ -84,7 +101,8 @@ class HotkeysMixin:
     # ---- reset key ------------------------------------------------------------
 
     def _on_bind_reset_clicked(self):
-        self.bind_reset_btn.config(text="Press a key or click...", state="disabled")
+        self.bind_reset_btn.config(text="Press a key or click...")
+        self._set_bind_buttons_enabled(False)
         threading.Thread(target=self._capture_reset_key_worker, daemon=True).start()
 
     def _capture_reset_key_worker(self):
@@ -94,7 +112,8 @@ class HotkeysMixin:
     def _on_reset_key_captured(self, key: str):
         self.pending_reset_key = key
         self.reset_key_label_var.set(display_name(key))
-        self.bind_reset_btn.config(text="Bind Reset Key...", state="normal")
+        self.bind_reset_btn.config(text="Bind Reset Key...")
+        self._set_bind_buttons_enabled(True)
 
     def _on_clear_reset_key(self):
         self.pending_reset_key = None
@@ -103,7 +122,8 @@ class HotkeysMixin:
     # ---- pause key ------------------------------------------------------------
 
     def _on_bind_pause_clicked(self):
-        self.bind_pause_btn.config(text="Press a key or click...", state="disabled")
+        self.bind_pause_btn.config(text="Press a key or click...")
+        self._set_bind_buttons_enabled(False)
         threading.Thread(target=self._capture_pause_key_worker, daemon=True).start()
 
     def _capture_pause_key_worker(self):
@@ -113,7 +133,8 @@ class HotkeysMixin:
     def _on_pause_key_captured(self, key: str):
         self.pending_pause_key = key
         self.pause_key_label_var.set(display_name(key))
-        self.bind_pause_btn.config(text="Bind Pause Key...", state="normal")
+        self.bind_pause_btn.config(text="Bind Pause Key...")
+        self._set_bind_buttons_enabled(True)
 
     def _on_clear_pause_key(self):
         self.pending_pause_key = None

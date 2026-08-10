@@ -66,6 +66,7 @@ class HotkeyManager:
         self._reset_handlers = {}  # rotation name -> ("keyboard"|"mouse", live handler), only while enabled
         self._pause_keys = {}      # rotation name -> pause key (config, survives enable/disable)
         self._pause_handlers = {}  # rotation name -> ("keyboard"|"mouse", live handler), only while enabled
+        self._capture_lock = threading.Lock()  # serializes capture_next_key() -- see its docstring
         self._enabled = False
         self._register_panic_key()
         self._enabled = True
@@ -241,40 +242,70 @@ class HotkeyManager:
     def capture_next_key(self) -> str:
         """BLOCKING -- call from a background thread only, never the Tk main thread.
 
-        Temporarily suspends every bound rotation hotkey (not the panic key) so the
-        input being pressed to bind doesn't also fire whatever rotation currently
-        owns it, then waits for the next physical keyboard key-down OR mouse
-        button-down, whichever comes first, and returns it -- a plain key name for
-        a keyboard press, or "mouse:<button>" for a mouse click.
+        Temporarily suspends every bound rotation hotkey -- trigger, cancel, reset,
+        and pause alike (not the panic key) -- so the input being pressed to bind
+        doesn't also fire whatever action currently owns it, then waits for the
+        next physical keyboard key-down OR mouse button-down, whichever comes
+        first, and returns it -- a plain key name for a keyboard press, or
+        "mouse:<button>" for a mouse click.
+
+        Guarded by self._capture_lock so two overlapping calls (e.g. the GUI
+        lets a user click a second "Bind ..." button before the first capture
+        resolves) can't both unregister-then-restore concurrently -- without
+        this, both callers' restore step would re-register every action key,
+        leaving a duplicate, permanently orphaned hook that nothing could ever
+        unhook again short of restarting the process.
         """
-        if self._enabled:
-            for rotation_name in list(self._trigger_keys.keys()):
-                self._unregister_action_key(self._trigger_handlers, rotation_name)
-
-        result = {}
-        done = threading.Event()
-
-        def on_key_event(event):
-            if event.event_type == keyboard.KEY_DOWN and "value" not in result:
-                result["value"] = event.name
-                done.set()
-
-        def on_mouse_event(event):
-            if (isinstance(event, mouse.ButtonEvent) and event.event_type == mouse.DOWN
-                    and "value" not in result):
-                result["value"] = encode_mouse_hotkey(event.button)
-                done.set()
-
-        keyboard.hook(on_key_event)
-        mouse.hook(on_mouse_event)
-        try:
-            done.wait()
-            return result["value"]
-        finally:
-            keyboard.unhook(on_key_event)
-            mouse.unhook(on_mouse_event)
+        with self._capture_lock:
             if self._enabled:
-                for rotation_name, hotkey in self._trigger_keys.items():
-                    self._register_action_key(
-                        self._trigger_handlers, rotation_name, hotkey,
-                        lambda n=rotation_name: self._rotation_manager.trigger(n))
+                for rotation_name in list(self._trigger_keys.keys()):
+                    self._unregister_action_key(self._trigger_handlers, rotation_name)
+                for rotation_name in list(self._cancel_keys.keys()):
+                    self._unregister_action_key(self._cancel_handlers, rotation_name)
+                for rotation_name in list(self._reset_keys.keys()):
+                    self._unregister_action_key(self._reset_handlers, rotation_name)
+                for rotation_name in list(self._pause_keys.keys()):
+                    self._unregister_action_key(self._pause_handlers, rotation_name)
+
+            result = {}
+            done = threading.Event()
+
+            def on_key_event(event):
+                if event.event_type == keyboard.KEY_DOWN and "value" not in result:
+                    result["value"] = event.name
+                    done.set()
+
+            def on_mouse_event(event):
+                if (isinstance(event, mouse.ButtonEvent) and event.event_type == mouse.DOWN
+                        and "value" not in result):
+                    result["value"] = encode_mouse_hotkey(event.button)
+                    done.set()
+
+            keyboard.hook(on_key_event)
+            mouse.hook(on_mouse_event)
+            try:
+                done.wait()
+                return result["value"]
+            finally:
+                keyboard.unhook(on_key_event)
+                mouse.unhook(on_mouse_event)
+                if self._enabled:
+                    for rotation_name, hotkey in self._trigger_keys.items():
+                        self._register_action_key(
+                            self._trigger_handlers, rotation_name, hotkey,
+                            lambda n=rotation_name: self._rotation_manager.trigger(n))
+                    for rotation_name, key in self._cancel_keys.items():
+                        if key:
+                            self._register_action_key(
+                                self._cancel_handlers, rotation_name, key,
+                                lambda n=rotation_name: self._rotation_manager.cancel(n))
+                    for rotation_name, key in self._reset_keys.items():
+                        if key:
+                            self._register_action_key(
+                                self._reset_handlers, rotation_name, key,
+                                lambda n=rotation_name: self._rotation_manager.reset(n))
+                    for rotation_name, key in self._pause_keys.items():
+                        if key:
+                            self._register_action_key(
+                                self._pause_handlers, rotation_name, key,
+                                lambda n=rotation_name: self._rotation_manager.pause(n))

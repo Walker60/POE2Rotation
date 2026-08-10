@@ -1,4 +1,5 @@
 import copy
+import os
 
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -97,6 +98,26 @@ class RotationListMixin:
             menu.add_command(label="Move to Folder...", command=self._move_selected_to_folder)
             menu.tk_popup(event.x_root, event.y_root)
 
+    def _folder_move_collisions(self, planned_folders: dict) -> list:
+        """planned_folders: rotation name -> new folder, for a batch of
+        rotations about to move/rename. Returns a list of (name_a, name_b)
+        pairs that would resolve to the same on-disk file once these changes
+        are applied -- checked against every currently-known rotation
+        (substituting in each mover's *new* folder), so this catches both
+        "two rotations being moved together collide with each other" and
+        "a moved rotation collides with one that's staying put" -- the same
+        kind of check App._save_rotation already does for a single save."""
+        paths = {}
+        collisions = []
+        for name, rotation in self.rotations.items():
+            folder = planned_folders.get(name, rotation.folder)
+            path = os.path.normcase(os.path.normpath(storage.path_for(name, folder)))
+            if path in paths:
+                collisions.append((paths[path], name))
+            else:
+                paths[path] = name
+        return collisions
+
     def _rename_folder(self, folder_path: str):
         """Renames/moves folder_path to a new path, taking every rotation in it
         (and any nested subfolders) along -- a bulk operation, unlike editing a
@@ -114,12 +135,20 @@ class RotationListMixin:
             return
         affected = [r for r in self.rotations.values()
                     if r.folder == folder_path or r.folder.startswith(folder_path + "/")]
+        planned = {r.name: new_path + r.folder[len(folder_path):] for r in affected}
+        collisions = self._folder_move_collisions(planned)
+        if collisions:
+            a, b = collisions[0]
+            messagebox.showerror(
+                "Cannot rename folder",
+                f"'{a}' and '{b}' would both save to the same file after this rename "
+                "-- rename or move one of them out of the way first.")
+            return
         for rotation in affected:
             old_folder = rotation.folder
-            new_folder = new_path + old_folder[len(folder_path):]
-            storage.delete_rotation(rotation.name, old_folder)
+            new_folder = planned[rotation.name]
             rotation.folder = new_folder
-            storage.save_rotation(rotation)
+            storage.move_rotation(rotation, rotation.name, old_folder)
             if rotation.name == self.editing_original_name:
                 self.folder_var.set(new_folder)
         self._refresh_rotation_tree()
@@ -142,13 +171,22 @@ class RotationListMixin:
         if problem:
             messagebox.showerror("Invalid folder", problem)
             return
+        planned = {name: new_path for name in names}
+        collisions = self._folder_move_collisions(planned)
+        if collisions:
+            a, b = collisions[0]
+            messagebox.showerror(
+                "Cannot move",
+                f"'{a}' and '{b}' would both save to the same file in the destination folder "
+                "-- rename one of them or choose a different destination.")
+            return
         for name in names:
             rotation = self.rotations[name]
             if rotation.folder == new_path:
                 continue
-            storage.delete_rotation(rotation.name, rotation.folder)
+            old_folder = rotation.folder
             rotation.folder = new_path
-            storage.save_rotation(rotation)
+            storage.move_rotation(rotation, name, old_folder)
             if name == self.editing_original_name:
                 self.folder_var.set(new_path)
         self._refresh_rotation_tree()

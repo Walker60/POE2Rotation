@@ -3,7 +3,7 @@ import copy
 import tkinter as tk
 from tkinter import messagebox
 
-from poe2bot.models import Step
+from poe2bot.models import Step, replace_step_fields
 
 
 class StepEditorMixin:
@@ -393,7 +393,11 @@ class StepEditorMixin:
             is_new_step=False, original_key=self.editing_steps[i].key)
         if step is None:
             return
-        self.editing_steps[i] = step
+        # In place, not editing_steps[i] = step -- preserves this Step object's
+        # identity so a manually collapsed/expanded row (tracked by id() in
+        # _refresh_steps_tree) doesn't spring back to its default state on
+        # every Update Selected, even one with no actual field changes.
+        replace_step_fields(self.editing_steps[i], step)
         self._refresh_steps_tree()
 
     def _remove_selected_step(self):

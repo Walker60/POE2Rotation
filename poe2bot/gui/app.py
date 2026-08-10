@@ -12,7 +12,7 @@ from poe2bot import storage
 from poe2bot.executor import RotationManager, STATUS_RUNNING
 from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Rotation, validate_rotation
+from poe2bot.models import Rotation, validate_rotation, replace_step_fields
 
 from poe2bot.gui.activity_window import ActivityWindow
 from poe2bot.gui.rotation_list import RotationListMixin
@@ -369,6 +369,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.status_var = tk.StringVar(value="Bot running. Hotkeys are live.")
         ttk.Label(bottom, textvariable=self.status_var).pack(side="left", padx=8)
         ttk.Button(bottom, text="Toggle Light/Dark", command=self._toggle_theme).pack(side="right")
+        ttk.Button(bottom, text="Show Activity Window",
+                   command=self._on_show_activity_window_clicked).pack(side="right", padx=(0, 8))
 
     # ---- appearance -----------------------------------------------------------
 
@@ -411,7 +413,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             is_new_step=False, original_key=self.editing_steps[step_idx].key)
         if step is None:
             return False
-        self.editing_steps[step_idx] = step
+        # In place, preserving identity -- see StepEditorMixin._update_selected_step.
+        replace_step_fields(self.editing_steps[step_idx], step)
         self._refresh_steps_tree()
         return True
 
@@ -490,15 +493,19 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         moved = old_rotation is not None and (
             old_rotation.name != rotation.name or old_rotation.folder != rotation.folder)
         if moved:
-            storage.delete_rotation(old_rotation.name, old_rotation.folder)
+            # move_rotation writes the new file before removing the old one, so a
+            # crash in between leaves a recoverable stray duplicate rather than
+            # losing the rotation outright.
+            storage.move_rotation(rotation, old_rotation.name, old_rotation.folder)
             self.rotation_manager.unload(old_rotation.name)
             self.hotkey_manager.unbind(old_rotation.name)
             self.hotkey_manager.set_cancel_key(old_rotation.name, None)
             self.hotkey_manager.set_reset_key(old_rotation.name, None)
             self.hotkey_manager.set_pause_key(old_rotation.name, None)
             del self.rotations[old_rotation.name]
+        else:
+            storage.save_rotation(rotation)
 
-        storage.save_rotation(rotation)
         self.rotation_manager.load(rotation)
         self.rotations[rotation.name] = rotation
         self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
@@ -537,6 +544,19 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
     def _ensure_activity_window(self):
         if self.activity_window is None or not self.activity_window.winfo_exists():
             self.activity_window = ActivityWindow(self)
+
+    def _on_show_activity_window_clicked(self):
+        # The window otherwise only (re)appears on a rotation's next
+        # STATUS_RUNNING transition -- for a Loop rotation with no
+        # pause/reset/focus-loss in between, that may never happen again for
+        # the rest of its run, so closing it had no way back short of
+        # stopping and restarting the rotation. This recreates it (fresh) if
+        # it was closed, or just raises it if it's merely hidden behind
+        # another window.
+        self._ensure_activity_window()
+        self.activity_window.deiconify()
+        self.activity_window.lift()
+        self.activity_window.focus_force()
 
     def _poll_status_queue(self):
         try:
