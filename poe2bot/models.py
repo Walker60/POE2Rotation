@@ -8,7 +8,8 @@ from poe2bot import templates
 
 VALID_MODES = ("once", "loop")
 VALID_PAUSE_MODES = ("duration", "toggle")
-VALID_READY_MATCH_TYPES = ("image", "pixel")
+VALID_READY_MATCH_TYPES = ("image", "pixel")           # Step.ready_match_type, buff_check.match_type -- visual-only
+VALID_CONDITION_MATCH_TYPES = ("image", "pixel", "timer")  # a plain step Condition can also be a pure time gate
 VALID_SEARCH_MODES = ("exact", "area")
 MAX_REPEAT_COUNT = 50
 
@@ -49,7 +50,7 @@ class Condition:
     currently matches, checked once right before firing (no polling/timeout,
     unlike the step's own cooldown check -- a condition is either true right
     now or the cast is skipped this pass)."""
-    match_type: str = "image"                                    # "image" or "pixel"
+    match_type: str = "image"                                    # "image", "pixel", or "timer"
     name: str = ""   # optional display label (e.g. "Bleeding"); falls back to an auto description in the GUI if blank
     template: Optional[str] = None                              # filename only, resolved via templates.template_path()
     region: Optional[Tuple[int, int, int, int]] = None          # (left, top, width, height), absolute screen px -- image mode
@@ -59,9 +60,13 @@ class Condition:
                                                                   # when search_mode == "area"; must be >= `region` in both dimensions
     pixel_pos: Optional[Tuple[int, int]] = None                  # (x, y) absolute screen px -- pixel mode
     pixel_color: Optional[Tuple[int, int, int]] = None           # expected (r, g, b) -- pixel mode
-    confidence: float = 0.9
+    confidence: float = 0.9                                      # image/pixel mode only, unused for timer mode
+    timer_seconds: Optional[float] = None                        # timer mode only -- minimum seconds since the owning
+                                                                  # step's own last actual fire (see RotationRunner)
 
     def has_check(self) -> bool:
+        if self.match_type == "timer":
+            return self.timer_seconds is not None and self.timer_seconds > 0
         if self.match_type == "pixel":
             return self.pixel_color is not None
         return bool(self.template)
@@ -78,6 +83,7 @@ class Condition:
             pixel_pos=_int_tuple(data.get("pixel_pos")),
             pixel_color=_int_tuple(data.get("pixel_color")),
             confidence=_float_or(data, "confidence", 0.9),
+            timer_seconds=_float_or(data, "timer_seconds", None),
         )
 
 
@@ -355,11 +361,15 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                 # not as an error. Only reachable via hand-edited JSON; the GUI's
                 # own Add Condition flow always produces a fully-calibrated one.
                 continue
-            if condition.match_type not in VALID_READY_MATCH_TYPES:
-                problems.append(f"Step {i}, condition {j}: match_type must be one of {VALID_READY_MATCH_TYPES}.")
-            if not (0 < condition.confidence <= 1):
+            if condition.match_type not in VALID_CONDITION_MATCH_TYPES:
+                problems.append(f"Step {i}, condition {j}: match_type must be one of {VALID_CONDITION_MATCH_TYPES}.")
+            if condition.match_type != "timer" and not (0 < condition.confidence <= 1):
+                # Confidence is a visual-match fuzziness threshold -- meaningless for a
+                # pure time gate, which has no "how close is close enough" to tune.
                 problems.append(f"Step {i}, condition {j}: confidence must be greater than 0 and at most 1.")
-            if condition.match_type == "pixel":
+            if condition.match_type == "timer":
+                pass  # has_check() above already proved timer_seconds is a positive number
+            elif condition.match_type == "pixel":
                 if not (isinstance(condition.pixel_pos, tuple) and len(condition.pixel_pos) == 2):
                     problems.append(f"Step {i}, condition {j}: has no calibrated point (recalibrate).")
                 if not (isinstance(condition.pixel_color, tuple) and len(condition.pixel_color) == 3):

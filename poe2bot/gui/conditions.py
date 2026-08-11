@@ -1,4 +1,4 @@
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 from poe2bot import storage, templates
 from poe2bot.log_setup import get_logger
@@ -28,6 +28,20 @@ class ConditionsMixin:
             return
         self._start_pixel_capture(on_use=lambda point, color, confidence: self._add_condition(
             step_idx, Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)))
+
+    def _on_add_timer_condition_clicked(self):
+        # No screen capture needed -- unlike image/pixel, the value is just
+        # typed in directly, so this skips CalibrationMixin's overlay flow
+        # entirely.
+        step_idx = self._selected_owning_step_index()
+        if step_idx is None:
+            return
+        seconds = simpledialog.askfloat(
+            "Add Timer Condition", "Minimum seconds since this step's last use:",
+            initialvalue=5.0, minvalue=0.1, parent=self)
+        if seconds is None:
+            return
+        self._add_condition(step_idx, Condition(match_type="timer", timer_seconds=seconds))
 
     def _add_condition(self, step_idx: int, condition: Condition):
         self.editing_steps[step_idx].conditions.append(condition)
@@ -69,7 +83,14 @@ class ConditionsMixin:
             self.editing_steps[step_idx].conditions[cond_idx] = new_condition
             self._refresh_steps_tree()
 
-        if condition.match_type == "pixel":
+        if condition.match_type == "timer":
+            seconds = simpledialog.askfloat(
+                "Edit Timer Condition", "Minimum seconds since this step's last use:",
+                initialvalue=condition.timer_seconds, minvalue=0.1, parent=self)
+            if seconds is None:
+                return
+            replace(Condition(match_type="timer", timer_seconds=seconds))
+        elif condition.match_type == "pixel":
             self._start_pixel_capture(
                 on_use=lambda point, color, confidence: replace(
                     Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)),

@@ -116,6 +116,8 @@ class StepEditorMixin:
     def _condition_summary(condition) -> str:
         if condition.name:
             return f"Condition: {condition.name}"
+        if condition.match_type == "timer" and condition.timer_seconds:
+            return f"Condition: {condition.timer_seconds:g}s since last use"
         if condition.match_type == "pixel" and condition.pixel_color:
             r, g, b = condition.pixel_color
             return f"Condition: Pixel RGB({r},{g},{b})"

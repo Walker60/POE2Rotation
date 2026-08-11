@@ -95,11 +95,24 @@ def _check_ready(step: Step) -> bool:
                            step.ready_search_mode, step.ready_search_region)
 
 
-def _check_condition(condition: Condition, label: str) -> bool:
-    """True if `condition` currently matches on screen -- same dispatch/matching
-    code as _check_ready, just parameterized on a Condition instead of a Step
-    (a Condition is an extra, instantly-checked gate on a step; see
-    RotationRunner._run_once)."""
+def _check_condition(condition: Condition, label: str, seconds_since_fired: Optional[float] = None) -> bool:
+    """True if `condition` currently matches -- for "image"/"pixel" that means
+    on screen, via the same dispatch/matching code as _check_ready, just
+    parameterized on a Condition instead of a Step (a Condition is an extra,
+    instantly-checked gate on a step; see RotationRunner._run_once). For
+    "timer" it means at least `condition.timer_seconds` have passed since the
+    owning step's own last fire -- `seconds_since_fired` is computed by the
+    caller (RotationRunner._run_once, from its own _step_last_fired tracking),
+    since this function stays a plain stateless dispatcher, same as
+    _check_ready. Only meaningful for a plain step Condition, not buff_check
+    (buff_check.match_type is restricted to "image"/"pixel" at validation
+    time, so its _check_condition call never needs this argument)."""
+    if condition.match_type == "timer":
+        if condition.timer_seconds is None or condition.timer_seconds <= 0:
+            return False  # unconfigured -- treated as "doesn't match", same as a missing template/pixel below
+        if seconds_since_fired is None:
+            return True  # never fired yet this run -- nothing to wait out, available immediately
+        return seconds_since_fired >= condition.timer_seconds
     if condition.match_type == "pixel":
         return _pixel_matches(condition.pixel_pos, condition.pixel_color, condition.confidence, label)
     return _image_matches(condition.template, condition.region, condition.confidence, label,
@@ -262,6 +275,13 @@ class RotationRunner:
         self._pause_requested = False
         self._paused = threading.Event()
         self._current_step_index = 0   # touched only by _run_once's own thread
+        # id(step) -> time.perf_counter() of that step's own last actual fire, for
+        # any "timer" Condition gating it (see _check_condition). Survives a Loop
+        # wraparound and a pause/resume -- a real cooldown keeps ticking regardless
+        # -- and is cleared only on reset() (restart from step 1) or whenever a run
+        # truly ends (see _run's reset branch and finally block). Touched only by
+        # _run/_run_once/_fire_repeats, all on this runner's own thread.
+        self._step_last_fired = {}
         self._thread = None
 
     @property
@@ -382,6 +402,7 @@ class RotationRunner:
                     self._reset_requested = False
                     self._stop_event.clear()
                     resume_index = 0
+                    self._step_last_fired.clear()
                     if self.rotation.reset_delay_ms > 0 and not self._wait_reset_delay():
                         break  # a genuine stop() arrived during the reset delay
                     continue
@@ -411,6 +432,7 @@ class RotationRunner:
             log.info(f"[{self.rotation.name}] stopped")
             self._notify_activity("Rotation stopped")
             self._notify(STATUS_IDLE)
+            self._step_last_fired.clear()
 
     def _do_pause(self) -> bool:
         """Block until this pause ends (duration elapsed, or toggled off), or
@@ -480,7 +502,9 @@ class RotationRunner:
                 # repeat_count times if set. Conditions still gate it exactly like a
                 # normal step's do (checked once, no polling) -- a failing condition
                 # skips the wait entirely rather than pausing anyway.
-                if not all(_check_condition(c, step.key or "sleep") for c in step.conditions):
+                last_fired = self._step_last_fired.get(id(step))
+                seconds_since_fired = (time.perf_counter() - last_fired) if last_fired is not None else None
+                if not all(_check_condition(c, step.key or "sleep", seconds_since_fired) for c in step.conditions):
                     if not self._stop_event.is_set():
                         log.info(f"[{self.rotation.name}] sleep step's conditions not met; skipping")
                         self._notify_activity(f"Step {i + 1}: sleep conditions not met, skipping")
@@ -494,7 +518,9 @@ class RotationRunner:
                     return False
                 continue
             ready = self._wait_until_ready(step)
-            if ready and all(_check_condition(c, step.key) for c in step.conditions):
+            last_fired = self._step_last_fired.get(id(step))
+            seconds_since_fired = (time.perf_counter() - last_fired) if last_fired is not None else None
+            if ready and all(_check_condition(c, step.key, seconds_since_fired) for c in step.conditions):
                 buff_active = _check_buff_active(step)
                 self._notify_activity(
                     f"Step {i + 1} ('{step.key}'): casting" + (" (buff active)" if buff_active else ""))
@@ -585,6 +611,12 @@ class RotationRunner:
         _sleep_delay's contract, so _run_once can bail out immediately."""
         if self._stop_event.is_set():
             return False
+        # Recorded here, not at _run_once's call sites, so a pause() landing in
+        # the gap between the condition check passing and this method being
+        # entered can never falsely mark a step as "just fired" -- _stop_event
+        # is shared by stop()/reset()/pause(), and the guard just above already
+        # bails out before this line for exactly that race.
+        self._step_last_fired[id(step)] = time.perf_counter()
         repeat = max(1, step.repeat_count)
         base_hold = step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms
         if step.key and step.repeat_combine_hold and base_hold > 0 and repeat > 1:

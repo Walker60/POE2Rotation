@@ -343,6 +343,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                    command=self._on_add_image_condition_clicked).pack(side="left", padx=(0, 4))
         ttk.Button(condition_btns, text="Add Pixel Condition...",
                    command=self._on_add_pixel_condition_clicked).pack(side="left", padx=(0, 4))
+        ttk.Button(condition_btns, text="Add Timer Condition...",
+                   command=self._on_add_timer_condition_clicked).pack(side="left", padx=(0, 4))
         ttk.Label(condition_btns,
                   text="(double-click a condition in the list to recalibrate it;"
                        " use Move Up/Move Down in Step Actions to reorder it)",
