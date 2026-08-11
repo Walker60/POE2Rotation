@@ -1,9 +1,12 @@
+import contextlib
 import threading
 
 import keyboard
 import mouse
 
 from poe2bot import config
+from poe2bot.controller import controller_button_of, encode_controller_key, is_controller_key
+from poe2bot.controller_input import get_controller_reader
 from poe2bot.log_setup import get_logger
 
 log = get_logger()
@@ -30,14 +33,26 @@ def encode_mouse_hotkey(button: str) -> str:
     return f"{MOUSE_PREFIX}{button}"
 
 
+CONTROLLER_DISPLAY_NAMES = {
+    "a": "A", "b": "B", "x": "X", "y": "Y",
+    "lb": "Left Bumper", "rb": "Right Bumper", "lt": "Left Trigger", "rt": "Right Trigger",
+    "back": "Back", "start": "Start", "ls": "Left Stick", "rs": "Right Stick",
+    "dpad_up": "D-Pad Up", "dpad_down": "D-Pad Down", "dpad_left": "D-Pad Left", "dpad_right": "D-Pad Right",
+}
+
+
 def display_name(hotkey) -> str:
-    """Human-friendly label for a hotkey string (a keyboard key name, or
-    'mouse:<button>'), for use anywhere the GUI shows a hotkey to the user."""
+    """Human-friendly label for a hotkey string (a keyboard key name,
+    'mouse:<button>', or 'controller:<button>'), for use anywhere the GUI
+    shows a hotkey to the user."""
     if not hotkey:
         return "(unbound)"
     if is_mouse_hotkey(hotkey):
         button = mouse_button_of(hotkey)
         return MOUSE_DISPLAY_NAMES.get(button, f"Mouse {button}")
+    if is_controller_key(hotkey):
+        button = controller_button_of(hotkey)
+        return f"Controller: {CONTROLLER_DISPLAY_NAMES.get(button, button)}"
     return hotkey
 
 
@@ -136,6 +151,13 @@ class HotkeyManager:
             button = mouse_button_of(action_key)
             handler = mouse.on_button(callback, buttons=(button,), types=(mouse.DOWN,))
             handlers[rotation_name] = ("mouse", handler)
+        elif is_controller_key(action_key):
+            button = controller_button_of(action_key)
+
+            def on_controller_button(cb=callback):
+                cb()
+            get_controller_reader().on_button_down(button, on_controller_button)
+            handlers[rotation_name] = ("controller", (button, on_controller_button))
         else:
             def on_key_event(event, cb=callback, key=action_key):
                 if event.event_type == keyboard.KEY_DOWN and event.name == key:
@@ -150,6 +172,9 @@ class HotkeyManager:
         kind, handler = entry
         if kind == "mouse":
             mouse.unhook(handler)
+        elif kind == "controller":
+            button, callback = handler
+            get_controller_reader().off_button_down(button, callback)
         else:
             keyboard.unhook(handler)
 
@@ -216,28 +241,59 @@ class HotkeyManager:
     def disable_all(self):
         if not self._enabled:
             return
+        # Releases the panic key (an add_hotkey()-based registration, untouched by
+        # the four registries below). Each registry's own entries are unhooked
+        # individually via _unregister_action_key, which already dispatches
+        # correctly by kind (keyboard/mouse/controller) -- no bulk mouse.unhook_all()
+        # or per-kind patch-up loop needed on top of that.
         keyboard.unhook_all_hotkeys()
-        mouse.unhook_all()
-        # mouse-based trigger/cancel/reset/pause-key handlers were already released
-        # by mouse.unhook_all() above; keyboard-hook-based ones are a separate
-        # registry keyboard doesn't touch, so those still need releasing explicitly.
-        for kind, handler in self._trigger_handlers.values():
-            if kind == "keyboard":
-                keyboard.unhook(handler)
-        self._trigger_handlers.clear()
-        for kind, handler in self._cancel_handlers.values():
-            if kind == "keyboard":
-                keyboard.unhook(handler)
-        self._cancel_handlers.clear()
-        for kind, handler in self._reset_handlers.values():
-            if kind == "keyboard":
-                keyboard.unhook(handler)
-        self._reset_handlers.clear()
-        for kind, handler in self._pause_handlers.values():
-            if kind == "keyboard":
-                keyboard.unhook(handler)
-        self._pause_handlers.clear()
+        for handlers in (self._trigger_handlers, self._cancel_handlers,
+                          self._reset_handlers, self._pause_handlers):
+            for rotation_name in list(handlers.keys()):
+                self._unregister_action_key(handlers, rotation_name)
         self._enabled = False
+
+    @contextlib.contextmanager
+    def _suspend_all_action_keys(self):
+        """Temporarily unregisters every currently-bound trigger/cancel/reset/
+        pause handler (every rotation, all three kinds) so a capture flow's
+        physical input doesn't also fire whatever action currently owns it,
+        then restores them all on exit. Shared by capture_next_key() and
+        capture_next_controller_button() -- both mutate/restore the same
+        registries, so callers must hold self._capture_lock around this too,
+        not just each other."""
+        if self._enabled:
+            for handlers, keys in (
+                (self._trigger_handlers, self._trigger_keys),
+                (self._cancel_handlers, self._cancel_keys),
+                (self._reset_handlers, self._reset_keys),
+                (self._pause_handlers, self._pause_keys),
+            ):
+                for rotation_name in list(keys.keys()):
+                    self._unregister_action_key(handlers, rotation_name)
+        try:
+            yield
+        finally:
+            if self._enabled:
+                for rotation_name, hotkey in self._trigger_keys.items():
+                    self._register_action_key(
+                        self._trigger_handlers, rotation_name, hotkey,
+                        lambda n=rotation_name: self._rotation_manager.trigger(n))
+                for rotation_name, key in self._cancel_keys.items():
+                    if key:
+                        self._register_action_key(
+                            self._cancel_handlers, rotation_name, key,
+                            lambda n=rotation_name: self._rotation_manager.cancel(n))
+                for rotation_name, key in self._reset_keys.items():
+                    if key:
+                        self._register_action_key(
+                            self._reset_handlers, rotation_name, key,
+                            lambda n=rotation_name: self._rotation_manager.reset(n))
+                for rotation_name, key in self._pause_keys.items():
+                    if key:
+                        self._register_action_key(
+                            self._pause_handlers, rotation_name, key,
+                            lambda n=rotation_name: self._rotation_manager.pause(n))
 
     def capture_next_key(self) -> str:
         """BLOCKING -- call from a background thread only, never the Tk main thread.
@@ -245,9 +301,10 @@ class HotkeyManager:
         Temporarily suspends every bound rotation hotkey -- trigger, cancel, reset,
         and pause alike (not the panic key) -- so the input being pressed to bind
         doesn't also fire whatever action currently owns it, then waits for the
-        next physical keyboard key-down OR mouse button-down, whichever comes
-        first, and returns it -- a plain key name for a keyboard press, or
-        "mouse:<button>" for a mouse click.
+        next physical keyboard key-down, mouse button-down, or controller
+        button-down, whichever comes first, and returns it -- a plain key name
+        for a keyboard press, "mouse:<button>" for a mouse click, or
+        "controller:<button>" for a controller press.
 
         Guarded by self._capture_lock so two overlapping calls (e.g. the GUI
         lets a user click a second "Bind ..." button before the first capture
@@ -256,17 +313,7 @@ class HotkeyManager:
         leaving a duplicate, permanently orphaned hook that nothing could ever
         unhook again short of restarting the process.
         """
-        with self._capture_lock:
-            if self._enabled:
-                for rotation_name in list(self._trigger_keys.keys()):
-                    self._unregister_action_key(self._trigger_handlers, rotation_name)
-                for rotation_name in list(self._cancel_keys.keys()):
-                    self._unregister_action_key(self._cancel_handlers, rotation_name)
-                for rotation_name in list(self._reset_keys.keys()):
-                    self._unregister_action_key(self._reset_handlers, rotation_name)
-                for rotation_name in list(self._pause_keys.keys()):
-                    self._unregister_action_key(self._pause_handlers, rotation_name)
-
+        with self._capture_lock, self._suspend_all_action_keys():
             result = {}
             done = threading.Event()
 
@@ -281,31 +328,46 @@ class HotkeyManager:
                     result["value"] = encode_mouse_hotkey(event.button)
                     done.set()
 
+            def on_controller_event(button_name):
+                if "value" not in result:
+                    result["value"] = encode_controller_key(button_name)
+                    done.set()
+
+            reader = get_controller_reader()
             keyboard.hook(on_key_event)
             mouse.hook(on_mouse_event)
+            reader.on_any_button_down(on_controller_event)
             try:
                 done.wait()
                 return result["value"]
             finally:
                 keyboard.unhook(on_key_event)
                 mouse.unhook(on_mouse_event)
-                if self._enabled:
-                    for rotation_name, hotkey in self._trigger_keys.items():
-                        self._register_action_key(
-                            self._trigger_handlers, rotation_name, hotkey,
-                            lambda n=rotation_name: self._rotation_manager.trigger(n))
-                    for rotation_name, key in self._cancel_keys.items():
-                        if key:
-                            self._register_action_key(
-                                self._cancel_handlers, rotation_name, key,
-                                lambda n=rotation_name: self._rotation_manager.cancel(n))
-                    for rotation_name, key in self._reset_keys.items():
-                        if key:
-                            self._register_action_key(
-                                self._reset_handlers, rotation_name, key,
-                                lambda n=rotation_name: self._rotation_manager.reset(n))
-                    for rotation_name, key in self._pause_keys.items():
-                        if key:
-                            self._register_action_key(
-                                self._pause_handlers, rotation_name, key,
-                                lambda n=rotation_name: self._rotation_manager.pause(n))
+                reader.off_any_button_down(on_controller_event)
+
+    def capture_next_controller_button(self) -> str:
+        """BLOCKING -- call from a background thread only, never the Tk main
+        thread. Same suspend/restore discipline as capture_next_key(), but
+        listens ONLY to the controller reader -- for the step editor's
+        controller-only capture, where a stray keyboard/mouse event must
+        not be able to win the race and silently write the wrong kind of
+        value into a field meant to hold a controller button. Shares
+        self._capture_lock with capture_next_key() -- both mutate/restore
+        the same registries, so they must be mutually exclusive with each
+        other, not just with themselves."""
+        with self._capture_lock, self._suspend_all_action_keys():
+            result = {}
+            done = threading.Event()
+
+            def on_controller_event(button_name):
+                if "value" not in result:
+                    result["value"] = encode_controller_key(button_name)
+                    done.set()
+
+            reader = get_controller_reader()
+            reader.on_any_button_down(on_controller_event)
+            try:
+                done.wait()
+                return result["value"]
+            finally:
+                reader.off_any_button_down(on_controller_event)

@@ -35,6 +35,18 @@ process from sending input to a higher-privilege (elevated) window (UIPI). If PO
 or its keystrokes will silently not reach the game. If hotkeys or keystrokes don't
 seem to work at all, try running from an elevated terminal first to rule this out.
 
+### Controller output
+
+A step can press a button on a virtual Xbox 360 controller instead of a keyboard key
+(see "Controller-encoded steps" below). This works via `vgamepad`, which — as a side
+effect of `pip install -r requirements.txt` — installs the ViGEmBus driver (a real
+Windows kernel driver, not just a Python package). Expect one UAC/admin prompt during
+that install; it's one-time and unrelated to whether the bot itself needs to run
+elevated (see the keyboard-hook note above — that's a separate concern). The driver is
+properly signed and works fine with Secure Boot and driver-signature enforcement both
+enabled — no settings need to be changed for it. (If you go looking for "ViGEmBus"
+online, note the upstream project renamed in 2023; functionally unaffected either way.)
+
 ## Configuration
 
 - `POE2BOT_TARGET_PROCESS` — the game executable name the focus guard checks for
@@ -43,6 +55,10 @@ seem to work at all, try running from an elevated terminal first to rule this ou
   this to `notepad.exe` to test the bot against Notepad instead of the game.
 - `POE2BOT_PANIC_KEY` — reserved global hotkey that instantly stops every running
   rotation (default `f12`). Cannot be bound to a rotation.
+- `POE2BOT_CONTROLLER_MIN_TAP_MS` — minimum press duration (ms) for a controller-encoded
+  step with no Hold configured (default `40`). A virtual controller has no input queue
+  the way a keyboard tap does, so an instant press+release risks the game's next input
+  poll never seeing it; raise this if a controller step still doesn't reliably register.
 
 ## Cooldown-gated steps (optional, per step)
 

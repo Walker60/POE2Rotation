@@ -10,7 +10,7 @@ import mss
 import numpy as np
 from PIL import Image, ImageChops, ImageStat
 
-from poe2bot import templates
+from poe2bot import config, controller, templates
 from poe2bot.focus import is_game_focused
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Condition, Rotation, Step
@@ -583,6 +583,14 @@ class RotationRunner:
     def _fire_step(self, step: Step, buff_active: bool = False, hold_override: Optional[int] = None):
         base_hold = hold_override if hold_override is not None else (
             step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms)
+        is_controller = controller.is_controller_key(step.key)
+        button = controller.controller_button_of(step.key) if is_controller else None
+        # A virtual controller report has no OS-level input queue the way keyboard.send()'s
+        # discrete KEYDOWN/KEYUP messages do -- an instant press+release risks the game's
+        # next input poll never observing it. Force a controller tap through the hold
+        # branch below with a small floor duration instead of a true instantaneous tap.
+        if is_controller and base_hold <= 0:
+            base_hold = config.CONTROLLER_MIN_TAP_MS
         if base_hold > 0:
             hold = base_hold
             if step.hold_jitter_ms:
@@ -591,14 +599,21 @@ class RotationRunner:
             log.debug(f"[{self.rotation.name}] key={step.key} hold_ms={hold:.0f}"
                       + (" (buff)" if buff_active and step.buff_hold_ms is not None else ""))
             try:
-                keyboard.press(step.key)
+                if is_controller:
+                    controller.press(button)
+                else:
+                    keyboard.press(step.key)
                 self._stop_event.wait(timeout=hold / 1000)
             finally:
-                keyboard.release(step.key)
+                if is_controller:
+                    controller.release(button)
+                else:
+                    keyboard.release(step.key)
             self._notify_activity(
                 f"Held '{step.key}' {hold:.0f}ms"
                 + (" (buff)" if buff_active and step.buff_hold_ms is not None else ""))
         else:
+            # is_controller is always False here -- forced into the branch above otherwise.
             log.debug(f"[{self.rotation.name}] key={step.key} (tap)")
             keyboard.send(step.key)
             self._notify_activity(f"Tapped '{step.key}'")

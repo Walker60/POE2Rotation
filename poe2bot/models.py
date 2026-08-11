@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 
 import keyboard
 
-from poe2bot import templates
+from poe2bot import controller, templates
 
 VALID_MODES = ("once", "loop")
 VALID_PAUSE_MODES = ("duration", "toggle")
@@ -326,10 +326,14 @@ def validate_rotation(rotation: Rotation) -> List[str]:
         # it just waits out delay_ms (+/- jitter_ms) like any other step's
         # post-fire wait. Both are falsy, so this check is skipped for either.
         if step.key and step.key.strip():
-            try:
-                keyboard.key_to_scan_codes(step.key)
-            except ValueError:
-                problems.append(f"Step {i}: '{step.key}' is not a recognized key name.")
+            if controller.is_controller_key(step.key):
+                if controller.controller_button_of(step.key) not in controller.VALID_BUTTON_NAMES:
+                    problems.append(f"Step {i}: '{step.key}' is not a recognized controller button.")
+            else:
+                try:
+                    keyboard.key_to_scan_codes(step.key)
+                except ValueError:
+                    problems.append(f"Step {i}: '{step.key}' is not a recognized key name.")
 
         if step.delay_ms < 0:
             problems.append(f"Step {i}: delay_ms cannot be negative.")

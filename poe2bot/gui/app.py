@@ -8,7 +8,7 @@ from tkinter import messagebox, ttk
 import keyboard
 import sv_ttk
 
-from poe2bot import storage
+from poe2bot import controller, storage
 from poe2bot.executor import RotationManager, STATUS_RUNNING
 from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
@@ -275,8 +275,15 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.step_hold_var = tk.StringVar(value="30")
         self.step_hold_jitter_var = tk.StringVar(value="10")
         self.step_repeat_var = tk.StringVar(value="1")
+        for label, var, width in (("Name", self.step_name_var, 12),):
+            ttk.Label(edit_row, text=label).pack(side="left")
+            ttk.Entry(edit_row, textvariable=var, width=width).pack(side="left", padx=(2, 8))
+        ttk.Label(edit_row, text="Key").pack(side="left")
+        ttk.Entry(edit_row, textvariable=self.step_key_var, width=8).pack(side="left", padx=(2, 4))
+        self.capture_step_key_btn = ttk.Button(
+            edit_row, text="Capture Controller Button", command=self._on_capture_step_key_clicked)
+        self.capture_step_key_btn.pack(side="left", padx=(0, 8))
         for label, var, width in (
-            ("Name", self.step_name_var, 12), ("Key", self.step_key_var, 8),
             ("Delay", self.step_delay_var, 6),
             ("Jitter", self.step_jitter_var, 6), ("Hold", self.step_hold_var, 6),
             ("Hold Jitter", self.step_hold_jitter_var, 6),
@@ -568,11 +575,12 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         try:
             while True:
                 name, payload = self.status_queue.get_nowait()
-                # The four "__*_capture__" sentinels are pushed by HotkeysMixin's
-                # _capture_*_worker methods (poe2bot/gui/hotkeys_ui.py) from a
+                # The "__*_capture__" sentinels are pushed by HotkeysMixin's/
+                # StepEditorMixin's _capture_*_worker methods (poe2bot/gui/
+                # hotkeys_ui.py, poe2bot/gui/step_editor.py) from a
                 # background thread -- this is where that hop back to the Tk
                 # thread actually gets consumed and dispatched to the matching
-                # _on_*_captured method (also defined in hotkeys_ui.py).
+                # _on_*_captured method.
                 if name == "__capture__":
                     self._on_hotkey_captured(payload)
                 elif name == "__cancel_capture__":
@@ -581,6 +589,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                     self._on_reset_key_captured(payload)
                 elif name == "__pause_capture__":
                     self._on_pause_key_captured(payload)
+                elif name == "__step_key_capture__":
+                    self._on_step_key_captured(payload)
                 else:
                     status = payload
                     self._refresh_rotation_tree()
@@ -609,4 +619,5 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
     def _on_close(self):
         self.rotation_manager.stop_all()
         keyboard.unhook_all()
+        controller.release_all()
         self.destroy()

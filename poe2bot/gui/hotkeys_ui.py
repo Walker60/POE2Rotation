@@ -24,17 +24,18 @@ class HotkeysMixin:
     # ---- hotkey binding ----------------------------------------------------
 
     def _set_bind_buttons_enabled(self, enabled: bool):
-        """capture_next_key() is a single blocking call shared by all four of
-        these buttons and only one can meaningfully be in flight at a time
-        (HotkeyManager now serializes it internally too) -- disabling all
-        four, not just the one clicked, makes that exclusivity visible rather
-        than letting a second click silently queue up behind the first with
-        no feedback."""
+        """capture_next_key()/capture_next_controller_button() are blocking
+        calls sharing one lock (HotkeyManager._capture_lock) and only one can
+        meaningfully be in flight at a time -- disabling all five buttons,
+        not just the one clicked, makes that exclusivity visible rather than
+        letting a second click silently queue up behind the first with no
+        feedback."""
         state = "normal" if enabled else "disabled"
         self.bind_hotkey_btn.config(state=state)
         self.bind_cancel_btn.config(state=state)
         self.bind_reset_btn.config(state=state)
         self.bind_pause_btn.config(state=state)
+        self.capture_step_key_btn.config(state=state)
 
     def _on_bind_hotkey_clicked(self):
         self.bind_hotkey_btn.config(text="Press a key or click...")

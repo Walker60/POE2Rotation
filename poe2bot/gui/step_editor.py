@@ -1,4 +1,5 @@
 import copy
+import threading
 
 import tkinter as tk
 from tkinter import messagebox
@@ -9,8 +10,28 @@ from poe2bot.models import Step, replace_step_fields
 class StepEditorMixin:
     """The step Treeview and the "Selected Step" editing form: reading/writing
     it, the reset helpers that blank it for a fresh step (also called from
-    RotationListMixin when switching rotations), and Add/Update/Remove/Copy/
-    Paste/Move. Mixed into App (see poe2bot/gui/app.py)."""
+    RotationListMixin when switching rotations), Add/Update/Remove/Copy/
+    Paste/Move, and capturing a controller button press directly into the
+    Key field. Mixed into App (see poe2bot/gui/app.py)."""
+
+    # ---- controller-button capture for the Key field -----------------------
+
+    def _on_capture_step_key_clicked(self):
+        self.capture_step_key_btn.config(text="Press a controller button...")
+        self._set_bind_buttons_enabled(False)
+        threading.Thread(target=self._capture_step_key_worker, daemon=True).start()
+
+    def _capture_step_key_worker(self):
+        key = self.hotkey_manager.capture_next_controller_button()
+        self.status_queue.put(("__step_key_capture__", key))
+
+    def _on_step_key_captured(self, key: str):
+        # No display_name() indirection needed here, unlike the four rotation-
+        # level captures -- the Key field is a plain editable Entry that
+        # already shows raw text (e.g. "controller:a"), not a read-only label.
+        self.step_key_var.set(key)
+        self.capture_step_key_btn.config(text="Capture Controller Button")
+        self._set_bind_buttons_enabled(True)
 
     def _reset_step_core_fields(self):
         """Blank defaults for a step not yet filled in. Shared by every place
