@@ -106,17 +106,27 @@ def _check_condition(condition: Condition, label: str, seconds_since_fired: Opti
     since this function stays a plain stateless dispatcher, same as
     _check_ready. Only meaningful for a plain step Condition, not buff_check
     (buff_check.match_type is restricted to "image"/"pixel" at validation
-    time, so its _check_condition call never needs this argument)."""
+    time, so its _check_condition call never needs this argument).
+
+    `condition.negate` inverts the result uniformly, applied last, regardless
+    of match_type or why the underlying check came out the way it did (e.g.
+    "fire only if this debuff icon is NOT present" is an image condition with
+    negate=True; an unconfigured negated condition still ends up firing
+    every time, since "unconfigured" itself already reads as "doesn't
+    match")."""
     if condition.match_type == "timer":
         if condition.timer_seconds is None or condition.timer_seconds <= 0:
-            return False  # unconfigured -- treated as "doesn't match", same as a missing template/pixel below
-        if seconds_since_fired is None:
-            return True  # never fired yet this run -- nothing to wait out, available immediately
-        return seconds_since_fired >= condition.timer_seconds
-    if condition.match_type == "pixel":
-        return _pixel_matches(condition.pixel_pos, condition.pixel_color, condition.confidence, label)
-    return _image_matches(condition.template, condition.region, condition.confidence, label,
-                           condition.search_mode, condition.search_region)
+            matched = False  # unconfigured -- treated as "doesn't match", same as a missing template/pixel below
+        elif seconds_since_fired is None:
+            matched = True  # never fired yet this run -- nothing to wait out, available immediately
+        else:
+            matched = seconds_since_fired >= condition.timer_seconds
+    elif condition.match_type == "pixel":
+        matched = _pixel_matches(condition.pixel_pos, condition.pixel_color, condition.confidence, label)
+    else:
+        matched = _image_matches(condition.template, condition.region, condition.confidence, label,
+                                  condition.search_mode, condition.search_region)
+    return (not matched) if condition.negate else matched
 
 
 def _check_buff_active(step: Step) -> bool:

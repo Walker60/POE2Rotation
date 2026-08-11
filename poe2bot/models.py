@@ -63,6 +63,12 @@ class Condition:
     confidence: float = 0.9                                      # image/pixel mode only, unused for timer mode
     timer_seconds: Optional[float] = None                        # timer mode only -- minimum seconds since the owning
                                                                   # step's own last actual fire (see RotationRunner)
+    negate: bool = False                                         # invert the match result -- e.g. an image condition
+                                                                  # with negate=True gates firing on the image being
+                                                                  # ABSENT rather than present. Applies uniformly to
+                                                                  # whichever match_type this condition uses; doesn't
+                                                                  # affect has_check() -- an uncalibrated negated
+                                                                  # condition is still "not configured", not an error.
 
     def has_check(self) -> bool:
         if self.match_type == "timer":
@@ -84,6 +90,7 @@ class Condition:
             pixel_color=_int_tuple(data.get("pixel_color")),
             confidence=_float_or(data, "confidence", 0.9),
             timer_seconds=_float_or(data, "timer_seconds", None),
+            negate=bool(data.get("negate", False)),
         )
 
 

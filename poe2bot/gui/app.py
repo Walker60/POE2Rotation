@@ -358,6 +358,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             side="left", padx=(2, 8))
         ttk.Button(condition_name_row, text="Rename Selected Condition",
                    command=self._on_rename_condition_clicked).pack(side="left")
+        self.condition_negate_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(condition_name_row, text="Negate (fire if NOT matched)",
+                        variable=self.condition_negate_var,
+                        command=self._on_toggle_condition_negate).pack(side="left", padx=(12, 0))
 
         save_row = ttk.Frame(right)
         save_row.pack(fill="x", pady=(4, 0))

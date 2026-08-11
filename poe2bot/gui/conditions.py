@@ -64,6 +64,31 @@ class ConditionsMixin:
         self._refresh_steps_tree()
         self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx}")
 
+    def _on_toggle_condition_negate(self):
+        """The checkbox's variable has already flipped by the time this runs
+        (standard Checkbutton behavior -- command fires after the var
+        updates), so on any bail-out path below the var is reverted back to
+        False rather than left reflecting a toggle that was never actually
+        applied to anything."""
+        selection = self.tree.selection()
+        if not selection:
+            self.condition_negate_var.set(False)
+            messagebox.showinfo("No condition selected", "Select a condition in the list first.")
+            return
+        if len(selection) > 1:
+            self.condition_negate_var.set(False)
+            messagebox.showinfo("Select one condition", "Select exactly one condition to toggle Negate.")
+            return
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None or parsed[1] is None:
+            self.condition_negate_var.set(False)
+            messagebox.showinfo("Select a condition", "Select a condition (not a step) to toggle Negate.")
+            return
+        step_idx, cond_idx = parsed
+        self.editing_steps[step_idx].conditions[cond_idx].negate = self.condition_negate_var.get()
+        self._refresh_steps_tree()
+        self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx}")
+
     def _on_tree_double_click(self, _event):
         """Double-clicking a condition row recalibrates it in place (same
         capture flow as adding one, but replacing rather than appending).

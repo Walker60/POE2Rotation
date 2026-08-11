@@ -28,6 +28,7 @@ class StepEditorMixin:
         self.step_repeat_var.set("1")
         self.step_repeat_combine_hold_var.set(False)
         self.condition_name_var.set("")
+        self.condition_negate_var.set(False)
 
     def _reset_ready_form(self):
         self.step_ready_match_type = "image"
@@ -114,20 +115,21 @@ class StepEditorMixin:
 
     @staticmethod
     def _condition_summary(condition) -> str:
+        not_marker = "NOT " if condition.negate else ""
         if condition.name:
-            return f"Condition: {condition.name}"
+            return f"Condition: {not_marker}{condition.name}"
         if condition.match_type == "timer" and condition.timer_seconds:
-            return f"Condition: {condition.timer_seconds:g}s since last use"
+            return f"Condition: {not_marker}{condition.timer_seconds:g}s since last use"
         if condition.match_type == "pixel" and condition.pixel_color:
             r, g, b = condition.pixel_color
-            return f"Condition: Pixel RGB({r},{g},{b})"
+            return f"Condition: {not_marker}Pixel RGB({r},{g},{b})"
         if condition.match_type == "image" and condition.region:
             w, h = condition.region[2], condition.region[3]
             if condition.search_mode == "area" and condition.search_region:
                 sw, sh = condition.search_region[2], condition.search_region[3]
-                return f"Condition: Image {w}x{h} (searching {sw}x{sh} area)"
-            return f"Condition: Image {w}x{h}"
-        return "Condition: (not calibrated)"
+                return f"Condition: {not_marker}Image {w}x{h} (searching {sw}x{sh} area)"
+            return f"Condition: {not_marker}Image {w}x{h}"
+        return f"Condition: {not_marker}(not calibrated)"
 
     @staticmethod
     def _parse_tree_iid(iid: str):
@@ -183,6 +185,7 @@ class StepEditorMixin:
             return
         step = self.editing_steps[parsed[0]]
         self.condition_name_var.set(step.conditions[parsed[1]].name if parsed[1] is not None else "")
+        self.condition_negate_var.set(step.conditions[parsed[1]].negate if parsed[1] is not None else False)
         self.step_name_var.set(step.name)
         self.step_key_var.set(step.key or "")
         self.step_delay_var.set(str(step.delay_ms))
