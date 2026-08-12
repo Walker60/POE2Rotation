@@ -8,11 +8,11 @@ from tkinter import messagebox, ttk
 import keyboard
 import sv_ttk
 
-from poe2bot import controller, storage
+from poe2bot import app_state, controller, storage
 from poe2bot.executor import RotationManager, STATUS_RUNNING
 from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Rotation, validate_rotation, replace_step_fields
+from poe2bot.models import Rotation, validate_rotation, replace_step_fields, folder_in_scope
 
 from poe2bot.gui.activity_window import ActivityWindow
 from poe2bot.gui.rotation_list import RotationListMixin
@@ -41,6 +41,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             on_status_change=self._queue_status, on_activity=self._queue_activity)
         self.hotkey_manager = HotkeyManager(self.rotation_manager)
         self.bot_enabled = True
+
+        state = app_state.load_state()
+        self.active_folder = state["active_folder"]  # None = "(All Folders)" -- no scoping restriction
+        self.active_device = state["active_device"]  # "keyboard" or "controller"
 
         self.rotations = {}          # name -> Rotation, mirrors what's on disk
         self.editing_original_name = None    # name of rotation being edited, or None if new/unsaved
@@ -92,17 +96,107 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         for name, rotation in storage.load_all_rotations().items():
             self.rotations[name] = rotation
             self.rotation_manager.load(rotation)
-            if rotation.hotkey:
-                try:
-                    self.hotkey_manager.bind(rotation.hotkey, rotation.name)
-                except ValueError as e:
-                    messagebox.showwarning("Hotkey conflict on startup", str(e))
-            if rotation.cancel_key:
-                self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
-            if rotation.reset_key:
-                self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
-            if rotation.pause_key:
-                self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
+            if self._folder_in_scope(rotation.folder):
+                self._bind_rotation_hotkeys(rotation)
+
+    # ---- Active Folder / Active Device scoping --------------------------------
+
+    def _folder_in_scope(self, folder: str) -> bool:
+        return folder_in_scope(folder, self.active_folder)
+
+    def _known_folder_prefixes(self) -> list:
+        """Every folder path AND all of its ancestor prefixes, across every
+        loaded rotation -- so a character organized as "Warrior/Boss" +
+        "Warrior/Farm" with nothing directly in "Warrior" can still be
+        picked as one combined Active Folder scope."""
+        prefixes = set()
+        for rotation in self.rotations.values():
+            if not rotation.folder:
+                continue
+            parts = rotation.folder.split("/")
+            for i in range(1, len(parts) + 1):
+                prefixes.add("/".join(parts[:i]))
+        return sorted(prefixes)
+
+    def _bind_rotation_hotkeys(self, rotation: Rotation):
+        """Applies rotation's own already-saved hotkey/cancel/reset/pause
+        fields to HotkeyManager -- used at load time and whenever a
+        rotation newly enters the active folder's scope. bind() (unlike
+        set_*_key) isn't falsy-safe -- an unguarded bind(None, name) leaks
+        a permanent, never-matching keyboard hook -- so the trigger key
+        alone needs the truthiness guard."""
+        if rotation.hotkey:
+            try:
+                self.hotkey_manager.bind(rotation.hotkey, rotation.name)
+            except ValueError as e:
+                messagebox.showwarning("Hotkey conflict", str(e))
+        if rotation.cancel_key:
+            self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
+        if rotation.reset_key:
+            self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
+        if rotation.pause_key:
+            self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
+
+    def _clear_rotation_hotkeys(self, name: str):
+        """Releases every live HotkeyManager registration for `name` --
+        trigger, cancel, reset, and pause alike -- without touching the
+        Rotation object's own saved fields (those stay exactly as
+        persisted; this only affects what's currently enforced). Safe to
+        call even if nothing is currently bound."""
+        self.hotkey_manager.unbind(name)
+        self.hotkey_manager.set_cancel_key(name, None)
+        self.hotkey_manager.set_reset_key(name, None)
+        self.hotkey_manager.set_pause_key(name, None)
+
+    def _reconcile_hotkey_scope(self, rotation: Rotation, was_in_scope: bool):
+        """Call after rotation.folder changes, or after self.active_folder
+        changes, to bring HotkeyManager's live registrations in line with
+        the new scope. Newly out-of-scope rotations get stopped (if
+        running) and unbound; newly in-scope rotations get (re-)bound from
+        their own already-saved fields -- no retyping needed either way."""
+        now_in_scope = self._folder_in_scope(rotation.folder)
+        if was_in_scope and not now_in_scope:
+            self.rotation_manager.cancel(rotation.name)
+            self._clear_rotation_hotkeys(rotation.name)
+        elif now_in_scope and not was_in_scope:
+            self._bind_rotation_hotkeys(rotation)
+
+    def _on_active_folder_changed(self, _event=None):
+        selected = self.active_folder_var.get()
+        new_active = None if selected == "(All Folders)" else selected
+        if new_active == self.active_folder:
+            return
+        old_active = self.active_folder
+        self.active_folder = new_active
+        for rotation in self.rotations.values():
+            self._reconcile_hotkey_scope(rotation, folder_in_scope(rotation.folder, old_active))
+        app_state.save_state(self.active_folder, self.active_device)
+        self._refresh_rotation_tree()
+
+    def _on_active_device_changed(self):
+        new_device = self.active_device_var.get()
+        if new_device == self.active_device:
+            return
+        self.active_device = new_device
+        # Avoid swapping a step's key (or a rotation's hotkey) out from under
+        # a RotationRunner mid-fire -- the object mutated below is the exact
+        # same one a running thread reads.
+        self.rotation_manager.stop_all()
+        for rotation in self.rotations.values():
+            rotation.hotkey, rotation.alt_hotkey = rotation.alt_hotkey, rotation.hotkey
+            rotation.cancel_key, rotation.alt_cancel_key = rotation.alt_cancel_key, rotation.cancel_key
+            rotation.reset_key, rotation.alt_reset_key = rotation.alt_reset_key, rotation.reset_key
+            rotation.pause_key, rotation.alt_pause_key = rotation.alt_pause_key, rotation.pause_key
+            for step in rotation.steps:
+                step.key, step.alt_key = step.alt_key, step.key
+            storage.save_rotation(rotation)
+            if self._folder_in_scope(rotation.folder):
+                self._clear_rotation_hotkeys(rotation.name)
+                self._bind_rotation_hotkeys(rotation)
+        if self.editing_original_name in self.rotations:
+            self._load_rotation_into_form(self.rotations[self.editing_original_name])
+        app_state.save_state(self.active_folder, self.active_device)
+        self._refresh_rotation_tree()
 
     def _size_to_fit_contents(self):
         """Open large enough to show every widget without the user having to
@@ -124,6 +218,15 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
     def _build_widgets(self):
         left = ttk.Frame(self, padding=8)
         left.pack(side="left", fill="y")
+
+        folder_scope_row = ttk.Frame(left)
+        folder_scope_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(folder_scope_row, text="Active Folder:").pack(side="left")
+        self.active_folder_var = tk.StringVar(value=self.active_folder or "(All Folders)")
+        self.active_folder_combo = ttk.Combobox(
+            folder_scope_row, textvariable=self.active_folder_var, state="readonly", width=16)
+        self.active_folder_combo.pack(side="left", padx=(4, 0))
+        self.active_folder_combo.bind("<<ComboboxSelected>>", self._on_active_folder_changed)
 
         ttk.Label(left, text="Rotations").pack(anchor="w")
         self.rotation_tree = ttk.Treeview(left, show="tree", height=20, selectmode="extended")
@@ -381,6 +484,12 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.toggle_btn.pack(side="left")
         self.status_var = tk.StringVar(value="Bot running. Hotkeys are live.")
         ttk.Label(bottom, textvariable=self.status_var).pack(side="left", padx=8)
+        ttk.Label(bottom, text="Device:").pack(side="left", padx=(12, 2))
+        self.active_device_var = tk.StringVar(value=self.active_device)
+        ttk.Radiobutton(bottom, text="Keyboard", variable=self.active_device_var, value="keyboard",
+                        command=self._on_active_device_changed).pack(side="left")
+        ttk.Radiobutton(bottom, text="Controller", variable=self.active_device_var, value="controller",
+                        command=self._on_active_device_changed).pack(side="left")
         ttk.Button(bottom, text="Toggle Light/Dark", command=self._toggle_theme).pack(side="right")
         ttk.Button(bottom, text="Show Activity Window",
                    command=self._on_show_activity_window_clicked).pack(side="right", padx=(0, 8))
@@ -423,7 +532,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         step_idx = parsed[0]
         step = self._read_step_form(
             conditions=self.editing_steps[step_idx].conditions,
-            is_new_step=False, original_key=self.editing_steps[step_idx].key)
+            is_new_step=False, original_key=self.editing_steps[step_idx].key,
+            alt_key=self.editing_steps[step_idx].alt_key)
         if step is None:
             return False
         # In place, preserving identity -- see StepEditorMixin._update_selected_step.
@@ -442,14 +552,23 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             messagebox.showerror(
                 "Cannot save rotation", "Pause duration and reset delay must be whole numbers.")
             return
+        # Looked up early (not just later for the rename/move check) so the
+        # alt_* fields below -- which have no editing UI of their own, only
+        # ever touched by the Active Device toggle -- get preserved rather
+        # than silently reset to None by this fresh Rotation(...) call.
+        old_rotation = self.rotations.get(self.editing_original_name) if self.editing_original_name else None
         rotation = Rotation(
             name=name,
             mode=self.mode_var.get(),
             hotkey=self.pending_hotkey,
+            alt_hotkey=old_rotation.alt_hotkey if old_rotation else None,
             cancel_key=self.pending_cancel_key,
+            alt_cancel_key=old_rotation.alt_cancel_key if old_rotation else None,
             reset_key=self.pending_reset_key,
+            alt_reset_key=old_rotation.alt_reset_key if old_rotation else None,
             reset_delay_ms=reset_delay_ms,
             pause_key=self.pending_pause_key,
+            alt_pause_key=old_rotation.alt_pause_key if old_rotation else None,
             pause_mode=self.pause_mode_var.get(),
             pause_duration_ms=pause_duration_ms,
             folder=self.folder_var.get().strip(),
@@ -477,13 +596,26 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                     break
         if rotation.hotkey and rotation.hotkey == self.hotkey_manager.panic_key:
             problems.append(f"'{display_name(rotation.hotkey)}' is reserved as the panic/stop-all key.")
+        if rotation.alt_hotkey and rotation.alt_hotkey == self.hotkey_manager.panic_key:
+            problems.append(f"'{display_name(rotation.alt_hotkey)}' (alt) is reserved as the panic/stop-all key.")
         if problems:
             messagebox.showerror("Cannot save rotation", "\n".join(problems))
             return
 
+        new_in_scope = self._folder_in_scope(rotation.folder)
+
         if rotation.hotkey:
-            sharing_with = [n for n in self.hotkey_manager.bound_to(rotation.hotkey)
-                             if n != self.editing_original_name]
+            # bound_to() only reflects currently-live (in-scope) bindings -- also warn
+            # about another rotation in the SAME folder sharing this hotkey even if
+            # that folder isn't the active one right now, since it's just as real a
+            # conflict the moment either rotation's folder becomes active.
+            same_folder_conflicts = [
+                r.name for r in self.rotations.values()
+                if r.name != self.editing_original_name and r.folder == rotation.folder
+                and r.hotkey == rotation.hotkey]
+            sharing_with = list(dict.fromkeys(
+                [n for n in self.hotkey_manager.bound_to(rotation.hotkey) if n != self.editing_original_name]
+                + same_folder_conflicts))
             if sharing_with and not messagebox.askyesno(
                     "Hotkey already in use",
                     f"'{display_name(rotation.hotkey)}' is already bound to "
@@ -493,37 +625,46 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # Rebind hotkey first (release whatever this rotation held before, bind the new
         # choice) -- before any destructive rename/move step, so a conflict here (shouldn't
         # happen given the pre-checks above, but kept as a defensive guard) can't leave
-        # the old file deleted with nothing saved in its place.
-        try:
-            self.hotkey_manager.rebind(rotation.hotkey, rotation.name)
-        except ValueError as e:
-            messagebox.showerror("Hotkey conflict", str(e))
-            return
+        # the old file deleted with nothing saved in its place. Skipped entirely when this
+        # rotation isn't in the Active Folder's scope -- it has nothing live to conflict with.
+        if new_in_scope:
+            try:
+                self.hotkey_manager.rebind(rotation.hotkey, rotation.name)
+            except ValueError as e:
+                messagebox.showerror("Hotkey conflict", str(e))
+                return
 
         # A rotation's file path depends on both its name and its folder, so either
         # changing means the old file needs to go, not just a plain rename.
-        old_rotation = self.rotations.get(self.editing_original_name) if self.editing_original_name else None
-        moved = old_rotation is not None and (
-            old_rotation.name != rotation.name or old_rotation.folder != rotation.folder)
+        renamed = old_rotation is not None and old_rotation.name != rotation.name
+        moved = old_rotation is not None and (renamed or old_rotation.folder != rotation.folder)
+        if renamed:
+            # Only a genuine rename needs the OLD name's live bindings released -- a
+            # folder-only move keeps the same name, and the (possibly skipped) rebind
+            # above already replaced whatever was live under it; clearing here too in
+            # that case would immediately undo it, since old_rotation.name ==
+            # rotation.name then.
+            self._clear_rotation_hotkeys(old_rotation.name)
         if moved:
             # move_rotation writes the new file before removing the old one, so a
             # crash in between leaves a recoverable stray duplicate rather than
             # losing the rotation outright.
             storage.move_rotation(rotation, old_rotation.name, old_rotation.folder)
             self.rotation_manager.unload(old_rotation.name)
-            self.hotkey_manager.unbind(old_rotation.name)
-            self.hotkey_manager.set_cancel_key(old_rotation.name, None)
-            self.hotkey_manager.set_reset_key(old_rotation.name, None)
-            self.hotkey_manager.set_pause_key(old_rotation.name, None)
             del self.rotations[old_rotation.name]
         else:
             storage.save_rotation(rotation)
 
         self.rotation_manager.load(rotation)
         self.rotations[rotation.name] = rotation
-        self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
-        self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
-        self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
+        if new_in_scope:
+            self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
+            self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
+            self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
+        else:
+            # Covers the case where this rotation had live bindings from before this
+            # edit (e.g. it used to be in-scope) and is only now moving out of scope.
+            self._clear_rotation_hotkeys(rotation.name)
 
         self._load_rotation_into_form(rotation)
         self._refresh_rotation_tree()

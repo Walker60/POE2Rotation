@@ -4,9 +4,9 @@ import os
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 
-from poe2bot import storage
+from poe2bot import app_state, storage
 from poe2bot.hotkeys import display_name
-from poe2bot.models import Rotation, folder_path_problem
+from poe2bot.models import Rotation, folder_path_problem, folder_in_scope
 from poe2bot.gui.constants import STATUS_LABELS
 
 
@@ -55,6 +55,11 @@ class RotationListMixin:
             suffix = STATUS_LABELS.get(self.rotation_manager.status(name), "")
             self.rotation_tree.insert(
                 parent_id, tk.END, iid=f"rotation:{name}", text=f"{name}{shared_suffix}{suffix}")
+
+        # Keeps the Active Folder combobox's options current with whatever folders
+        # actually exist -- called after every rotation-set mutation (add/delete/
+        # move/rename/copy), so this is the one place that needs to stay in sync.
+        self.active_folder_combo["values"] = ("(All Folders)",) + tuple(self._known_folder_prefixes())
 
         if selected:
             item_id = f"rotation:{selected}"
@@ -144,13 +149,25 @@ class RotationListMixin:
                 f"'{a}' and '{b}' would both save to the same file after this rename "
                 "-- rename or move one of them out of the way first.")
             return
+        # Captured before any mutation: if the renamed folder IS (or contains) the
+        # Active Folder, that scope needs to follow the rename too, but each
+        # rotation's "was it in scope before" must still be judged against this
+        # pre-rename value, not the already-updated one.
+        old_active_folder = self.active_folder
+        if old_active_folder is not None and (
+                old_active_folder == folder_path or old_active_folder.startswith(folder_path + "/")):
+            self.active_folder = new_path + old_active_folder[len(folder_path):]
+            self.active_folder_var.set(self.active_folder or "(All Folders)")
         for rotation in affected:
             old_folder = rotation.folder
+            was_in_scope = folder_in_scope(old_folder, old_active_folder)
             new_folder = planned[rotation.name]
             rotation.folder = new_folder
             storage.move_rotation(rotation, rotation.name, old_folder)
             if rotation.name == self.editing_original_name:
                 self.folder_var.set(new_folder)
+            self._reconcile_hotkey_scope(rotation, was_in_scope)
+        app_state.save_state(self.active_folder, self.active_device)
         self._refresh_rotation_tree()
 
     def _move_selected_to_folder(self):
@@ -185,10 +202,12 @@ class RotationListMixin:
             if rotation.folder == new_path:
                 continue
             old_folder = rotation.folder
+            was_in_scope = self._folder_in_scope(old_folder)
             rotation.folder = new_path
             storage.move_rotation(rotation, name, old_folder)
             if name == self.editing_original_name:
                 self.folder_var.set(new_path)
+            self._reconcile_hotkey_scope(rotation, was_in_scope)
         self._refresh_rotation_tree()
 
     def _load_rotation_into_form(self, rotation: Rotation):
@@ -262,10 +281,14 @@ class RotationListMixin:
             name=self._unique_rotation_name(f"{original.name} (copy)"),
             mode=original.mode,
             hotkey=None,  # can't share the original's hotkey -- bind a new one before saving
+            alt_hotkey=None,  # same reasoning as hotkey=None above
             cancel_key=original.cancel_key,  # cancel/reset/pause keys CAN be shared, so these carry over as-is
+            alt_cancel_key=original.alt_cancel_key,
             reset_key=original.reset_key,
+            alt_reset_key=original.alt_reset_key,
             reset_delay_ms=original.reset_delay_ms,
             pause_key=original.pause_key,
+            alt_pause_key=original.alt_pause_key,
             pause_mode=original.pause_mode,
             pause_duration_ms=original.pause_duration_ms,
             folder=original.folder,
@@ -289,10 +312,7 @@ class RotationListMixin:
         if not messagebox.askyesno("Delete rotation", f"Delete '{name}'?"):
             return
         rotation = self.rotations.pop(name)
-        self.hotkey_manager.unbind(name)
-        self.hotkey_manager.set_cancel_key(name, None)
-        self.hotkey_manager.set_reset_key(name, None)
-        self.hotkey_manager.set_pause_key(name, None)
+        self._clear_rotation_hotkeys(name)
         self.rotation_manager.unload(name)
         storage.delete_rotation(name, rotation.folder)
         self._refresh_rotation_tree()

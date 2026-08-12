@@ -3,5 +3,6 @@ __pycache__/
 logs/
 templates/
 rotations/
+app_state.json
 .venv/
 venv/

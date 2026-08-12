@@ -259,7 +259,7 @@ class StepEditorMixin:
         """Same idea as _core_step_form_snapshot, for the Buff Check group."""
         return self.step_buff_check, self.step_buff_hold_var.get(), self.step_buff_delay_var.get()
 
-    def _read_step_form(self, conditions=None, is_new_step=True, original_key=None):
+    def _read_step_form(self, conditions=None, is_new_step=True, original_key=None, alt_key=None):
         """Builds a Step from the form's current contents. `original_key`
         (the key the step being *replaced* already had; ignored when
         is_new_step) resolves what a blank Key field means, since the Entry
@@ -298,6 +298,7 @@ class StepEditorMixin:
             key = original_key if original_key is None else ""
         step = Step(
             key=key,
+            alt_key=alt_key,
             name=self.step_name_var.get().strip(),
             delay_ms=delay,
             jitter_ms=jitter,
@@ -416,7 +417,8 @@ class StepEditorMixin:
             return
         step = self._read_step_form(
             conditions=self.editing_steps[i].conditions,
-            is_new_step=False, original_key=self.editing_steps[i].key)
+            is_new_step=False, original_key=self.editing_steps[i].key,
+            alt_key=self.editing_steps[i].alt_key)
         if step is None:
             return
         # In place, not editing_steps[i] = step -- preserves this Step object's

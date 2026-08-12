@@ -124,6 +124,9 @@ class Step:
     repeat_count: int = 1                    # fire this step this many times per pass; 1 = today's behavior
     repeat_combine_hold: bool = False        # if the key has a hold > 0, hold once for hold_ms * repeat_count and
                                               # delay once afterward, instead of repeat_count independent hold+delay cycles
+    alt_key: Optional[str] = None            # whichever device's key ISN'T currently active -- same None/""/string
+                                              # semantics as `key`. Swapped with `key` by App's Active Device toggle;
+                                              # never edited directly through its own UI.
 
     def has_ready_check(self) -> bool:
         """True if this step has a cooldown check configured, via whichever
@@ -141,6 +144,8 @@ class Step:
         # or leaving None alone means those two checks never need to know about it.
         raw_key = data.get("key")
         key = raw_key.strip() if isinstance(raw_key, str) else raw_key
+        raw_alt_key = data.get("alt_key")
+        alt_key = raw_alt_key.strip() if isinstance(raw_alt_key, str) else raw_alt_key
         return Step(
             key=key,
             name=data.get("name", ""),
@@ -163,6 +168,7 @@ class Step:
             buff_delay_ms=int(data["buff_delay_ms"]) if data.get("buff_delay_ms") is not None else None,
             repeat_count=_int_or(data, "repeat_count", 1),
             repeat_combine_hold=bool(data.get("repeat_combine_hold", False)),
+            alt_key=alt_key,
         )
 
 
@@ -182,10 +188,15 @@ class Rotation:
     name: str
     mode: str = "once"
     hotkey: Optional[str] = None
+    alt_hotkey: Optional[str] = None       # the OTHER device's hotkey -- swapped with `hotkey` by the Active
+                                            # Device toggle; never edited directly through its own UI
     cancel_key: Optional[str] = None   # e.g. the dodge key -- immediately stops this rotation if running
+    alt_cancel_key: Optional[str] = None
     reset_key: Optional[str] = None    # immediately restarts this rotation from its first step if running
+    alt_reset_key: Optional[str] = None
     reset_delay_ms: int = 0            # wait this long after a reset before actually firing step 1 again (0 = instant)
     pause_key: Optional[str] = None    # immediately freezes this rotation in place if running (see pause_mode)
+    alt_pause_key: Optional[str] = None
     pause_mode: str = "duration"        # "duration" = auto-resume after pause_duration_ms; "toggle" = press again to resume
     pause_duration_ms: int = 1000       # only used when pause_mode == "duration"
     folder: str = ""   # "/"-separated group path (e.g. "Bosses/HardMode"); "" = ungrouped. NOT persisted
@@ -198,10 +209,14 @@ class Rotation:
             "name": self.name,
             "mode": self.mode,
             "hotkey": self.hotkey,
+            "alt_hotkey": self.alt_hotkey,
             "cancel_key": self.cancel_key,
+            "alt_cancel_key": self.alt_cancel_key,
             "reset_key": self.reset_key,
+            "alt_reset_key": self.alt_reset_key,
             "reset_delay_ms": self.reset_delay_ms,
             "pause_key": self.pause_key,
+            "alt_pause_key": self.alt_pause_key,
             "pause_mode": self.pause_mode,
             "pause_duration_ms": self.pause_duration_ms,
             "steps": [asdict(step) for step in self.steps],
@@ -213,10 +228,14 @@ class Rotation:
             name=data["name"],
             mode=data.get("mode", "once"),
             hotkey=data.get("hotkey"),
+            alt_hotkey=data.get("alt_hotkey"),
             cancel_key=data.get("cancel_key"),
+            alt_cancel_key=data.get("alt_cancel_key"),
             reset_key=data.get("reset_key"),
+            alt_reset_key=data.get("alt_reset_key"),
             reset_delay_ms=_int_or(data, "reset_delay_ms", 0),
             pause_key=data.get("pause_key"),
+            alt_pause_key=data.get("alt_pause_key"),
             pause_mode=data.get("pause_mode", "duration"),
             pause_duration_ms=_int_or(data, "pause_duration_ms", 1000),
             steps=[Step.from_dict(step) for step in data.get("steps", [])],
@@ -245,6 +264,19 @@ def folder_path_problem(folder: str) -> Optional[str]:
         if part in (".", ".."):
             return "Folder path cannot contain '.' or '..' segments."
     return None
+
+
+def folder_in_scope(folder: str, active_folder: Optional[str]) -> bool:
+    """True if `folder` is `active_folder` itself, a subfolder of it, or
+    `active_folder` is None (no restriction -- every folder is in scope).
+    Shared by App's Active Folder feature and RotationListMixin's
+    _rename_folder (which folders are affected by a rename), so both treat
+    folder-hierarchy containment the same way. The trailing "/" in the
+    startswith check is what stops "WarriorX" from false-matching an
+    active_folder of "Warrior"."""
+    if active_folder is None:
+        return True
+    return folder == active_folder or folder.startswith(active_folder + "/")
 
 
 def _search_area_problems(label: str, subject: str, search_mode: str, search_region, region) -> List[str]:
@@ -325,15 +357,18 @@ def validate_rotation(rotation: Rotation) -> List[str]:
         # key == "" means this step is a deliberate sleep/pause: no key to press,
         # it just waits out delay_ms (+/- jitter_ms) like any other step's
         # post-fire wait. Both are falsy, so this check is skipped for either.
-        if step.key and step.key.strip():
-            if controller.is_controller_key(step.key):
-                if controller.controller_button_of(step.key) not in controller.VALID_BUTTON_NAMES:
-                    problems.append(f"Step {i}: '{step.key}' is not a recognized controller button.")
-            else:
-                try:
-                    keyboard.key_to_scan_codes(step.key)
-                except ValueError:
-                    problems.append(f"Step {i}: '{step.key}' is not a recognized key name.")
+        # alt_key gets the identical check -- it's just the other device's key,
+        # same None/""/string semantics, swapped in by the Active Device toggle.
+        for key, label in ((step.key, f"Step {i}"), (step.alt_key, f"Step {i} (alt key)")):
+            if key and key.strip():
+                if controller.is_controller_key(key):
+                    if controller.controller_button_of(key) not in controller.VALID_BUTTON_NAMES:
+                        problems.append(f"{label}: '{key}' is not a recognized controller button.")
+                else:
+                    try:
+                        keyboard.key_to_scan_codes(key)
+                    except ValueError:
+                        problems.append(f"{label}: '{key}' is not a recognized key name.")
 
         if step.delay_ms < 0:
             problems.append(f"Step {i}: delay_ms cannot be negative.")
