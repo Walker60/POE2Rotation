@@ -257,17 +257,18 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         resolution, which on a smaller display can be enough bigger than the
         actual visible desktop, taskbar included, to push the window's bottom
         edge off screen) so it never opens larger than what's actually
-        visible. If the natural size is still bigger than that (a genuinely
-        very small or oddly-scaled display), this clamps down to fit rather
-        than risk opening off-screen -- the window stays user-resizable
-        afterward if some content ends up cramped."""
+        visible.
+
+        This only sets the *starting* size -- deliberately not paired with
+        minsize()/maxsize(), so the window stays freely click-and-drag
+        resizable (larger or smaller) afterward, on any screen, rather than
+        the app dictating a floor the user can't size below."""
         self.update_idletasks()
         work_area = _monitor_work_area(self.winfo_id())
         screen_width, screen_height = work_area or (self.winfo_screenwidth(), self.winfo_screenheight())
         width = min(self.winfo_reqwidth(), screen_width)
         height = min(self.winfo_reqheight(), screen_height)
         self.geometry(f"{width}x{height}")
-        self.minsize(width, height)
 
     # ---- widget layout -------------------------------------------------
 
