@@ -47,10 +47,16 @@ class HotkeysMixin:
         self.status_queue.put(("__capture__", key))
 
     def _on_hotkey_captured(self, key: str):
+        # Saves immediately (like _on_unbind_clicked below) so binding a key
+        # takes effect as a single click/press instead of
+        # capture-then-remember-to-Save -- if the rotation isn't valid yet
+        # (e.g. a brand new one with no steps), _save_rotation shows its usual
+        # error and the capture is simply left pending until it is.
         self.pending_hotkey = key
         self.hotkey_label_var.set(display_name(key))
         self.bind_hotkey_btn.config(text="Bind Hotkey...")
         self._set_bind_buttons_enabled(True)
+        self._save_rotation()
 
     def _on_unbind_clicked(self):
         # Clears and immediately saves, so freeing this hotkey up for another
@@ -94,10 +100,12 @@ class HotkeysMixin:
         self.cancel_key_label_var.set(display_name(key))
         self.bind_cancel_btn.config(text="Bind Cancel Key...")
         self._set_bind_buttons_enabled(True)
+        self._save_rotation()
 
     def _on_clear_cancel_key(self):
         self.pending_cancel_key = None
         self.cancel_key_label_var.set(display_name(None))
+        self._save_rotation()
 
     # ---- reset key ------------------------------------------------------------
 
@@ -115,10 +123,12 @@ class HotkeysMixin:
         self.reset_key_label_var.set(display_name(key))
         self.bind_reset_btn.config(text="Bind Reset Key...")
         self._set_bind_buttons_enabled(True)
+        self._save_rotation()
 
     def _on_clear_reset_key(self):
         self.pending_reset_key = None
         self.reset_key_label_var.set(display_name(None))
+        self._save_rotation()
 
     # ---- pause key ------------------------------------------------------------
 
@@ -136,7 +146,9 @@ class HotkeysMixin:
         self.pause_key_label_var.set(display_name(key))
         self.bind_pause_btn.config(text="Bind Pause Key...")
         self._set_bind_buttons_enabled(True)
+        self._save_rotation()
 
     def _on_clear_pause_key(self):
         self.pending_pause_key = None
         self.pause_key_label_var.set(display_name(None))
+        self._save_rotation()
