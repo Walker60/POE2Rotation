@@ -15,6 +15,7 @@ from poe2bot.log_setup import get_logger
 from poe2bot.models import Rotation, validate_rotation, replace_step_fields, folder_in_scope
 
 from poe2bot.gui.activity_window import ActivityWindow
+from poe2bot.gui.settings_window import SettingsWindow
 from poe2bot.gui.rotation_list import RotationListMixin
 from poe2bot.gui.step_editor import StepEditorMixin
 from poe2bot.gui.drag_drop import DragDropMixin
@@ -37,6 +38,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.status_queue = queue.Queue()
         self.activity_queue = queue.Queue()
         self.activity_window = None  # ActivityWindow, created lazily on first STATUS_RUNNING
+        self.settings_window = None  # SettingsWindow, created lazily on first "Settings..." click
         self.rotation_manager = RotationManager(
             on_status_change=self._queue_status, on_activity=self._queue_activity)
         self.hotkey_manager = HotkeyManager(self.rotation_manager)
@@ -484,15 +486,11 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.toggle_btn.pack(side="left")
         self.status_var = tk.StringVar(value="Bot running. Hotkeys are live.")
         ttk.Label(bottom, textvariable=self.status_var).pack(side="left", padx=8)
-        ttk.Label(bottom, text="Device:").pack(side="left", padx=(12, 2))
+        # Bound to the "Keyboard"/"Controller" radio buttons in SettingsWindow --
+        # created here, unconditionally, since _on_active_device_changed reads it
+        # regardless of whether Settings has ever been opened this session.
         self.active_device_var = tk.StringVar(value=self.active_device)
-        ttk.Radiobutton(bottom, text="Keyboard", variable=self.active_device_var, value="keyboard",
-                        command=self._on_active_device_changed).pack(side="left")
-        ttk.Radiobutton(bottom, text="Controller", variable=self.active_device_var, value="controller",
-                        command=self._on_active_device_changed).pack(side="left")
-        ttk.Button(bottom, text="Toggle Light/Dark", command=self._toggle_theme).pack(side="right")
-        ttk.Button(bottom, text="Show Activity Window",
-                   command=self._on_show_activity_window_clicked).pack(side="right", padx=(0, 8))
+        ttk.Button(bottom, text="Settings...", command=self._on_show_settings_clicked).pack(side="right")
 
     # ---- appearance -----------------------------------------------------------
 
@@ -698,6 +696,18 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
     def _ensure_activity_window(self):
         if self.activity_window is None or not self.activity_window.winfo_exists():
             self.activity_window = ActivityWindow(self)
+
+    def _ensure_settings_window(self):
+        if self.settings_window is None or not self.settings_window.winfo_exists():
+            self.settings_window = SettingsWindow(self)
+
+    def _on_show_settings_clicked(self):
+        # Recreated if closed, or just raised if merely hidden behind another
+        # window -- same convention as _on_show_activity_window_clicked below.
+        self._ensure_settings_window()
+        self.settings_window.deiconify()
+        self.settings_window.lift()
+        self.settings_window.focus_force()
 
     def _on_show_activity_window_clicked(self):
         # The window otherwise only (re)appears on a rotation's next
