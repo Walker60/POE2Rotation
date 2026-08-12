@@ -1,8 +1,11 @@
 import copy
+import ctypes
 import os
 import queue
+import sys
 import time
 import tkinter as tk
+from ctypes import wintypes
 from tkinter import messagebox, ttk
 
 import keyboard
@@ -24,6 +27,49 @@ from poe2bot.gui.conditions import ConditionsMixin
 from poe2bot.gui.hotkeys_ui import HotkeysMixin
 
 log = get_logger()
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+def _monitor_work_area(hwnd):
+    """The usable desktop area, in pixels, of whichever monitor `hwnd` is
+    currently on -- excludes the taskbar, unlike winfo_screenwidth()/
+    winfo_screenheight(), which report that monitor's full native
+    resolution. On a smaller display the taskbar strip is a much bigger
+    fraction of the screen, so a window sized right up to the raw
+    resolution can end up with its bottom edge (the Stop Bot/Settings bar)
+    rendered behind the taskbar -- from the user's point of view, the
+    window "extends past the edge of the screen" even though it's
+    technically within the monitor's pixel count. Also correctly follows
+    whichever monitor the window is actually on in a multi-monitor setup,
+    rather than always assuming the primary display. Returns None on
+    non-Windows, or if anything about the Win32 call fails, so callers can
+    fall back to winfo_screenwidth()/winfo_screenheight()."""
+    if sys.platform != "win32":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = wintypes.HANDLE
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MonitorInfo)]
+        monitor_default_to_nearest = 2
+        monitor = user32.MonitorFromWindow(wintypes.HWND(hwnd), monitor_default_to_nearest)
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        work = info.rcWork
+        return work.right - work.left, work.bottom - work.top
+    except (OSError, AttributeError, ValueError, TypeError, ctypes.ArgumentError):
+        return None
 
 
 class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
@@ -206,12 +252,20 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         (cooldown check, buff check, conditions, step actions, ...), so a
         hardcoded pixel size drifts stale each time -- asking Tk for the
         window's actual natural size (after everything is built and laid out)
-        stays correct as more UI gets added later. Clamped to the screen so it
-        never opens larger than the display, and never smaller than that
-        natural size so nothing ends up clipped with no way to scroll to it."""
+        stays correct as more UI gets added later. Clamped to the current
+        monitor's usable work area (see _monitor_work_area -- not its raw
+        resolution, which on a smaller display can be enough bigger than the
+        actual visible desktop, taskbar included, to push the window's bottom
+        edge off screen) so it never opens larger than what's actually
+        visible. If the natural size is still bigger than that (a genuinely
+        very small or oddly-scaled display), this clamps down to fit rather
+        than risk opening off-screen -- the window stays user-resizable
+        afterward if some content ends up cramped."""
         self.update_idletasks()
-        width = min(self.winfo_reqwidth(), self.winfo_screenwidth())
-        height = min(self.winfo_reqheight(), self.winfo_screenheight())
+        work_area = _monitor_work_area(self.winfo_id())
+        screen_width, screen_height = work_area or (self.winfo_screenwidth(), self.winfo_screenheight())
+        width = min(self.winfo_reqwidth(), screen_width)
+        height = min(self.winfo_reqheight(), screen_height)
         self.geometry(f"{width}x{height}")
         self.minsize(width, height)
 
