@@ -371,3 +371,30 @@ class HotkeyManager:
                 return result["value"]
             finally:
                 reader.off_any_button_down(on_controller_event)
+
+    def capture_next_mouse_button(self) -> str:
+        """BLOCKING -- call from a background thread only, never the Tk main
+        thread. Same suspend/restore discipline as capture_next_key(), but
+        listens ONLY to the mouse -- for the step editor's mouse-only
+        capture, where a stray keyboard/controller event must not be able
+        to win the race and silently write the wrong kind of value into a
+        field meant to hold a mouse button. Shares self._capture_lock with
+        capture_next_key()/capture_next_controller_button() -- all three
+        mutate/restore the same registries, so they must be mutually
+        exclusive with each other, not just with themselves."""
+        with self._capture_lock, self._suspend_all_action_keys():
+            result = {}
+            done = threading.Event()
+
+            def on_mouse_event(event):
+                if (isinstance(event, mouse.ButtonEvent) and event.event_type == mouse.DOWN
+                        and "value" not in result):
+                    result["value"] = encode_mouse_hotkey(event.button)
+                    done.set()
+
+            mouse.hook(on_mouse_event)
+            try:
+                done.wait()
+                return result["value"]
+            finally:
+                mouse.unhook(on_mouse_event)

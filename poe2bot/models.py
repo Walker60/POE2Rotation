@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 
 import keyboard
 
-from poe2bot import controller, templates
+from poe2bot import controller, hotkeys, templates
 
 VALID_MODES = ("once", "loop")
 VALID_PAUSE_MODES = ("duration", "toggle")
@@ -364,6 +364,9 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                 if controller.is_controller_key(key):
                     if controller.controller_button_of(key) not in controller.VALID_BUTTON_NAMES:
                         problems.append(f"{label}: '{key}' is not a recognized controller button.")
+                elif hotkeys.is_mouse_hotkey(key):
+                    if hotkeys.mouse_button_of(key) not in hotkeys.MOUSE_DISPLAY_NAMES:
+                        problems.append(f"{label}: '{key}' is not a recognized mouse button.")
                 else:
                     try:
                         keyboard.key_to_scan_codes(key)

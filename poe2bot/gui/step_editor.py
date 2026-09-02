@@ -33,6 +33,23 @@ class StepEditorMixin:
         self.capture_step_key_btn.config(text="Capture Controller Button")
         self._set_bind_buttons_enabled(True)
 
+    # ---- mouse-button capture for the Key field -----------------------------
+
+    def _on_capture_step_mouse_clicked(self):
+        self.capture_step_mouse_btn.config(text="Click a mouse button...")
+        self._set_bind_buttons_enabled(False)
+        threading.Thread(target=self._capture_step_mouse_worker, daemon=True).start()
+
+    def _capture_step_mouse_worker(self):
+        key = self.hotkey_manager.capture_next_mouse_button()
+        self.status_queue.put(("__step_mouse_capture__", key))
+
+    def _on_step_mouse_captured(self, key: str):
+        # Same raw-text Entry as _on_step_key_captured -- e.g. "mouse:left".
+        self.step_key_var.set(key)
+        self.capture_step_mouse_btn.config(text="Capture Mouse Button")
+        self._set_bind_buttons_enabled(True)
+
     def _reset_step_core_fields(self):
         """Blank defaults for a step not yet filled in. Shared by every place
         that must guarantee the step-editing form isn't showing stale data

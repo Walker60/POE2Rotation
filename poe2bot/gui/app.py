@@ -442,7 +442,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Entry(edit_row, textvariable=self.step_key_var, width=8).pack(side="left", padx=(2, 4))
         self.capture_step_key_btn = ttk.Button(
             edit_row, text="Capture Controller Button", command=self._on_capture_step_key_clicked)
-        self.capture_step_key_btn.pack(side="left", padx=(0, 8))
+        self.capture_step_key_btn.pack(side="left", padx=(0, 4))
+        self.capture_step_mouse_btn = ttk.Button(
+            edit_row, text="Capture Mouse Button", command=self._on_capture_step_mouse_clicked)
+        self.capture_step_mouse_btn.pack(side="left", padx=(0, 8))
         for label, var, width in (
             ("Delay", self.step_delay_var, 6),
             ("Jitter", self.step_jitter_var, 6), ("Hold", self.step_hold_var, 6),
@@ -797,6 +800,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                     self._on_pause_key_captured(payload)
                 elif name == "__step_key_capture__":
                     self._on_step_key_captured(payload)
+                elif name == "__step_mouse_capture__":
+                    self._on_step_mouse_captured(payload)
                 else:
                     status = payload
                     self._refresh_rotation_tree()
