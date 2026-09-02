@@ -123,6 +123,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                                                # right Step object (by identity) even after a reorder
         self._step_clipboard = []             # list[Step], set by Copy -- lives on the App, so it
                                                # survives switching rotations (enables cross-rotation paste)
+        self._condition_clipboard = []        # list[Condition], set by Copy Conditions -- same
+                                               # cross-rotation-paste lifetime as _step_clipboard above
         self._drag_candidate = None    # list[(step_idx, cond_idx_or_None)] being dragged, or None
         self._drag_active = False      # True once the mouse has moved past the drag threshold
         self._drag_start_xy = (0, 0)
@@ -515,6 +517,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                    command=self._on_add_pixel_condition_clicked).pack(side="left", padx=(0, 4))
         ttk.Button(condition_btns, text="Add Timer Condition...",
                    command=self._on_add_timer_condition_clicked).pack(side="left", padx=(0, 4))
+        ttk.Button(condition_btns, text="Copy Conditions",
+                   command=self._on_copy_conditions_clicked).pack(side="left", padx=(8, 4))
+        ttk.Button(condition_btns, text="Paste Conditions",
+                   command=self._on_paste_conditions_clicked).pack(side="left", padx=(0, 4))
         ttk.Label(condition_btns,
                   text="(double-click a condition in the list to recalibrate it;"
                        " use Move Up/Move Down in Step Actions to reorder it)",

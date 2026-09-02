@@ -1,3 +1,4 @@
+import copy
 from tkinter import messagebox, simpledialog
 
 from poe2bot import storage, templates
@@ -45,6 +46,42 @@ class ConditionsMixin:
 
     def _add_condition(self, step_idx: int, condition: Condition):
         self.editing_steps[step_idx].conditions.append(condition)
+        self._refresh_steps_tree()
+
+    def _on_copy_conditions_clicked(self):
+        """Copies every condition belonging to whichever step is in scope
+        (the step row itself or one of its condition rows -- same resolution
+        StepEditorMixin's Add Condition buttons already use) into an
+        in-memory clipboard that lives on the App, so it survives switching
+        rotations (enables cross-rotation paste), mirroring
+        StepEditorMixin._on_copy_clicked's whole-step clipboard."""
+        step_idx = self._selected_owning_step_index()
+        if step_idx is None:
+            return
+        conditions = self.editing_steps[step_idx].conditions
+        if not conditions:
+            messagebox.showinfo("No conditions to copy", "This step has no conditions to copy.")
+            return
+        self._condition_clipboard = copy.deepcopy(conditions)
+
+    def _on_paste_conditions_clicked(self):
+        """Appends a fresh copy of the clipboard's conditions onto every
+        selected step (deduped from the selection the same way
+        StepEditorMixin._on_copy_clicked collects multiple source steps) --
+        each target gets its own independent Condition objects, so
+        recalibrating one afterward never affects another. Purely additive:
+        a target step's own existing conditions are left as they are."""
+        if not self._condition_clipboard:
+            messagebox.showinfo("Clipboard is empty", "Copy conditions from a step first.")
+            return
+        selection = self.tree.selection()
+        step_indices = sorted({p[0] for p in (self._parse_tree_iid(iid) for iid in selection)
+                                if p is not None})
+        if not step_indices:
+            messagebox.showinfo("No step selected", "Select at least one step to paste conditions onto.")
+            return
+        for step_idx in step_indices:
+            self.editing_steps[step_idx].conditions.extend(copy.deepcopy(self._condition_clipboard))
         self._refresh_steps_tree()
 
     def _on_rename_condition_clicked(self):
