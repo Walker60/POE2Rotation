@@ -7,27 +7,16 @@ from poe2bot.gui import dialogs as messagebox
 from poe2bot.models import Step, replace_step_fields
 
 # (StringVar attr, Entry attr, parser, allow_blank, Step field name, display label) for
-# every numeric field on the Selected Step form (including Cooldown/Buff Check's own
-# numeric fields) -- driving both _read_step_form's per-field validation and the section
-# auto-expand-on-error in _read_step_form below.
+# every numeric field on the Selected Step form -- drives _read_step_form's per-field
+# validation below. Conditions (including what used to be a separate Cooldown/Buff
+# Check) have their own, independent numeric fields -- see ConditionsMixin.
 _NUMERIC_FIELDS = (
     ("step_delay_var", "step_delay_entry", int, False, "delay_ms", "Delay"),
     ("step_jitter_var", "step_jitter_entry", int, False, "jitter_ms", "Jitter"),
     ("step_hold_var", "step_hold_entry", int, False, "hold_ms", "Hold"),
     ("step_hold_jitter_var", "step_hold_jitter_entry", int, False, "hold_jitter_ms", "Hold Jitter"),
     ("step_repeat_var", "step_repeat_entry", int, False, "repeat_count", "Repeat"),
-    ("step_ready_timeout_var", "step_ready_timeout_entry", int, False, "ready_timeout_ms", "Timeout"),
-    ("step_ready_confidence_var", "step_ready_confidence_entry", float, False, "ready_confidence", "Confidence"),
-    ("step_buff_hold_var", "step_buff_hold_entry", int, True, "buff_hold_ms", "Buff Hold"),
-    ("step_buff_delay_var", "step_buff_delay_entry", int, True, "buff_delay_ms", "Buff Delay"),
 )
-# Which CollapsibleSection a field lives in, for auto-expanding it when that field is
-# the one that failed to parse -- fields absent here live in the always-visible
-# Selected Step group, which needs no expanding.
-_SECTION_BY_FIELD = {
-    "ready_timeout_ms": "cooldown", "ready_confidence": "cooldown",
-    "buff_hold_ms": "buff", "buff_delay_ms": "buff",
-}
 
 
 class StepEditorMixin:
@@ -78,8 +67,7 @@ class StepEditorMixin:
         that must guarantee the step-editing form isn't showing stale data
         left over from whatever step or rotation was previously open --
         _discard_selected_step_edits (an untouched selection), and
-        _new_rotation/_load_rotation_into_form (switching rotations), which
-        for the same reason also call _reset_ready_form/_reset_buff_form."""
+        _new_rotation/_load_rotation_into_form (switching rotations)."""
         self.step_name_var.set("Skill")
         self.step_key_var.set("")
         self.step_delay_var.set("20")
@@ -88,8 +76,7 @@ class StepEditorMixin:
         self.step_hold_jitter_var.set("10")
         self.step_repeat_var.set("1")
         self.step_repeat_combine_hold_var.set(False)
-        self.condition_name_var.set("")
-        self.condition_negate_var.set(False)
+        self._populate_condition_form(None)
         self.conditions_section.set_collapsed(True)
         self._clear_form_errors()
         # Blanking the form always means nothing is meaningfully "selected" for
@@ -109,44 +96,6 @@ class StepEditorMixin:
             getattr(self, entry_attr).state(["!invalid"])
         self.step_form_error_var.set("")
         self.step_form_error_label.pack_forget()
-
-    def _reset_ready_form(self):
-        self.step_ready_match_type = "image"
-        self.step_ready_template = None
-        self.step_ready_region = None
-        self.step_ready_search_mode = "exact"
-        self.step_ready_search_region = None
-        self.step_ready_pixel_pos = None
-        self.step_ready_pixel_color = None
-        self.step_ready_timeout_var.set("0")
-        self.step_ready_confidence_var.set("0.90")
-        self._refresh_ready_status()
-        self.cooldown_section.set_collapsed(True)
-
-    def _refresh_ready_status(self):
-        if self.step_ready_match_type == "pixel" and self.step_ready_pixel_color:
-            r, g, b = self.step_ready_pixel_color
-            self.step_ready_status_var.set(f"Pixel: RGB({r},{g},{b})")
-        elif self.step_ready_match_type == "image" and self.step_ready_template and self.step_ready_region:
-            w, h = self.step_ready_region[2], self.step_ready_region[3]
-            if self.step_ready_search_mode == "area" and self.step_ready_search_region:
-                sw, sh = self.step_ready_search_region[2], self.step_ready_search_region[3]
-                self.step_ready_status_var.set(f"Image: {w}x{h} (searching {sw}x{sh} area)")
-            else:
-                self.step_ready_status_var.set(f"Image: {w}x{h}")
-        else:
-            self.step_ready_status_var.set("No cooldown check")
-
-    def _reset_buff_form(self):
-        self.step_buff_check = None
-        self.step_buff_hold_var.set("")
-        self.step_buff_delay_var.set("")
-        self._refresh_buff_status()
-        self.buff_section.set_collapsed(True)
-
-    def _refresh_buff_status(self):
-        self.step_buff_status_var.set(
-            self._condition_summary(self.step_buff_check) if self.step_buff_check else "No buff check")
 
     # ---- step editing ----------------------------------------------------
 
@@ -219,23 +168,40 @@ class StepEditorMixin:
         self.tree.item(iid, text=label, values=(
             key_col, step.delay_ms, step.jitter_ms, step.hold_ms, step.hold_jitter_ms, step.repeat_count))
 
-    @staticmethod
-    def _condition_summary(condition) -> str:
+    _ACTION_SUMMARY_LABELS = {"fire": "Fire", "block": "Block", "hold": "Hold"}
+
+    @classmethod
+    def _condition_summary(cls, condition) -> str:
+        action_label = cls._ACTION_SUMMARY_LABELS.get(condition.action, condition.action)
         not_marker = "NOT " if condition.negate else ""
         if condition.name:
-            return f"Condition: {not_marker}{condition.name}"
-        if condition.match_type == "timer" and condition.timer_seconds:
-            return f"Condition: {not_marker}{condition.timer_seconds:g}s since last use"
-        if condition.match_type == "pixel" and condition.pixel_color:
+            base = condition.name
+        elif condition.match_type == "timer" and condition.timer_seconds:
+            base = f"{condition.timer_seconds:g}s since last use"
+        elif condition.match_type == "pixel" and condition.pixel_color:
             r, g, b = condition.pixel_color
-            return f"Condition: {not_marker}Pixel RGB({r},{g},{b})"
-        if condition.match_type == "image" and condition.region:
+            base = f"Pixel RGB({r},{g},{b})"
+        elif condition.match_type == "image" and condition.region:
             w, h = condition.region[2], condition.region[3]
             if condition.search_mode == "area" and condition.search_region:
                 sw, sh = condition.search_region[2], condition.search_region[3]
-                return f"Condition: {not_marker}Image {w}x{h} (searching {sw}x{sh} area)"
-            return f"Condition: {not_marker}Image {w}x{h}"
-        return f"Condition: {not_marker}(not calibrated)"
+                base = f"Image {w}x{h} (searching {sw}x{sh} area)"
+            else:
+                base = f"Image {w}x{h}"
+        else:
+            base = "(not calibrated)"
+        extra = ""
+        if condition.action == "hold":
+            parts = []
+            if condition.hold_ms is not None:
+                parts.append(f"hold {condition.hold_ms}ms")
+            if condition.delay_ms is not None:
+                parts.append(f"delay {condition.delay_ms}ms")
+            if parts:
+                extra = f" -> {', '.join(parts)}"
+        elif condition.action == "fire" and condition.timeout_ms > 0:
+            extra = f" (wait up to {condition.timeout_ms}ms)"
+        return f"[{action_label}] {not_marker}{base}{extra}"
 
     @staticmethod
     def _parse_tree_iid(iid: str):
@@ -269,14 +235,14 @@ class StepEditorMixin:
         selection = self.tree.selection()
         if not selection:
             self._selected_step_ref = None
+            self._populate_condition_form(None)
             return
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return
         step = self.editing_steps[parsed[0]]
         self._clear_form_errors()
-        self.condition_name_var.set(step.conditions[parsed[1]].name if parsed[1] is not None else "")
-        self.condition_negate_var.set(step.conditions[parsed[1]].negate if parsed[1] is not None else False)
+        self._populate_condition_form(step.conditions[parsed[1]] if parsed[1] is not None else None)
         self.step_name_var.set(step.name)
         self.step_key_var.set(step.key or "")
         self.step_delay_var.set(str(step.delay_ms))
@@ -285,30 +251,16 @@ class StepEditorMixin:
         self.step_hold_jitter_var.set(str(step.hold_jitter_ms))
         self.step_repeat_var.set(str(step.repeat_count))
         self.step_repeat_combine_hold_var.set(step.repeat_combine_hold)
-        self.step_ready_match_type = step.ready_match_type
-        self.step_ready_template = step.ready_template
-        self.step_ready_region = step.ready_region
-        self.step_ready_search_mode = step.ready_search_mode
-        self.step_ready_search_region = step.ready_search_region
-        self.step_ready_pixel_pos = step.ready_pixel_pos
-        self.step_ready_pixel_color = step.ready_pixel_color
-        self.step_ready_timeout_var.set(str(step.ready_timeout_ms))
-        self.step_ready_confidence_var.set(f"{step.ready_confidence:.2f}")
-        self._refresh_ready_status()
-        self.step_buff_check = step.buff_check
-        self.step_buff_hold_var.set("" if step.buff_hold_ms is None else str(step.buff_hold_ms))
-        self.step_buff_delay_var.set("" if step.buff_delay_ms is None else str(step.buff_delay_ms))
-        self._refresh_buff_status()
-        self.cooldown_section.set_collapsed(
-            self._section_collapse_state(step, "cooldown", not step.has_ready_check()))
-        self.buff_section.set_collapsed(
-            self._section_collapse_state(step, "buff", step.buff_check is None))
-        self.conditions_section.set_collapsed(
-            self._section_collapse_state(step, "conditions", not step.conditions))
+        if parsed[1] is not None:
+            # A condition row is selected -- always show its editor, regardless of
+            # this step's smart per-step default/override below, since the user is
+            # clearly here to look at (or update) that specific condition.
+            self.conditions_section.set_collapsed(False)
+        else:
+            self.conditions_section.set_collapsed(
+                self._section_collapse_state(step, "conditions", not step.conditions))
         self._selected_step_ref = step
         self._selected_step_core_snapshot = self._core_step_form_snapshot()
-        self._selected_step_ready_snapshot = self._ready_check_form_snapshot()
-        self._selected_step_buff_snapshot = self._buff_check_form_snapshot()
 
     def _section_collapse_state(self, step, key: str, default_collapsed: bool) -> bool:
         return self._section_collapse_overrides.get(id(step), {}).get(key, default_collapsed)
@@ -340,9 +292,7 @@ class StepEditorMixin:
         step = self._selected_step_ref
         if step is None or not any(s is step for s in self.editing_steps):
             return
-        if (self._core_step_form_snapshot() == self._selected_step_core_snapshot
-                and self._ready_check_form_snapshot() == self._selected_step_ready_snapshot
-                and self._buff_check_form_snapshot() == self._selected_step_buff_snapshot):
+        if self._core_step_form_snapshot() == self._selected_step_core_snapshot:
             return
         parsed = self._read_step_form(conditions=step.conditions, is_new_step=False,
                                        original_key=step.key, alt_key=step.alt_key)
@@ -360,9 +310,8 @@ class StepEditorMixin:
     def _core_step_form_snapshot(self) -> tuple:
         """A cheap, side-effect-free snapshot of the Name/Key/Delay/.../Repeat
         fields' raw values (deliberately raw strings, not parsed ints -- this
-        must never risk popping the "Invalid step" dialog just from being
-        computed). See _discard_selected_step_edits for how this, plus the
-        ready-check/buff-check snapshots below, are used."""
+        must never risk tripping the per-field validation just from being
+        computed). See _discard_selected_step_edits for how this is used."""
         return (
             self.step_name_var.get(), self.step_key_var.get(),
             self.step_delay_var.get(), self.step_jitter_var.get(),
@@ -370,28 +319,13 @@ class StepEditorMixin:
             self.step_repeat_var.get(), self.step_repeat_combine_hold_var.get(),
         )
 
-    def _ready_check_form_snapshot(self) -> tuple:
-        """Same idea as _core_step_form_snapshot, for the Cooldown Check group."""
-        return (
-            self.step_ready_match_type, self.step_ready_template, self.step_ready_region,
-            self.step_ready_search_mode, self.step_ready_search_region,
-            self.step_ready_pixel_pos, self.step_ready_pixel_color,
-            self.step_ready_timeout_var.get(), self.step_ready_confidence_var.get(),
-        )
-
-    def _buff_check_form_snapshot(self) -> tuple:
-        """Same idea as _core_step_form_snapshot, for the Buff Check group."""
-        return self.step_buff_check, self.step_buff_hold_var.get(), self.step_buff_delay_var.get()
-
     def _read_step_form(self, conditions=None, is_new_step=True, original_key=None, alt_key=None):
         """Builds a Step from the form's current contents, or None if any
         numeric field fails to parse. Each field is validated independently
         (rather than one try/except around all of them), so a bad field gets
         its own red border via ttk's native "invalid" Entry state, and the
         shared error label names exactly which field(s) are wrong instead of
-        a single generic message covering every possible field. A bad field
-        that lives inside a currently-collapsed Cooldown/Buff Check section
-        also expands that section, so the red border is actually visible.
+        a single generic message covering every possible field.
 
         `original_key` (the key the step being *replaced* already had;
         ignored when is_new_step) resolves what a blank Key field means,
@@ -406,7 +340,6 @@ class StepEditorMixin:
         a real key before."""
         values = {}
         bad_labels = []
-        bad_sections = set()
         for var_attr, entry_attr, parser, allow_blank, key, label in _NUMERIC_FIELDS:
             entry = getattr(self, entry_attr)
             text = getattr(self, var_attr).get().strip()
@@ -420,17 +353,9 @@ class StepEditorMixin:
             except ValueError:
                 entry.state(["invalid"])
                 bad_labels.append(label)
-                if key in _SECTION_BY_FIELD:
-                    bad_sections.add(_SECTION_BY_FIELD[key])
         if bad_labels:
-            self.step_form_error_var.set(
-                f"Invalid: {', '.join(bad_labels)} -- Confidence needs a decimal (e.g. 0.9), "
-                "the rest need whole numbers.")
+            self.step_form_error_var.set(f"Invalid: {', '.join(bad_labels)} -- must be whole numbers.")
             self.step_form_error_label.pack(anchor="w", pady=(4, 0))
-            if "cooldown" in bad_sections:
-                self.cooldown_section.set_collapsed(False)
-            if "buff" in bad_sections:
-                self.buff_section.set_collapsed(False)
             return None
         self.step_form_error_var.set("")
         self.step_form_error_label.pack_forget()
@@ -450,18 +375,6 @@ class StepEditorMixin:
             jitter_ms=values["jitter_ms"],
             hold_ms=values["hold_ms"],
             hold_jitter_ms=values["hold_jitter_ms"],
-            ready_match_type=self.step_ready_match_type,
-            ready_template=self.step_ready_template,
-            ready_region=self.step_ready_region,
-            ready_search_mode=self.step_ready_search_mode,
-            ready_search_region=self.step_ready_search_region,
-            ready_pixel_pos=self.step_ready_pixel_pos,
-            ready_pixel_color=self.step_ready_pixel_color,
-            ready_confidence=values["ready_confidence"],
-            ready_timeout_ms=values["ready_timeout_ms"],
-            buff_check=self.step_buff_check,
-            buff_hold_ms=values["buff_hold_ms"],
-            buff_delay_ms=values["buff_delay_ms"],
             repeat_count=values["repeat_count"],
             repeat_combine_hold=self.step_repeat_combine_hold_var.get(),
         )
@@ -477,17 +390,15 @@ class StepEditorMixin:
         """If a tree row is currently selected, Add Step/Add Sleep must not
         silently read whatever _on_select_step loaded into the form as if it
         were a fresh step -- that's how "Add Step" used to end up cloning
-        whatever's highlighted. Checked independently per section (core
-        fields / Cooldown Check / Buff Check), not as one all-or-nothing
-        snapshot: changing just the Key to build a similar-but-new step must
-        still discard a stale, untouched Cooldown Check from the step that
-        was selected, rather than silently carrying someone else's calibrated
-        icon over onto what's meant to be an unrelated new step. Any section
-        the user *did* touch since selecting (recalibrated a check, edited a
-        core field, etc.) is left exactly as they left it -- only untouched
-        sections reset to blank. No-op entirely if nothing is selected, so
-        typing values and clicking Add Step repeatedly to add several
-        similarly-timed steps still works."""
+        whatever's highlighted. Only reset if the core fields are untouched
+        since selecting -- if the user *did* edit them, that's left exactly
+        as they left it, carried forward into the new step, rather than
+        silently discarded. No-op entirely if nothing is selected, so typing
+        values and clicking Add Step repeatedly to add several
+        similarly-timed steps still works. (Conditions have no staged form
+        state to discard here -- they live directly on Step objects, and
+        clearing the selection below already blanks the condition editor via
+        the normal _on_select_step path.)"""
         if not self.tree.selection():
             return
         # Clearing the selection fires <<TreeviewSelect>> like any other selection
@@ -502,10 +413,6 @@ class StepEditorMixin:
             self._suppress_commit_on_select = False
         if self._core_step_form_snapshot() == self._selected_step_core_snapshot:
             self._reset_step_core_fields()
-        if self._ready_check_form_snapshot() == self._selected_step_ready_snapshot:
-            self._reset_ready_form()
-        if self._buff_check_form_snapshot() == self._selected_step_buff_snapshot:
-            self._reset_buff_form()
 
     def _add_step(self):
         self._discard_selected_step_edits()
@@ -517,8 +424,6 @@ class StepEditorMixin:
             return
         self.editing_steps.append(step)
         self._refresh_steps_tree()
-        self._reset_ready_form()
-        self._reset_buff_form()
 
     def _add_sleep_step(self):
         """A sleep step has no key -- it's just a pause of delay_ms (+/- jitter_ms)
@@ -531,8 +436,6 @@ class StepEditorMixin:
         step.key = ""
         self.editing_steps.append(step)
         self._refresh_steps_tree()
-        self._reset_ready_form()
-        self._reset_buff_form()
 
     def _on_copy_clicked(self):
         """Copies every currently-selected step (condition-only selections are

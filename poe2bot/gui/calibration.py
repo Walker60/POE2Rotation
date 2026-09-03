@@ -6,15 +6,13 @@ import pyautogui
 from poe2bot import templates
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import theme
-from poe2bot.models import Condition
 from poe2bot.gui.overlays import RegionCaptureOverlay, PointCaptureOverlay
 
 
 class CalibrationMixin:
-    """Cooldown-check and Buff-check calibration, plus the shared image/pixel/
-    search-area capture-overlay machinery both of those (and ConditionsMixin's
-    Add/recalibrate Condition flows) reuse. Mixed into App (see
-    poe2bot/gui/app.py)."""
+    """Image/pixel/search-area capture-overlay machinery, shared by every
+    Condition calibration flow (ConditionsMixin's Add/recalibrate Condition).
+    Mixed into App (see poe2bot/gui/app.py)."""
 
     def _show_calibration_hint_once(self, title: str, message: str):
         """The full instructional popup (what a capture involves, how to
@@ -28,53 +26,14 @@ class CalibrationMixin:
         self._calibration_hint_shown = True
         messagebox.showinfo(title, message)
 
-    # ---- cooldown-check calibration -----------------------------------------
-
-    def _clear_ready_check(self):
-        self.step_ready_match_type = "image"
-        self.step_ready_template = None
-        self.step_ready_region = None
-        self.step_ready_search_mode = "exact"
-        self.step_ready_search_region = None
-        self.step_ready_pixel_pos = None
-        self.step_ready_pixel_color = None
-        self._refresh_ready_status()
-
-    def _on_image_match_clicked(self):
-        self._start_image_capture()
-
-    # ---- buff-check calibration ----------------------------------------------
-
-    def _clear_buff_check(self):
-        self.step_buff_check = None
-        self._refresh_buff_status()
-
-    def _on_buff_image_match_clicked(self):
-        default_confidence = self.step_buff_check.confidence if self.step_buff_check else 0.90
-        self._start_image_capture(on_use=self._set_buff_image_match, default_confidence=default_confidence)
-
-    def _on_buff_pixel_match_clicked(self):
-        default_confidence = self.step_buff_check.confidence if self.step_buff_check else 0.90
-        self._start_pixel_capture(on_use=self._set_buff_pixel_match, default_confidence=default_confidence)
-
-    def _set_buff_image_match(self, filename, region, confidence, search_mode="exact", search_region=None):
-        self.step_buff_check = Condition(match_type="image", template=filename, region=region, confidence=confidence,
-                                          search_mode=search_mode, search_region=search_region)
-        self._refresh_buff_status()
-
-    def _set_buff_pixel_match(self, point, color, confidence):
-        self.step_buff_check = Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)
-        self._refresh_buff_status()
-
-    def _start_image_capture(self, on_use=None, default_confidence=0.90):
-        """Runs the region-capture-overlay flow, ending in an image-match preview.
-        With `on_use` set, "Use This" calls on_use(filename, region, confidence,
-        search_mode, search_region) and shows a Confidence field (pre-filled from
-        `default_confidence`) instead of the default behavior of staging the
-        step's own cooldown check into self.step_ready_* (used for Add/
-        Recalibrate Condition). search_mode/search_region come from the optional
-        second click-drag pass offered in the preview dialog -- see
-        _show_image_match_preview and _start_search_area_capture."""
+    def _start_image_capture(self, on_use, default_confidence=0.90):
+        """Runs the region-capture-overlay flow, ending in an image-match
+        preview. "Use This" calls on_use(filename, region, confidence,
+        search_mode, search_region) -- every Condition (Add or recalibrate)
+        goes through this same callback, there's no other consumer.
+        search_mode/search_region come from the optional second click-drag
+        pass offered in the preview dialog -- see _show_image_match_preview
+        and _start_search_area_capture."""
         self._show_calibration_hint_once(
             "Calibrate image match",
             "After you click OK, the bot window will hide.\n\n"
@@ -84,12 +43,12 @@ class CalibrationMixin:
         self.withdraw()
         self.after(150, lambda: self._open_region_capture_overlay(on_use, default_confidence))
 
-    def _open_region_capture_overlay(self, on_use=None, default_confidence=0.90):
+    def _open_region_capture_overlay(self, on_use, default_confidence=0.90):
         RegionCaptureOverlay(
             self, on_done=lambda region: self._on_image_region_captured(region, on_use, default_confidence),
             hint_text="Click-drag tightly around the icon  ·  Esc to cancel")
 
-    def _on_image_region_captured(self, region, on_use=None, default_confidence=0.90):
+    def _on_image_region_captured(self, region, on_use, default_confidence=0.90):
         if region is None:
             self.deiconify()
             return
@@ -97,7 +56,7 @@ class CalibrationMixin:
         # captured template isn't tinted by our own semi-transparent gray overlay.
         self.after(200, lambda: self._take_image_match_screenshot(region, on_use, default_confidence))
 
-    def _take_image_match_screenshot(self, region, on_use=None, default_confidence=0.90):
+    def _take_image_match_screenshot(self, region, on_use, default_confidence=0.90):
         filename = templates.new_template_filename()
         path = templates.template_path(filename)
         try:
@@ -110,7 +69,7 @@ class CalibrationMixin:
         self.deiconify()
         self._show_image_match_preview(filename, region, on_use, default_confidence)
 
-    def _show_image_match_preview(self, filename, region, on_use=None, default_confidence=0.90,
+    def _show_image_match_preview(self, filename, region, on_use, default_confidence=0.90,
                                    inline_error=None):
         """inline_error, when set, shows a warning line above the "search a
         larger area" checkbox instead of a separate popup-then-reopen round
@@ -136,13 +95,11 @@ class CalibrationMixin:
             ttk.Label(preview, text=inline_error, foreground=theme.DANGER_COLOR,
                       wraplength=280, justify="left").pack(padx=8, pady=(6, 0))
 
-        confidence_var = None
-        if on_use is not None:
-            conf_row = ttk.Frame(preview)
-            conf_row.pack(pady=(4, 0))
-            ttk.Label(conf_row, text="Confidence").pack(side="left", padx=(0, 4))
-            confidence_var = tk.StringVar(value=f"{default_confidence:.2f}")
-            ttk.Entry(conf_row, textvariable=confidence_var, width=5).pack(side="left")
+        conf_row = ttk.Frame(preview)
+        conf_row.pack(pady=(4, 0))
+        ttk.Label(conf_row, text="Confidence").pack(side="left", padx=(0, 4))
+        confidence_var = tk.StringVar(value=f"{default_confidence:.2f}")
+        ttk.Entry(conf_row, textvariable=confidence_var, width=5).pack(side="left")
 
         area_var = tk.BooleanVar(value=bool(inline_error))
         ttk.Checkbutton(preview, variable=area_var,
@@ -152,13 +109,11 @@ class CalibrationMixin:
         btns.pack(pady=(4, 0))
 
         def use_this():
-            confidence = default_confidence
-            if on_use is not None:
-                try:
-                    confidence = float(confidence_var.get())
-                except ValueError:
-                    messagebox.showerror("Invalid confidence", "Confidence must be a decimal (e.g. 0.9).")
-                    return
+            try:
+                confidence = float(confidence_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid confidence", "Confidence must be a decimal (e.g. 0.9).")
+                return
             if area_var.get():
                 # NOT deleting the template file -- it's confirmed, it just still
                 # needs a search area before this calibration can be finalized.
@@ -166,10 +121,7 @@ class CalibrationMixin:
                 self._start_search_area_capture(filename, region, confidence, on_use)
                 return
             preview.destroy()
-            if on_use is not None:
-                on_use(filename, region, confidence, "exact", None)
-                return
-            self._apply_image_match_to_ready_form(filename, region, "exact", None)
+            on_use(filename, region, confidence, "exact", None)
 
         def retry():
             templates.delete_template(filename)  # safe: nothing has ever referenced it
@@ -185,23 +137,6 @@ class CalibrationMixin:
         ttk.Button(btns, text="Retry", command=retry).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", style=theme.DANGER_BUTTON_STYLE, command=cancel).pack(
             side="left", padx=4)
-
-    def _apply_image_match_to_ready_form(self, filename, region, search_mode, search_region):
-        """Finalizes an image-match calibration into the step's own cooldown
-        check (the on_use-is-None path through _show_image_match_preview /
-        _on_search_area_captured). Deliberately does NOT delete any
-        previously-calibrated file for this step -- that file may still be
-        referenced by a committed Step until "Update Selected"/"Save Rotation"
-        runs. Orphans are cleaned up by the periodic sweep instead (see
-        _sweep_templates)."""
-        self.step_ready_match_type = "image"
-        self.step_ready_template = filename
-        self.step_ready_region = region
-        self.step_ready_search_mode = search_mode
-        self.step_ready_search_region = search_region
-        self.step_ready_pixel_pos = None
-        self.step_ready_pixel_color = None
-        self._refresh_ready_status()
 
     def _start_search_area_capture(self, filename, region, confidence, on_use):
         """Second calibration pass, run only when the "search a larger area"
@@ -245,15 +180,9 @@ class CalibrationMixin:
                              f"as large as the icon ({region[2]}x{region[3]}) in both dimensions -- "
                              f"try again.")
             return
-        if on_use is not None:
-            on_use(filename, region, confidence, "area", search_region)
-            return
-        self._apply_image_match_to_ready_form(filename, region, "area", search_region)
+        on_use(filename, region, confidence, "area", search_region)
 
-    def _on_pixel_match_clicked(self):
-        self._start_pixel_capture()
-
-    def _start_pixel_capture(self, on_use=None, default_confidence=0.90):
+    def _start_pixel_capture(self, on_use, default_confidence=0.90):
         """Same shape as _start_image_capture, for the pixel-match flow."""
         self._show_calibration_hint_once(
             "Calibrate pixel match",
@@ -264,12 +193,12 @@ class CalibrationMixin:
         self.withdraw()
         self.after(150, lambda: self._open_point_capture_overlay(on_use, default_confidence))
 
-    def _open_point_capture_overlay(self, on_use=None, default_confidence=0.90):
+    def _open_point_capture_overlay(self, on_use, default_confidence=0.90):
         PointCaptureOverlay(
             self, on_done=lambda point: self._on_point_captured(point, on_use, default_confidence),
             hint_text="Click exactly on the pixel  ·  Esc to cancel")
 
-    def _on_point_captured(self, point, on_use=None, default_confidence=0.90):
+    def _on_point_captured(self, point, on_use, default_confidence=0.90):
         if point is None:
             self.deiconify()
             return
@@ -277,7 +206,7 @@ class CalibrationMixin:
         # sampled color isn't tinted by our own semi-transparent gray overlay.
         self.after(200, lambda: self._sample_pixel_color(point, on_use, default_confidence))
 
-    def _sample_pixel_color(self, point, on_use=None, default_confidence=0.90):
+    def _sample_pixel_color(self, point, on_use, default_confidence=0.90):
         try:
             color = pyautogui.screenshot(region=(point[0], point[1], 1, 1)).getpixel((0, 0))
         except Exception as e:
@@ -287,7 +216,7 @@ class CalibrationMixin:
         self.deiconify()
         self._show_pixel_match_preview(point, color, on_use, default_confidence)
 
-    def _show_pixel_match_preview(self, point, color, on_use=None, default_confidence=0.90):
+    def _show_pixel_match_preview(self, point, color, on_use, default_confidence=0.90):
         preview = tk.Toplevel(self)
         preview.title("Confirm pixel match")
         preview.transient(self)
@@ -302,34 +231,23 @@ class CalibrationMixin:
         swatch.create_rectangle(1, 1, 59, 59, fill="#%02x%02x%02x" % color, outline="")
         ttk.Label(preview, text=f"RGB {color} at ({point[0]}, {point[1]})").pack(pady=(0, 8))
 
-        confidence_var = None
-        if on_use is not None:
-            conf_row = ttk.Frame(preview)
-            conf_row.pack(pady=(0, 4))
-            ttk.Label(conf_row, text="Confidence").pack(side="left", padx=(0, 4))
-            confidence_var = tk.StringVar(value=f"{default_confidence:.2f}")
-            ttk.Entry(conf_row, textvariable=confidence_var, width=5).pack(side="left")
+        conf_row = ttk.Frame(preview)
+        conf_row.pack(pady=(0, 4))
+        ttk.Label(conf_row, text="Confidence").pack(side="left", padx=(0, 4))
+        confidence_var = tk.StringVar(value=f"{default_confidence:.2f}")
+        ttk.Entry(conf_row, textvariable=confidence_var, width=5).pack(side="left")
 
         btns = ttk.Frame(preview, padding=8)
         btns.pack()
 
         def use_this():
-            if on_use is not None:
-                try:
-                    confidence = float(confidence_var.get())
-                except ValueError:
-                    messagebox.showerror("Invalid confidence", "Confidence must be a decimal (e.g. 0.9).")
-                    return
-                preview.destroy()
-                on_use(point, color, confidence)
+            try:
+                confidence = float(confidence_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid confidence", "Confidence must be a decimal (e.g. 0.9).")
                 return
-            self.step_ready_match_type = "pixel"
-            self.step_ready_pixel_pos = point
-            self.step_ready_pixel_color = color
-            self.step_ready_template = None
-            self.step_ready_region = None
-            self._refresh_ready_status()
             preview.destroy()
+            on_use(point, color, confidence)
 
         def retry():
             preview.destroy()

@@ -8,8 +8,8 @@ from poe2bot import controller, hotkeys, templates
 
 VALID_MODES = ("once", "loop")
 VALID_PAUSE_MODES = ("duration", "toggle")
-VALID_READY_MATCH_TYPES = ("image", "pixel")           # Step.ready_match_type, buff_check.match_type -- visual-only
-VALID_CONDITION_MATCH_TYPES = ("image", "pixel", "timer")  # a plain step Condition can also be a pure time gate
+VALID_CONDITION_MATCH_TYPES = ("image", "pixel", "timer")  # a Condition can also be a pure time gate
+VALID_CONDITION_ACTIONS = ("fire", "block", "hold")   # what a Condition does once it matches -- see Condition.action
 VALID_SEARCH_MODES = ("exact", "area")
 MAX_REPEAT_COUNT = 50
 
@@ -46,12 +46,19 @@ def _int_tuple(values) -> Optional[tuple]:
 
 @dataclass
 class Condition:
-    """An extra gate on a Step: it only fires if every one of its conditions
-    currently matches, checked once right before firing (no polling/timeout,
-    unlike the step's own cooldown check -- a condition is either true right
-    now or the cast is skipped this pass)."""
+    """A rule attached to a Step: when its match currently holds (subject to
+    `negate`), `action` decides what happens. Multiple conditions on the same
+    step combine as: every "fire" condition must currently match AND no
+    "block" condition currently matches (either one skips the step this
+    pass, checked once, instantly, unless `timeout_ms` says to wait -- see
+    action's own docstring below); "hold" conditions never gate firing, they
+    only override hold_ms/delay_ms while they match (the first matching one,
+    in list order, wins if more than one does)."""
     match_type: str = "image"                                    # "image", "pixel", or "timer"
     name: str = ""   # optional display label (e.g. "Bleeding"); falls back to an auto description in the GUI if blank
+    action: str = "fire"    # "fire" (require this to gate the step firing), "block" (veto firing while this
+                             # matches), or "hold" (no effect on whether the step fires -- just overrides
+                             # hold_ms/delay_ms below while it matches)
     template: Optional[str] = None                              # filename only, resolved via templates.template_path()
     region: Optional[Tuple[int, int, int, int]] = None          # (left, top, width, height), absolute screen px -- image mode
     search_mode: str = "exact"                                   # "exact" (compare `region` directly) or "area" (search
@@ -64,11 +71,22 @@ class Condition:
     timer_seconds: Optional[float] = None                        # timer mode only -- minimum seconds since the owning
                                                                   # step's own last actual fire (see RotationRunner)
     negate: bool = False                                         # invert the match result -- e.g. an image condition
-                                                                  # with negate=True gates firing on the image being
-                                                                  # ABSENT rather than present. Applies uniformly to
-                                                                  # whichever match_type this condition uses; doesn't
-                                                                  # affect has_check() -- an uncalibrated negated
-                                                                  # condition is still "not configured", not an error.
+                                                                  # with negate=True triggers its action on the image
+                                                                  # being ABSENT rather than present. Applies uniformly
+                                                                  # to whichever match_type/action this condition uses;
+                                                                  # doesn't affect has_check() -- an uncalibrated
+                                                                  # negated condition is still "not configured", not an
+                                                                  # error.
+    timeout_ms: int = 0     # "fire" only: 0 (default) means a single instant check, exactly like a plain
+                             # condition always has; >0 polls up to this long for this condition to start
+                             # matching before the step is skipped this pass -- this is what used to be a
+                             # step's own separate, always-polling Cooldown Check, generalized to any
+                             # "fire" condition (see RotationRunner._wait_for_fire_gate). Ignored for
+                             # "block"/"hold" -- those are always instant, one-shot checks.
+    hold_ms: Optional[int] = None    # "hold" only: replaces the owning step's hold_ms while this condition
+                                      # matches; None = don't override hold. Ignored for "fire"/"block".
+    delay_ms: Optional[int] = None   # "hold" only: replaces the owning step's delay_ms while this condition
+                                      # matches; None = don't override delay. Ignored for "fire"/"block".
 
     def has_check(self) -> bool:
         if self.match_type == "timer":
@@ -82,6 +100,7 @@ class Condition:
         return Condition(
             match_type=data.get("match_type", "image"),
             name=data.get("name", ""),
+            action=data.get("action", "fire"),
             template=data.get("template"),
             region=_int_tuple(data.get("region")),
             search_mode=data.get("search_mode", "exact"),
@@ -91,6 +110,9 @@ class Condition:
             confidence=_float_or(data, "confidence", 0.9),
             timer_seconds=_float_or(data, "timer_seconds", None),
             negate=bool(data.get("negate", False)),
+            timeout_ms=_int_or(data, "timeout_ms", 0),
+            hold_ms=int(data["hold_ms"]) if data.get("hold_ms") is not None else None,
+            delay_ms=int(data["delay_ms"]) if data.get("delay_ms") is not None else None,
         )
 
 
@@ -104,36 +126,15 @@ class Step:
     jitter_ms: int = 0
     hold_ms: int = 0
     hold_jitter_ms: int = 0   # uniform random +/- jitter applied to hold_ms each time (only when hold_ms > 0)
-    ready_match_type: str = "image"                             # "image" or "pixel" -- which method below is active
-    ready_template: Optional[str] = None                       # filename only, resolved via templates.template_path()
-    ready_region: Optional[Tuple[int, int, int, int]] = None   # (left, top, width, height), absolute screen px -- image mode
-    ready_search_mode: str = "exact"                            # "exact" (compare `ready_region` directly) or "area" (search
-                                                                 # for the template anywhere within `ready_search_region`) -- image mode only
-    ready_search_region: Optional[Tuple[int, int, int, int]] = None   # (left, top, width, height), absolute screen px -- only
-                                                                 # used when ready_search_mode == "area"; must be >= `ready_region` in both dimensions
-    ready_pixel_pos: Optional[Tuple[int, int]] = None           # (x, y) absolute screen px -- pixel mode
-    ready_pixel_color: Optional[Tuple[int, int, int]] = None    # expected (r, g, b) when "ready" -- pixel mode
-    ready_confidence: float = 0.9
-    ready_timeout_ms: int = 300
-    conditions: List[Condition] = field(default_factory=list)   # extra gates, checked once, instantly, before firing
-    buff_check: Optional[Condition] = None   # same instant image/pixel check as a Condition, but its result swaps
-                                              # in buff_hold_ms/buff_delay_ms below instead of gating whether this
-                                              # step fires at all -- for animation-speed buffs that aren't always up
-    buff_hold_ms: Optional[int] = None       # used instead of hold_ms while buff_check matches; None = no override
-    buff_delay_ms: Optional[int] = None      # used instead of delay_ms while buff_check matches; None = no override
+    conditions: List[Condition] = field(default_factory=list)   # everything that used to be a separate Cooldown
+                                                                  # Check / Buff Check / plain Condition now lives
+                                                                  # here uniformly -- see Condition.action
     repeat_count: int = 1                    # fire this step this many times per pass; 1 = today's behavior
     repeat_combine_hold: bool = False        # if the key has a hold > 0, hold once for hold_ms * repeat_count and
                                               # delay once afterward, instead of repeat_count independent hold+delay cycles
     alt_key: Optional[str] = None            # whichever device's key ISN'T currently active -- same None/""/string
                                               # semantics as `key`. Swapped with `key` by App's Active Device toggle;
                                               # never edited directly through its own UI.
-
-    def has_ready_check(self) -> bool:
-        """True if this step has a cooldown check configured, via whichever
-        method ready_match_type currently points at."""
-        if self.ready_match_type == "pixel":
-            return self.ready_pixel_color is not None
-        return bool(self.ready_template)
 
     @staticmethod
     def from_dict(data: dict) -> "Step":
@@ -153,19 +154,7 @@ class Step:
             jitter_ms=_int_or(data, "jitter_ms", 0),
             hold_ms=_int_or(data, "hold_ms", 0),
             hold_jitter_ms=_int_or(data, "hold_jitter_ms", 0),
-            ready_match_type=data.get("ready_match_type", "image"),
-            ready_template=data.get("ready_template"),
-            ready_region=_int_tuple(data.get("ready_region")),  # JSON round-trips tuples as lists
-            ready_search_mode=data.get("ready_search_mode", "exact"),
-            ready_search_region=_int_tuple(data.get("ready_search_region")),
-            ready_pixel_pos=_int_tuple(data.get("ready_pixel_pos")),
-            ready_pixel_color=_int_tuple(data.get("ready_pixel_color")),
-            ready_confidence=_float_or(data, "ready_confidence", 0.9),
-            ready_timeout_ms=_int_or(data, "ready_timeout_ms", 300),
             conditions=[Condition.from_dict(c) for c in data.get("conditions", [])],
-            buff_check=Condition.from_dict(data["buff_check"]) if data.get("buff_check") else None,
-            buff_hold_ms=int(data["buff_hold_ms"]) if data.get("buff_hold_ms") is not None else None,
-            buff_delay_ms=int(data["buff_delay_ms"]) if data.get("buff_delay_ms") is not None else None,
             repeat_count=_int_or(data, "repeat_count", 1),
             repeat_combine_hold=bool(data.get("repeat_combine_hold", False)),
             alt_key=alt_key,
@@ -280,12 +269,10 @@ def folder_in_scope(folder: str, active_folder: Optional[str]) -> bool:
 
 
 def _search_area_problems(label: str, subject: str, search_mode: str, search_region, region) -> List[str]:
-    """Shared by the three image-mode validation blocks below (step's own ready
-    check, each condition, buff_check) -- all three calibrate search_mode/
-    search_region the same way, so this avoids repeating the same checks three
-    times. `subject` is an optional noun phrase (e.g. "buff check ") inserted
-    right after `label`, matching how the existing messages around each call
-    site are worded."""
+    """Shared by every image-mode Condition validation below -- all calibrate
+    search_mode/search_region the same way, so this avoids repeating the same
+    checks per condition. `subject` is an optional noun phrase inserted right
+    after `label`, matching how the surrounding messages are worded."""
     problems = []
     if search_mode not in VALID_SEARCH_MODES:
         problems.append(f"{label}: {subject}search mode must be one of {VALID_SEARCH_MODES}.")
@@ -382,36 +369,16 @@ def validate_rotation(rotation: Rotation) -> List[str]:
         if step.hold_jitter_ms < 0:
             problems.append(f"Step {i}: hold_jitter_ms cannot be negative.")
 
-        if step.ready_match_type not in VALID_READY_MATCH_TYPES:
-            problems.append(f"Step {i}: ready_match_type must be one of {VALID_READY_MATCH_TYPES}.")
-
-        if step.has_ready_check():
-            if not (0 < step.ready_confidence <= 1):
-                problems.append(f"Step {i}: confidence must be greater than 0 and at most 1.")
-            if step.ready_timeout_ms < 0:
-                problems.append(f"Step {i}: ready_timeout_ms cannot be negative.")
-            if step.ready_match_type == "pixel":
-                if not (isinstance(step.ready_pixel_pos, tuple) and len(step.ready_pixel_pos) == 2):
-                    problems.append(f"Step {i}: has a pixel cooldown check but no calibrated point (recalibrate).")
-                if not (isinstance(step.ready_pixel_color, tuple) and len(step.ready_pixel_color) == 3):
-                    problems.append(f"Step {i}: has a pixel cooldown check but no calibrated color (recalibrate).")
-            else:
-                if not (isinstance(step.ready_region, tuple) and len(step.ready_region) == 4):
-                    problems.append(f"Step {i}: has an image cooldown check but no calibrated region (recalibrate).")
-                if not step.ready_template or not os.path.isfile(templates.template_path(step.ready_template)):
-                    problems.append(f"Step {i}: calibrated template image is missing on disk (recalibrate).")
-                problems.extend(_search_area_problems(
-                    f"Step {i}", "", step.ready_search_mode, step.ready_search_region, step.ready_region))
-
         for j, condition in enumerate(step.conditions, start=1):
             if not condition.has_check():
-                # Not yet calibrated -- treated as "this condition is off," the same
-                # as an uncalibrated cooldown check or buff check just above/below,
-                # not as an error. Only reachable via hand-edited JSON; the GUI's
-                # own Add Condition flow always produces a fully-calibrated one.
+                # Not yet calibrated -- treated as "this condition is off," not an
+                # error. Only reachable via hand-edited JSON; the GUI's own Add
+                # Condition flow always produces a fully-calibrated one.
                 continue
             if condition.match_type not in VALID_CONDITION_MATCH_TYPES:
                 problems.append(f"Step {i}, condition {j}: match_type must be one of {VALID_CONDITION_MATCH_TYPES}.")
+            if condition.action not in VALID_CONDITION_ACTIONS:
+                problems.append(f"Step {i}, condition {j}: action must be one of {VALID_CONDITION_ACTIONS}.")
             if condition.match_type != "timer" and not (0 < condition.confidence <= 1):
                 # Confidence is a visual-match fuzziness threshold -- meaningless for a
                 # pure time gate, which has no "how close is close enough" to tune.
@@ -431,36 +398,18 @@ def validate_rotation(rotation: Rotation) -> List[str]:
                 problems.extend(_search_area_problems(
                     f"Step {i}, condition {j}", "", condition.search_mode, condition.search_region, condition.region))
 
-        buff_check = step.buff_check
-        buff_calibrated = buff_check is not None and buff_check.has_check()
-        if buff_calibrated:
-            if buff_check.match_type not in VALID_READY_MATCH_TYPES:
-                problems.append(f"Step {i}: buff check match_type must be one of {VALID_READY_MATCH_TYPES}.")
-            if not (0 < buff_check.confidence <= 1):
-                problems.append(f"Step {i}: buff check confidence must be greater than 0 and at most 1.")
-            if buff_check.match_type == "pixel":
-                if not (isinstance(buff_check.pixel_pos, tuple) and len(buff_check.pixel_pos) == 2):
-                    problems.append(f"Step {i}: buff check has no calibrated point (recalibrate).")
-                if not (isinstance(buff_check.pixel_color, tuple) and len(buff_check.pixel_color) == 3):
-                    problems.append(f"Step {i}: buff check has no calibrated color (recalibrate).")
-            else:
-                if not (isinstance(buff_check.region, tuple) and len(buff_check.region) == 4):
-                    problems.append(f"Step {i}: buff check has no calibrated region (recalibrate).")
-                if not buff_check.template or not os.path.isfile(templates.template_path(buff_check.template)):
-                    problems.append(f"Step {i}: buff check calibrated template image is missing on disk (recalibrate).")
-                problems.extend(_search_area_problems(
-                    f"Step {i}", "buff check ", buff_check.search_mode, buff_check.search_region, buff_check.region))
-            if step.buff_hold_ms is None and step.buff_delay_ms is None:
-                problems.append(f"Step {i}: buff check is calibrated but neither Buff Hold nor Buff Delay is set, "
-                                 f"so it would never have any effect.")
-
-        if step.buff_hold_ms is not None and step.buff_hold_ms < 0:
-            problems.append(f"Step {i}: buff hold_ms cannot be negative.")
-        if step.buff_delay_ms is not None and step.buff_delay_ms < 0:
-            problems.append(f"Step {i}: buff delay_ms cannot be negative.")
-        if (step.buff_hold_ms is not None or step.buff_delay_ms is not None) and not buff_calibrated:
-            problems.append(f"Step {i}: buff hold/delay override is set but no buff check is calibrated "
-                             f"(it would never apply).")
+            if condition.action == "fire":
+                if condition.timeout_ms < 0:
+                    problems.append(f"Step {i}, condition {j}: wait timeout cannot be negative.")
+            elif condition.action == "hold":
+                if condition.hold_ms is not None and condition.hold_ms < 0:
+                    problems.append(f"Step {i}, condition {j}: hold override cannot be negative.")
+                if condition.delay_ms is not None and condition.delay_ms < 0:
+                    problems.append(f"Step {i}, condition {j}: delay override cannot be negative.")
+                if condition.hold_ms is None and condition.delay_ms is None:
+                    problems.append(
+                        f"Step {i}, condition {j}: action is 'Change key hold amount' but neither Hold nor "
+                        f"Delay override is set, so it would never have any effect.")
 
         if step.repeat_count < 1:
             problems.append(f"Step {i}: repeat count must be at least 1.")

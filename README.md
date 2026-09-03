@@ -14,13 +14,11 @@ pip install -r requirements.txt
 `python -m tkinter` (should open a small test window). It is not a pip package.
 
 The app uses the [Sun Valley ttk theme](https://github.com/rdbende/Sun-Valley-ttk-theme)
-(`sv-ttk`) for a modern, Windows-11-like dark/light look. It starts in dark mode;
-click **Toggle Light/Dark** (bottom-right) to switch. This restyles standard ttk
-widgets (buttons, entries, the rotation/step trees) but can't reach a couple of
-things Tkinter itself doesn't theme: native dialogs (the message boxes and the
-folder rename/move prompts) keep the OS's own light appearance regardless of
-the app's theme, and the Windows title bar doesn't switch color on its own —
-both are Tkinter/Windows limitations, not bugs.
+(`sv-ttk`) for a modern, Windows-11-like dark/light look, plus its own themed
+replacements for every confirm/error/input dialog so those match too. Open
+**Settings...** (bottom-right) and click **Switch to Light/Dark Mode** to
+switch — your choice is remembered across restarts. The Windows title bar
+itself doesn't switch color on its own; that's a Windows limitation, not a bug.
 
 ## Running
 
@@ -60,37 +58,66 @@ online, note the upstream project renamed in 2023; functionally unaffected eithe
   the way a keyboard tap does, so an instant press+release risks the game's next input
   poll never seeing it; raise this if a controller step still doesn't reliably register.
 
-## Cooldown-gated steps (optional, per step)
+## Conditions (optional, per step)
 
-Any step can optionally wait for a calibrated "ready" signal on screen before
-firing its key, instead of firing blind on a fixed delay. There are two ways to
-calibrate this, and a step uses exactly one at a time:
+Everything that gates whether a step fires, or changes how it fires, is a
+**Condition** — a step can have any number of them. Each one is an
+image/pixel/timer match plus an **Action** deciding what happens once it
+matches:
 
-- **Image Match...** — the window hides, drag a small rectangle tightly around
-  the skill's icon while it's off cooldown, then confirm the capture. Best when
-  the icon's whole appearance (shape, highlight, etc.) changes between ready and
-  on-cooldown.
-- **Pixel Match...** — the window hides, click exactly on a single pixel that's
-  a distinct, reliable color when the skill is ready (e.g. a bright border pixel
-  on the icon), then confirm the sampled color. Cheaper than an image match and
-  handy when a whole-icon capture isn't needed — one pixel read and compare is
-  enough to tell ready from not-ready.
+- **Fire the skill** — this step only fires while the condition matches.
+  Every "Fire" condition on a step must currently match for it to fire at
+  all (they're AND'd together).
+- **Not fire the skill** — a veto: while this condition matches, the step is
+  skipped this pass, regardless of any "Fire" conditions passing. Handy for
+  "don't cast this while stunned/silenced" style checks.
+- **Change key hold amount** — doesn't affect whether the step fires at all;
+  while this condition matches, it overrides the step's Hold and/or Delay
+  with its own **Hold override (ms)**/**Delay override (ms)** values instead
+  (leaving either blank means that particular value is never overridden). For
+  skills whose animation time changes while a buff is up (faster/slower
+  attack or cast speed) without needing to touch the step's own normal
+  timing. Read once per cast and used for both that cast's hold *and* its
+  following delay, so if the underlying match stops holding partway through
+  the post-cast delay, that delay still finishes out at the overridden value
+  rather than switching mid-wait.
 
-Whichever you calibrate last is the one that's active for that step; switching
-from one to the other replaces the previous calibration rather than combining
-them. If the ready signal doesn't reappear within the step's Timeout, that cast
-is skipped (logged as a warning) and the rotation moves on — it never fires
-blind and never hangs.
+A condition can additionally be **Negate**d, which inverts whichever match it
+uses (e.g. a "Fire" condition with Negate fires only while its image/pixel is
+*absent*) — this applies uniformly regardless of Action.
 
-**Timeout is a quick "is it ready right now?" check, not a wait-for-cooldown
-timer.** The bot blocks the *entire* rotation for up to Timeout milliseconds on
-every step that has a cooldown check, so a large value (the old default was
-5000ms) makes a fast rotation feel like it stalls or hangs on any skill that's
-still cooling down — it's not actually hung, it's just sitting there waiting out
-the full timeout before giving up and moving on. The default is now 300ms, which
-is enough time to absorb normal check jitter without noticeably delaying the rest
-of the rotation; only raise it for a specific step if you'd genuinely rather wait
-a bit than skip that particular cast.
+Three ways to calibrate what a condition actually matches against:
+
+- **Add Image Condition...** — the window hides, drag a small rectangle
+  tightly around an icon on screen, then confirm the capture. Best when the
+  icon's whole appearance (shape, highlight, etc.) changes between its two
+  states.
+- **Add Pixel Condition...** — the window hides, click exactly on a single
+  pixel that's a distinct, reliable color in one state (e.g. a bright border
+  pixel on an icon), then confirm the sampled color. Cheaper than an image
+  match and handy when a whole-icon capture isn't needed.
+- **Add Timer Condition...** — no screen capture at all, just a number of
+  seconds since this step's own last actual fire. Useful for a plain cooldown
+  gate that has no reliable on-screen indicator to check instead.
+
+A newly added condition defaults to **Fire the skill** with no wait — exactly
+an always-instant gate. Select it (it's auto-selected right after adding) to
+change its Action, Name, Negate, or the fields below, then click **Update
+Selected Condition** to apply.
+
+**A "Fire the skill" condition can optionally wait instead of failing
+instantly.** Set **Wait up to (ms)** above 0 and, if the condition doesn't
+match yet, the bot polls it for up to that long (checking a few times a
+second) before giving up on this pass and skipping the cast — this is what
+used to be a separate "Cooldown Check" concept, now just any Fire condition
+with a wait configured. Leaving it at 0 (the default) is an instant, one-shot
+check with no waiting, suited to things like "is this buff currently active"
+rather than "wait for this skill to come off cooldown." The bot blocks the
+*entire* rotation for up to the wait time on that one step, so a large value
+makes a fast rotation feel like it stalls on whichever skill is still
+cooling down — it's not hung, it's waiting out the timeout before moving on.
+"Not fire the skill" and "Change key hold amount" conditions are always
+instant, one-shot checks; only "Fire the skill" ever waits.
 
 **Image matching defaults to a direct comparison against exactly the
 calibrated spot, not a search.** In this default "exact" mode, a check takes a
@@ -102,11 +129,11 @@ color (Euclidean RGB distance, scaled by the same Confidence field), which is
 cheaper still since there's no image to decode or diff. Neither mode searches
 elsewhere on screen for the icon by default — this is deliberately cheap: no
 sliding-window matching, so check speed doesn't scale with region size, and a
-single check can no longer blow past a very low Timeout on its own. The
+single check can no longer blow past a very low wait timeout on its own. The
 trade-off is that both assume the icon/pixel is still exactly where it was
 when calibrated — if the game window moves, resizes, or the UI scale changes
 afterward, the check will stop matching (never crash, it'll just always read
-as "not ready") and that step needs recalibrating.
+as "not matching") and that condition needs recalibrating.
 
 **Image matching can optionally search a larger area instead.** After
 confirming the tight icon capture, check "Search a larger area" and click-drag
@@ -119,7 +146,7 @@ exact mode, scaling with how large the search area is, so keep it as tight as
 you reasonably can — don't reach for it as a default. It's also a different
 matching algorithm than exact mode (normalized cross-correlation, not mean
 pixel difference), so a Confidence value tuned for exact mode is only a
-starting point after switching a step to area mode; expect to retune it.
+starting point after switching to area mode; expect to retune it.
 
 **Screenshots go through `mss`, not `pyautogui`.** On Windows, `pyautogui`
 (and even Pillow's own `ImageGrab.grab()` used directly) always captures the
@@ -133,38 +160,42 @@ Image-match calibrations are stored as individual PNGs under `templates/`, named
 by a random ID rather than the skill name, so rotations stay portable if you
 rename or reorder things. Rotation JSON files reference these by filename only —
 if you copy a `rotations/*.json` file to another machine or folder, copy its
-matching `templates/*.png` file(s) too, or that step's cooldown check will simply
-log an error and skip firing (never crash) until recalibrated. Files no longer
-referenced by any saved or in-progress rotation are cleaned up automatically on
-save, delete, and app startup. Pixel-match calibrations don't need any of this —
-the point and color are just numbers stored directly in the rotation's JSON, so
-they're already portable with no matching file to copy.
+matching `templates/*.png` file(s) too, or that condition will simply log an
+error and read as not-matching (never crash) until recalibrated. Files no
+longer referenced by any saved or in-progress rotation are cleaned up
+automatically on save, delete, and app startup. Pixel-match and timer
+calibrations don't need any of this — their values are just numbers stored
+directly in the rotation's JSON, so they're already portable with no matching
+file to copy.
 
 Known limitation: calibration only supports the primary monitor.
 
-## Buff-based hold/delay override (optional, per step)
+The step list shows conditions as indented rows nested under their step, with
+an expand/collapse arrow — a step with any conditions starts expanded so
+you'll always see one right after adding it, though a manual collapse doesn't
+persist across further edits to the step list.
 
-Some skills' animation time changes while a particular buff is up (faster or
-slower attack/cast speed, etc.), and that buff isn't always active. A step can
-have one **Buff Check** — the same Image Match/Pixel Match calibration flow as
-the cooldown check above — plus a **Hold (ms)** and/or **Delay (ms)** value to
-use *instead of* the step's normal Hold/Delay whenever that check currently
-matches on screen.
+- **Double-click** an existing condition to recalibrate its match (region or
+  pixel, matching whichever type it already is) — its Confidence field starts
+  pre-filled with its current value, and its Name/Action/Negate/Wait/Hold/
+  Delay are all carried over unchanged; recalibrating only ever changes
+  *what's being matched*, never what happens when it matches.
+- Select a condition and click **Remove Selected** to delete just that
+  condition, leaving the step and its other conditions untouched.
+- Select a condition, type into the **Name** field, and click **Update
+  Selected Condition** to give it a label (e.g. "Bleeding") — it's shown in
+  the list instead of the auto-generated "Pixel RGB(...)"/"Image WxH"
+  description, purely cosmetic, and survives recalibration.
+- Select a condition and click **Move Up**/**Move Down** (in Step Actions), or
+  just drag it, to reorder it within its own step. Reordering "Fire"/"Not
+  fire" conditions is cosmetic only (they're still combined the same way
+  regardless of order); with more than one "Change key hold amount"
+  condition on the same step, the first one (in list order) that currently
+  matches is the one whose override applies.
 
-- Calibrate it the same way as a cooldown check or condition: click **Image
-  Match...** or **Pixel Match...** in the Buff Check group, capture the
-  buff's icon or a distinct pixel, and confirm.
-- Fill in **Hold (ms)** and/or **Delay (ms)** with the values to use while the
-  buff is active. Leaving either blank means that particular value is never
-  overridden — the step keeps its normal Hold or Delay even while the buff
-  check matches. A buff check with both left blank would never have any
-  effect, so saving is blocked until at least one is set.
-- Unlike the cooldown check, this is read **once, instantly**, right before
-  firing — same as a Condition — not polled or waited on.
-- The buff state is read once per cast and used for both that cast's hold
-  *and* its following delay, so if the buff expires partway through the
-  post-cast delay, that delay still finishes out at the buffed value rather
-  than switching mid-wait.
+Copying a step (Copy/Paste, or copying a whole rotation) carries its
+conditions along with it. Conditions with an image-match template participate
+in the same template-file portability/cleanup rules described above.
 
 ## Repeat and Combine Hold (optional, per step)
 
@@ -185,54 +216,9 @@ where holding longer does more (a charge-up attack, for instance) rather than
 skills that need a fresh, discrete press each time. Combine Hold has no effect
 (and isn't needed) on a tap, or when Repeat is 1.
 
-Repeat only fires once through the step's own cooldown check and any
-Conditions — they aren't re-checked between reps, the same "checked once,
-right before firing" rule Conditions and the Buff Check already follow.
-
-## Conditions (optional, per step)
-
-A step can also have any number of **conditions** — extra image/pixel-match
-gates layered on top of its own cooldown check. A step only fires if its
-cooldown check (if any) is ready *and* every one of its conditions currently
-matches; if any single condition doesn't match, that cast is skipped (logged)
-the same way a not-ready cooldown check is, and the rotation moves on to the
-next step without eating that step's delay.
-
-Conditions are a different kind of check than the cooldown check above:
-they're read **once, instantly**, right before firing — there's no Timeout
-and no waiting for one to become true. This suits things like "only cast this
-if I still have a buff active" or "only cast this if the target isn't already
-below a health threshold" — a quick yes/no read of something elsewhere on
-screen, not a cooldown icon you'd expect to wait out.
-
-The step list shows conditions as indented rows nested under their step, with
-an expand/collapse arrow — a step with any conditions starts expanded so
-you'll always see one right after adding it, though a manual collapse doesn't
-persist across further edits to the step list.
-
-- Select a step (or one of its existing conditions) and click **Add Image
-  Condition...** or **Add Pixel Condition...** to attach a new one — same
-  calibration flow as Image Match/Pixel Match above, plus a Confidence field
-  in the confirmation dialog (each condition has its own).
-- **Double-click** an existing condition to recalibrate it in place (region or
-  pixel, matching whichever type it already is) — its Confidence field starts
-  pre-filled with its current value. Double-clicking a step itself does
-  nothing; steps are still recalibrated via Image Match/Pixel Match.
-- Select a condition and click **Remove Selected** to delete just that
-  condition, leaving the step and its other conditions untouched.
-- Select a condition, type into the **Name** field, and click **Rename
-  Selected Condition** to give it a label (e.g. "Bleeding") — it's shown in
-  the list instead of the auto-generated "Pixel RGB(...)"/"Image WxH"
-  description, purely cosmetic, and survives recalibration.
-- Select a condition and click **Move Up**/**Move Down** (in Step Actions), or
-  just drag it, to reorder it within its own step. Reordering conditions is
-  cosmetic only (all of a step's conditions are still AND'd together
-  regardless of order).
-
-Copying a step (Copy/Paste, or copying a whole rotation) carries its
-conditions along with it, along with its buff check and hold/delay overrides
-if any. Conditions and buff checks with an image-match template participate
-in the same template-file portability/cleanup rules described above.
+Repeat only fires once through the step's own Conditions — they aren't
+re-checked between reps, including any "Change key hold amount" override,
+which is captured once (before the first rep) and used for all of them.
 
 ## Multi-select, drag-and-drop, and clipboard
 
@@ -251,8 +237,8 @@ list on the left) and drag-and-drop, on top of the buttons described above:
   after whichever step/condition is selected (or at the end, if nothing is).
   The clipboard isn't tied to the rotation you copied from — copy some steps,
   switch to a *different* rotation in the left-hand list, and Paste to bring
-  them over, cooldown checks and conditions included (image-match templates
-  are shared by reference, same as everywhere else in this app). Duplicating
+  them over, conditions included (image-match templates are shared by
+  reference, same as everywhere else in this app). Duplicating
   a step within the same rotation is now Copy then Paste rather than one
   click on a single "Copy Selected" button.
 - **Remove Selected** deletes every currently-selected step and/or condition
@@ -301,7 +287,7 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    a label for the steps list — it doesn't affect what gets sent, that's the Key
    field. If you need the same skill more than once in a rotation, select it and
    click **Copy** then **Paste** rather than re-entering it (and recalibrating
-   its cooldown check, if it has one) from scratch — the copy is inserted right
+   its conditions, if it has any) from scratch — the copy is inserted right
    after the original and can be tweaked independently from there (this also
    works for copying several steps at once, and for pasting into a different
    rotation entirely — see "Multi-select, drag-and-drop, and clipboard" below).
@@ -310,8 +296,9 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    as any other step) with nothing pressed, for spacing out a rotation without
    tying the wait to any particular skill. It shows up in the list as "Sleep"
    unless you give it its own Name. You can also turn any existing step into a
-   sleep by clearing its Key field and clicking Update Selected, or turn a sleep
-   back into a real step by typing a key into it.
+   sleep by clearing its Key field and selecting a different step (or clicking
+   Save Rotation) to commit the change, or turn a sleep back into a real step
+   by typing a key into it.
 
    **Add Step** with an empty Key field is different from a sleep step: it
    creates a step with no keybind *assigned yet*, shown as "(no key)" in the
@@ -323,11 +310,12 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    **Add Step**; **Add Sleep** always creates a real, deliberate pause
    regardless of what's in the Key field.
 
-   **Save Rotation** always
-   applies whatever's currently in the step form to the selected step first, as
-   if Update Selected had just been clicked — so editing a step's fields (or
-   recalibrating its cooldown check) and going straight to Save Rotation is
-   enough; Update Selected is only for applying an edit without saving yet.
+   Editing a step's fields applies automatically as soon as you select a
+   different step (or a condition, or click Save Rotation) — there's no
+   separate "apply" step. An edit that doesn't parse (e.g. a non-numeric
+   Delay) is discarded rather than blocking navigation, with a status-bar
+   note saying so; the field itself gets a red border and the exact problem
+   is named right there in the form.
 2. Click **Bind Hotkey...** and either press a keyboard key or click a mouse button
    to trigger this rotation, then **Save Rotation**. Left/middle/right click and the
    two extra side buttons (mouse 4/5) are all supported.
@@ -383,9 +371,8 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    mode, and all) as a new unsaved rotation named "*name* (copy)" — the hotkey is
    left unbound since it can't share the original's, the cancel/reset/pause keys
    (if any) are carried over as-is since sharing those is fine, and
-   template-based cooldown checks are carried over by reference (no
-   recalibration needed). Rename it, assign a hotkey, and **Save Rotation**
-   when ready.
+   template-based conditions are carried over by reference (no recalibration
+   needed). Rename it, assign a hotkey, and **Save Rotation** when ready.
 7. Rotations only fire keystrokes while the configured game process has OS focus —
    switching away pauses a running rotation; switching back resumes it automatically.
 8. **Stop Bot** stops any running rotation and disables all hotkeys (including the

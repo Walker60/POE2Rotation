@@ -21,7 +21,7 @@ from poe2bot.gui.rotation_list import RotationListMixin
 from poe2bot.gui.step_editor import StepEditorMixin
 from poe2bot.gui.drag_drop import DragDropMixin
 from poe2bot.gui.calibration import CalibrationMixin
-from poe2bot.gui.conditions import ConditionsMixin
+from poe2bot.gui.conditions import ConditionsMixin, CONDITION_ACTION_LABELS
 from poe2bot.gui.hotkeys_ui import HotkeysMixin
 from poe2bot.gui.widgets import CollapsibleSection
 from poe2bot.gui.constants import STATUS_COLORS
@@ -59,23 +59,11 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.pending_cancel_key = None        # cancel key chosen in this edit session (may be unchanged)
         self.pending_reset_key = None         # reset key chosen in this edit session (may be unchanged)
         self.pending_pause_key = None         # pause key chosen in this edit session (may be unchanged)
-        self.step_ready_match_type = "image"  # "image" or "pixel" -- which method the step being edited uses
-        self.step_ready_template = None       # cooldown-check filename pending for the step being edited
-        self.step_ready_region = None         # (left, top, width, height) absolute screen coords, or None
-        self.step_ready_search_mode = "exact"  # "exact" or "area" -- which image-match strategy the step being edited uses
-        self.step_ready_search_region = None  # (left, top, width, height) absolute screen coords, only when search_mode == "area"
-        self.step_ready_pixel_pos = None      # (x, y) absolute screen coords, for pixel-match mode
-        self.step_ready_pixel_color = None    # (r, g, b) expected "ready" color, for pixel-match mode
-        self.step_buff_check = None           # Condition for the step being edited's buff check, or None
-        # Snapshots of the form's core/ready-check/buff-check fields as of the last
-        # _on_select_step, kept independently (not one combined snapshot) so Add
-        # Step/Add Sleep can tell exactly which *section* of the form the user has
-        # touched since selecting -- e.g. changing only the Key must not also carry
-        # a stale, untouched Cooldown Check over onto what's meant to be a new step
-        # (see _discard_selected_step_edits).
+        # Snapshot of the form's core fields as of the last _on_select_step -- lets
+        # Add Step/Add Sleep tell whether the user has touched them since selecting
+        # (see _discard_selected_step_edits), and the auto-commit-on-navigate /
+        # dirty-indicator logic tell whether there's an uncommitted edit pending.
         self._selected_step_core_snapshot = None
-        self._selected_step_ready_snapshot = None
-        self._selected_step_buff_snapshot = None
         self._steps_tree_render_order = []    # editing_steps order as of the last _refresh_steps_tree,
                                                # so a manual row collapse/expand can be re-attached to the
                                                # right Step object (by identity) even after a reorder
@@ -447,56 +435,6 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             step_fields_group, textvariable=self.step_form_error_var, foreground=theme.DANGER_COLOR)
         # Not packed here -- only shown while there's an actual error, see _read_step_form.
 
-        self.step_ready_timeout_var = tk.StringVar(value="0")
-        self.step_ready_confidence_var = tk.StringVar(value="0.90")
-        self.step_ready_status_var = tk.StringVar(value="No cooldown check")
-
-        self.cooldown_section = CollapsibleSection(
-            right, title="Cooldown Check", padding=6, start_collapsed=True,
-            subtitle_var=self.step_ready_status_var,
-            on_toggle=lambda collapsed: self._on_section_toggled("cooldown", collapsed))
-        self.cooldown_section.pack(fill="x", pady=(0, 6))
-        ready_row = ttk.Frame(self.cooldown_section.body)
-        ready_row.pack(fill="x")
-        ttk.Label(ready_row, text="Timeout (ms)").pack(side="left")
-        self.step_ready_timeout_entry = ttk.Entry(ready_row, textvariable=self.step_ready_timeout_var, width=6)
-        self.step_ready_timeout_entry.pack(side="left", padx=(4, 12))
-        ttk.Label(ready_row, text="Confidence").pack(side="left")
-        self.step_ready_confidence_entry = ttk.Entry(ready_row, textvariable=self.step_ready_confidence_var, width=5)
-        self.step_ready_confidence_entry.pack(side="left", padx=(4, 12))
-        ttk.Button(ready_row, text="Image Match...", command=self._on_image_match_clicked).pack(
-            side="left", padx=(0, 4))
-        ttk.Button(ready_row, text="Pixel Match...", command=self._on_pixel_match_clicked).pack(
-            side="left", padx=(0, 4))
-        ttk.Button(ready_row, text="Clear", style=theme.DANGER_BUTTON_STYLE,
-                   command=self._clear_ready_check).pack(side="left")
-
-        self.step_buff_status_var = tk.StringVar(value="No buff check")
-        self.buff_section = CollapsibleSection(
-            right, title="Buff Check (alternate hold/delay while active)", padding=6, start_collapsed=True,
-            subtitle_var=self.step_buff_status_var,
-            on_toggle=lambda collapsed: self._on_section_toggled("buff", collapsed))
-        self.buff_section.pack(fill="x", pady=(0, 6))
-        buff_row = ttk.Frame(self.buff_section.body)
-        buff_row.pack(fill="x")
-        ttk.Button(buff_row, text="Image Match...", command=self._on_buff_image_match_clicked).pack(
-            side="left", padx=(0, 4))
-        ttk.Button(buff_row, text="Pixel Match...", command=self._on_buff_pixel_match_clicked).pack(
-            side="left", padx=(0, 4))
-        ttk.Button(buff_row, text="Clear", style=theme.DANGER_BUTTON_STYLE,
-                   command=self._clear_buff_check).pack(side="left", padx=(0, 12))
-        ttk.Label(buff_row, text="Hold (ms)").pack(side="left")
-        self.step_buff_hold_var = tk.StringVar(value="")
-        self.step_buff_hold_entry = ttk.Entry(buff_row, textvariable=self.step_buff_hold_var, width=6)
-        self.step_buff_hold_entry.pack(side="left", padx=(4, 12))
-        ttk.Label(buff_row, text="Delay (ms)").pack(side="left")
-        self.step_buff_delay_var = tk.StringVar(value="")
-        self.step_buff_delay_entry = ttk.Entry(buff_row, textvariable=self.step_buff_delay_var, width=6)
-        self.step_buff_delay_entry.pack(side="left", padx=(4, 0))
-        ttk.Label(self.buff_section.body,
-                  text="Blank Hold/Delay = keep the normal value even while the buff is active.",
-                  foreground="gray").pack(anchor="w", pady=(4, 0))
-
         self.conditions_section = CollapsibleSection(
             right, title="Conditions", padding=6, start_collapsed=True,
             on_toggle=lambda collapsed: self._on_section_toggled("conditions", collapsed))
@@ -514,22 +452,50 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Button(condition_btns, text="Paste Conditions",
                    command=self._on_paste_conditions_clicked).pack(side="left", padx=(0, 4))
         ttk.Label(condition_btns,
-                  text="(double-click a condition in the list to recalibrate it;"
+                  text="(double-click a condition in the list to recalibrate its match;"
                        " use Move Up/Move Down in Step Actions to reorder it)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         condition_name_row = ttk.Frame(self.conditions_section.body)
-        condition_name_row.pack(fill="x", pady=(4, 0))
+        condition_name_row.pack(fill="x", pady=(6, 0))
         ttk.Label(condition_name_row, text="Name:").pack(side="left")
         self.condition_name_var = tk.StringVar()
-        ttk.Entry(condition_name_row, textvariable=self.condition_name_var, width=20).pack(
-            side="left", padx=(2, 8))
-        ttk.Button(condition_name_row, text="Rename Selected Condition",
-                   command=self._on_rename_condition_clicked).pack(side="left")
+        ttk.Entry(condition_name_row, textvariable=self.condition_name_var, width=16).pack(
+            side="left", padx=(2, 12))
+        ttk.Label(condition_name_row, text="Action:").pack(side="left")
+        self.condition_action_var = tk.StringVar(value=CONDITION_ACTION_LABELS["fire"])
+        condition_action_combo = ttk.Combobox(
+            condition_name_row, textvariable=self.condition_action_var,
+            values=list(CONDITION_ACTION_LABELS.values()), state="readonly", width=22)
+        condition_action_combo.pack(side="left", padx=(2, 12))
+        condition_action_combo.bind("<<ComboboxSelected>>", self._on_condition_action_changed)
         self.condition_negate_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(condition_name_row, text="Negate (fire if NOT matched)",
-                        variable=self.condition_negate_var,
-                        command=self._on_toggle_condition_negate).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(condition_name_row, text="Negate (invert the match)",
+                        variable=self.condition_negate_var).pack(side="left")
+
+        condition_extra_row = ttk.Frame(self.conditions_section.body)
+        condition_extra_row.pack(fill="x", pady=(4, 0))
+        self.condition_timeout_frame = ttk.Frame(condition_extra_row)
+        ttk.Label(self.condition_timeout_frame, text="Wait up to (ms)").pack(side="left")
+        self.condition_timeout_var = tk.StringVar(value="0")
+        ttk.Entry(self.condition_timeout_frame, textvariable=self.condition_timeout_var, width=6).pack(
+            side="left", padx=(2, 0))
+        self.condition_hold_frame = ttk.Frame(condition_extra_row)
+        ttk.Label(self.condition_hold_frame, text="Hold override (ms)").pack(side="left")
+        self.condition_hold_var = tk.StringVar(value="")
+        ttk.Entry(self.condition_hold_frame, textvariable=self.condition_hold_var, width=6).pack(
+            side="left", padx=(2, 8))
+        ttk.Label(self.condition_hold_frame, text="Delay override (ms)").pack(side="left")
+        self.condition_delay_var = tk.StringVar(value="")
+        ttk.Entry(self.condition_hold_frame, textvariable=self.condition_delay_var, width=6).pack(
+            side="left", padx=(2, 0))
+        # Neither frame packed yet -- _refresh_condition_extra_visibility shows
+        # whichever one is relevant to the currently-selected Action.
+
+        condition_apply_row = ttk.Frame(self.conditions_section.body)
+        condition_apply_row.pack(fill="x", pady=(4, 0))
+        ttk.Button(condition_apply_row, text="Update Selected Condition",
+                   command=self._on_update_condition_clicked).pack(side="left")
 
         save_row = ttk.Frame(right)
         save_row.pack(fill="x", pady=(4, 0))
@@ -604,10 +570,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # StepEditorMixin._reset_step_core_fields), so this can't compare the
         # live form against a stale snapshot left over from a step that belongs
         # to a different rotation than the one now open.
-        if self._selected_step_ref is not None and (
-                self._core_step_form_snapshot() != self._selected_step_core_snapshot
-                or self._ready_check_form_snapshot() != self._selected_step_ready_snapshot
-                or self._buff_check_form_snapshot() != self._selected_step_buff_snapshot):
+        if (self._selected_step_ref is not None
+                and self._core_step_form_snapshot() != self._selected_step_core_snapshot):
             return True
         return (self._rotation_core_field_snapshot() != self._saved_core_snapshot
                 or self.editing_steps != self._saved_steps_snapshot)

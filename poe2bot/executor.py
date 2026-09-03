@@ -86,35 +86,23 @@ def _capture_region(region) -> Image.Image:
     return Image.frombytes("RGB", shot.size, shot.rgb)
 
 
-def _check_ready(step: Step) -> bool:
-    """True if step's calibrated 'ready' state currently matches on screen,
-    dispatching to whichever matching method (image or pixel color) this step
-    is configured to use."""
-    if step.ready_match_type == "pixel":
-        return _pixel_matches(step.ready_pixel_pos, step.ready_pixel_color, step.ready_confidence, step.key)
-    return _image_matches(step.ready_template, step.ready_region, step.ready_confidence, step.key,
-                           step.ready_search_mode, step.ready_search_region)
-
-
 def _check_condition(condition: Condition, label: str, seconds_since_fired: Optional[float] = None) -> bool:
     """True if `condition` currently matches -- for "image"/"pixel" that means
-    on screen, via the same dispatch/matching code as _check_ready, just
-    parameterized on a Condition instead of a Step (a Condition is an extra,
-    instantly-checked gate on a step; see RotationRunner._run_once). For
-    "timer" it means at least `condition.timer_seconds` have passed since the
-    owning step's own last fire -- `seconds_since_fired` is computed by the
-    caller (RotationRunner._run_once, from its own _step_last_fired tracking),
-    since this function stays a plain stateless dispatcher, same as
-    _check_ready. Only meaningful for a plain step Condition, not buff_check
-    (buff_check.match_type is restricted to "image"/"pixel" at validation
-    time, so its _check_condition call never needs this argument).
+    on screen; for "timer" it means at least `condition.timer_seconds` have
+    passed since the owning step's own last fire -- `seconds_since_fired` is
+    computed by the caller (RotationRunner, from its own _step_last_fired
+    tracking), since this function stays a plain stateless dispatcher.
 
     `condition.negate` inverts the result uniformly, applied last, regardless
-    of match_type or why the underlying check came out the way it did (e.g.
-    "fire only if this debuff icon is NOT present" is an image condition with
-    negate=True; an unconfigured negated condition still ends up firing
-    every time, since "unconfigured" itself already reads as "doesn't
-    match")."""
+    of match_type or action or why the underlying check came out the way it
+    did (e.g. "block while this debuff icon is NOT present" is an image
+    condition with action="block", negate=True; an unconfigured negated
+    condition still ends up matching every time, since "unconfigured" itself
+    already reads as "doesn't match"). What a match *does* -- gate firing,
+    veto firing, or override hold/delay -- is entirely up to the caller,
+    based on condition.action (see _fire_gate_passes / _hold_override below);
+    this function only ever answers "does it match right now," never "what
+    should happen.\""""
     if condition.match_type == "timer":
         if condition.timer_seconds is None or condition.timer_seconds <= 0:
             matched = False  # unconfigured -- treated as "doesn't match", same as a missing template/pixel below
@@ -130,14 +118,40 @@ def _check_condition(condition: Condition, label: str, seconds_since_fired: Opti
     return (not matched) if condition.negate else matched
 
 
-def _check_buff_active(step: Step) -> bool:
-    """True if step's calibrated buff_check currently matches on screen --
-    reuses _check_condition since a buff check is shaped exactly like a
-    Condition, but its result picks an alternate hold/delay in _fire_step/
-    _sleep_delay instead of gating whether the step fires at all."""
-    if step.buff_check is None or not step.buff_check.has_check():
-        return False
-    return _check_condition(step.buff_check, step.key or "buff")
+def _fire_gate_passes(step: Step, seconds_since_fired: Optional[float]) -> bool:
+    """True if step is currently allowed to fire: every "fire" Condition on
+    it currently matches AND no "block" Condition does -- the AND+veto
+    combination every step's conditions use together. "hold" conditions never
+    affect this (see _hold_override). Short-circuits on the first condition
+    that already decides the answer, so a later expensive image/pixel check
+    is skipped once the outcome is already known."""
+    for condition in step.conditions:
+        if condition.action == "block":
+            if _check_condition(condition, step.key or "step", seconds_since_fired):
+                return False
+        elif condition.action == "fire":
+            if not _check_condition(condition, step.key or "step", seconds_since_fired):
+                return False
+    return True
+
+
+def _max_fire_timeout_ms(step: Step) -> int:
+    """The longest timeout_ms configured on any of step's "fire" conditions
+    (0 if none have one) -- this is what RotationRunner._wait_for_fire_gate
+    polls up to before giving up on a pass; a plain instant check (today's
+    ordinary Condition behavior) is exactly the timeout_ms == 0 case."""
+    return max((c.timeout_ms for c in step.conditions if c.action == "fire" and c.timeout_ms > 0), default=0)
+
+
+def _hold_override(step: Step, seconds_since_fired: Optional[float]) -> Optional[Condition]:
+    """The first currently-matching "hold" Condition on `step`, or None if
+    none match (or none are configured) -- its hold_ms/delay_ms (whichever
+    is set) replaces the step's own for this fire, in _fire_step/_sleep_delay.
+    First-in-list wins if more than one matches at once."""
+    for condition in step.conditions:
+        if condition.action == "hold" and _check_condition(condition, step.key or "step", seconds_since_fired):
+            return condition
+    return None
 
 
 def _image_matches(template_filename, region, confidence: float, label: str,
@@ -508,45 +522,43 @@ class RotationRunner:
                 self._notify_activity(f"Step {i + 1}: no key assigned, skipping")
                 continue
             if not step.key:
-                # Sleep step: no key to check readiness for or fire, just pause for
-                # delay_ms (+/- jitter_ms) like any other step's post-fire wait,
-                # repeat_count times if set. Conditions still gate it exactly like a
-                # normal step's do (checked once, no polling) -- a failing condition
-                # skips the wait entirely rather than pausing anyway.
-                last_fired = self._step_last_fired.get(id(step))
-                seconds_since_fired = (time.perf_counter() - last_fired) if last_fired is not None else None
-                if not all(_check_condition(c, step.key or "sleep", seconds_since_fired) for c in step.conditions):
+                # Sleep step: no key to fire, just pause for delay_ms (+/- jitter_ms)
+                # like any other step's post-fire wait, repeat_count times if set.
+                # Conditions still gate it exactly like a normal step's do -- always
+                # an instant check here, never polled (a sleep step has nothing to
+                # wait to become "ready", only to gate on).
+                if not _fire_gate_passes(step, self._seconds_since_fired(step)):
                     if not self._stop_event.is_set():
                         log.info(f"[{self.rotation.name}] sleep step's conditions not met; skipping")
                         self._notify_activity(f"Step {i + 1}: sleep conditions not met, skipping")
                     continue
+                hold_condition = _hold_override(step, self._seconds_since_fired(step))
                 log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms"
                           + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
                 self._notify_activity(
                     f"Step {i + 1}: sleeping {step.delay_ms}ms"
                     + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
-                if not self._fire_repeats(step, _check_buff_active(step)):
+                if not self._fire_repeats(step, hold_condition):
                     return False
                 continue
-            ready = self._wait_until_ready(step)
-            last_fired = self._step_last_fired.get(id(step))
-            seconds_since_fired = (time.perf_counter() - last_fired) if last_fired is not None else None
-            if ready and all(_check_condition(c, step.key, seconds_since_fired) for c in step.conditions):
-                buff_active = _check_buff_active(step)
+            gate_passed = self._wait_for_fire_gate(step)
+            if gate_passed:
+                hold_condition = _hold_override(step, self._seconds_since_fired(step))
                 self._notify_activity(
-                    f"Step {i + 1} ('{step.key}'): casting" + (" (buff active)" if buff_active else ""))
+                    f"Step {i + 1} ('{step.key}'): casting" + (" (hold override)" if hold_condition else ""))
                 # Only pay the post-cast delay/jitter after an actual fire -- there's no
                 # cast animation to wait out for a step that was skipped, so a skipped
                 # cast falls straight through to the next step instead of also eating
-                # this step's full delay on top of the ready-check/condition-check time.
-                if not self._fire_repeats(step, buff_active):
+                # this step's full delay on top of the condition-check time.
+                if not self._fire_repeats(step, hold_condition):
                     return False
             elif not self._stop_event.is_set():
-                if not ready:
-                    log.warning(f"[{self.rotation.name}] '{step.key}' not ready after "
-                                f"{step.ready_timeout_ms}ms; skipping this cast")
+                timeout_ms = _max_fire_timeout_ms(step)
+                if timeout_ms > 0:
+                    log.warning(f"[{self.rotation.name}] '{step.key}' conditions not met after "
+                                f"{timeout_ms}ms; skipping this cast")
                     self._notify_activity(
-                        f"Step {i + 1} ('{step.key}'): not ready after {step.ready_timeout_ms}ms, skipping")
+                        f"Step {i + 1} ('{step.key}'): conditions not met after {timeout_ms}ms, skipping")
                 else:
                     log.info(f"[{self.rotation.name}] '{step.key}' conditions not met; skipping this cast")
                     self._notify_activity(f"Step {i + 1} ('{step.key}'): conditions not met, skipping")
@@ -566,24 +578,34 @@ class RotationRunner:
             self._notify_activity("Game focus regained, resuming")
         return True
 
-    def _wait_until_ready(self, step: Step) -> bool:
-        """True immediately if step has no cooldown check configured (no behavior
-        change). Otherwise polls _check_ready until it matches or ready_timeout_ms
-        elapses, sleeping cooperatively (stop/panic returns immediately) between
-        polls -- same cancellation idiom as _wait_for_focus_or_stop/_sleep_delay."""
-        if not step.has_ready_check():
-            return True
-        deadline = time.perf_counter() + step.ready_timeout_ms / 1000
-        while not _check_ready(step):
+    def _seconds_since_fired(self, step: Step) -> Optional[float]:
+        last_fired = self._step_last_fired.get(id(step))
+        return (time.perf_counter() - last_fired) if last_fired is not None else None
+
+    def _wait_for_fire_gate(self, step: Step) -> bool:
+        """True once step's fire/block conditions allow it to fire (or
+        immediately if it has none). A single instant check if none of its
+        "fire" conditions have a timeout_ms configured -- exactly a plain
+        Condition's traditional behavior. Otherwise polls cooperatively
+        (stop/panic returns immediately) up to the longest such timeout --
+        this is what used to be a step's own separate, always-polling
+        Cooldown Check, generalized to any "fire" condition."""
+        deadline_ms = _max_fire_timeout_ms(step)
+        if deadline_ms <= 0:
+            return _fire_gate_passes(step, self._seconds_since_fired(step))
+        deadline = time.perf_counter() + deadline_ms / 1000
+        while not _fire_gate_passes(step, self._seconds_since_fired(step)):
             if time.perf_counter() >= deadline:
                 return False
             if self._stop_event.wait(timeout=0.05):
                 return False
         return True
 
-    def _fire_step(self, step: Step, buff_active: bool = False, hold_override: Optional[int] = None):
+    def _fire_step(self, step: Step, hold_condition: Optional[Condition] = None,
+                    hold_override: Optional[int] = None):
+        condition_hold = hold_condition.hold_ms if (hold_condition is not None and hold_condition.hold_ms is not None) else None
         base_hold = hold_override if hold_override is not None else (
-            step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms)
+            condition_hold if condition_hold is not None else step.hold_ms)
         is_controller = controller.is_controller_key(step.key)
         is_mouse = hotkeys.is_mouse_hotkey(step.key)
         button = controller.controller_button_of(step.key) if is_controller else None
@@ -602,7 +624,7 @@ class RotationRunner:
                 hold += random.uniform(-step.hold_jitter_ms, step.hold_jitter_ms)
             hold = max(0, hold)
             log.debug(f"[{self.rotation.name}] key={step.key} hold_ms={hold:.0f}"
-                      + (" (buff)" if buff_active and step.buff_hold_ms is not None else ""))
+                      + (" (hold override)" if condition_hold is not None else ""))
             try:
                 if is_controller:
                     controller.press(button)
@@ -620,7 +642,7 @@ class RotationRunner:
                     keyboard.release(step.key)
             self._notify_activity(
                 f"Held '{step.key}' {hold:.0f}ms"
-                + (" (buff)" if buff_active and step.buff_hold_ms is not None else ""))
+                + (" (hold override)" if condition_hold is not None else ""))
         else:
             # is_controller is always False here -- forced into the branch above otherwise.
             log.debug(f"[{self.rotation.name}] key={step.key} (tap)")
@@ -630,22 +652,25 @@ class RotationRunner:
                 keyboard.send(step.key)
             self._notify_activity(f"Tapped '{step.key}'")
 
-    def _sleep_delay(self, step: Step, buff_active: bool = False) -> bool:
-        delay = step.buff_delay_ms if (buff_active and step.buff_delay_ms is not None) else step.delay_ms
+    def _sleep_delay(self, step: Step, hold_condition: Optional[Condition] = None) -> bool:
+        condition_delay = hold_condition.delay_ms if (hold_condition is not None and hold_condition.delay_ms is not None) else None
+        delay = condition_delay if condition_delay is not None else step.delay_ms
         if step.jitter_ms:
             delay += random.uniform(-step.jitter_ms, step.jitter_ms)
         return not self._stop_event.wait(timeout=max(0, delay) / 1000)
 
-    def _fire_repeats(self, step: Step, buff_active: bool) -> bool:
+    def _fire_repeats(self, step: Step, hold_condition: Optional[Condition]) -> bool:
         """Fires `step` step.repeat_count times, then applies the post-fire
         delay -- either as repeat_count independent press/hold/release +
         delay cycles, or, when repeat_combine_hold is set and there's an
         actual hold to combine, as one continuous hold for the combined
         duration followed by a single delay (see README for the worked
-        example). The step's own cooldown check and Conditions are only
-        ever evaluated once, by the caller, before this runs -- reps never
-        re-check either. Returns False the moment stop_event fires, mirroring
-        _sleep_delay's contract, so _run_once can bail out immediately."""
+        example). The step's own fire/block conditions are only ever
+        evaluated once, by the caller, before this runs -- reps never
+        re-check either (a "hold" condition's match is likewise captured
+        once, in `hold_condition`, before this is called). Returns False the
+        moment stop_event fires, mirroring _sleep_delay's contract, so
+        _run_once can bail out immediately."""
         if self._stop_event.is_set():
             return False
         # Recorded here, not at _run_once's call sites, so a pause() landing in
@@ -655,18 +680,19 @@ class RotationRunner:
         # bails out before this line for exactly that race.
         self._step_last_fired[id(step)] = time.perf_counter()
         repeat = max(1, step.repeat_count)
-        base_hold = step.buff_hold_ms if (buff_active and step.buff_hold_ms is not None) else step.hold_ms
+        condition_hold = hold_condition.hold_ms if (hold_condition is not None and hold_condition.hold_ms is not None) else None
+        base_hold = condition_hold if condition_hold is not None else step.hold_ms
         if step.key and step.repeat_combine_hold and base_hold > 0 and repeat > 1:
             self._notify_activity(
                 f"Combining {repeat} reps into one {base_hold * repeat}ms hold on '{step.key}'")
-            self._fire_step(step, buff_active, hold_override=base_hold * repeat)
-            return self._sleep_delay(step, buff_active)
+            self._fire_step(step, hold_condition, hold_override=base_hold * repeat)
+            return self._sleep_delay(step, hold_condition)
         for _ in range(repeat):
             if self._stop_event.is_set():
                 return False
             if step.key:
-                self._fire_step(step, buff_active)
-            if not self._sleep_delay(step, buff_active):
+                self._fire_step(step, hold_condition)
+            if not self._sleep_delay(step, hold_condition):
                 return False
         return True
 

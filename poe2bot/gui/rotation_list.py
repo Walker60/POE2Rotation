@@ -239,8 +239,6 @@ class RotationListMixin:
         self.pause_mode_var.set(rotation.pause_mode)
         self.pause_duration_var.set(str(rotation.pause_duration_ms))
         self._reset_step_core_fields()
-        self._reset_ready_form()
-        self._reset_buff_form()
         self._refresh_steps_tree()
         self._capture_saved_snapshot()
 
@@ -262,8 +260,6 @@ class RotationListMixin:
         self.pause_mode_var.set("duration")
         self.pause_duration_var.set("1000")
         self._reset_step_core_fields()
-        self._reset_ready_form()
-        self._reset_buff_form()
         self._refresh_steps_tree()
         self.rotation_tree.selection_remove(*self.rotation_tree.selection())
         self._capture_saved_snapshot()
