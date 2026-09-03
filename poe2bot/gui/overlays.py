@@ -12,7 +12,7 @@ class RegionCaptureOverlay(tk.Toplevel):
     monitor, aren't supported by this overlay (known limitation).
     """
 
-    def __init__(self, master, on_done):
+    def __init__(self, master, on_done, hint_text=None):
         super().__init__(master)
         self.on_done = on_done
         self._start = None
@@ -26,6 +26,22 @@ class RegionCaptureOverlay(tk.Toplevel):
 
         self.canvas = tk.Canvas(self, cursor="cross", bg="gray", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
+        if hint_text:
+            # A persistent on-canvas reminder of what to do, so the one-time
+            # instructional popup (shown at most once per app session -- see
+            # CalibrationMixin) doesn't need repeating before every capture.
+            # A dark backing rectangle keeps light text legible over whatever
+            # is actually behind this semi-transparent overlay.
+            cx = self.winfo_screenwidth() // 2
+            text_id = self.canvas.create_text(
+                cx, 24, text=hint_text, fill="white", font=("Segoe UI", 12, "bold"))
+            bbox = self.canvas.bbox(text_id)
+            if bbox:
+                pad = 8
+                self.canvas.create_rectangle(
+                    bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
+                    fill="black", outline="", stipple="gray50")
+                self.canvas.tag_raise(text_id)
 
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
@@ -82,7 +98,7 @@ class PointCaptureOverlay(tk.Toplevel):
     as RegionCaptureOverlay.
     """
 
-    def __init__(self, master, on_done):
+    def __init__(self, master, on_done, hint_text=None):
         super().__init__(master)
         self.on_done = on_done
 
@@ -94,6 +110,18 @@ class PointCaptureOverlay(tk.Toplevel):
 
         self.canvas = tk.Canvas(self, cursor="cross", bg="gray", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
+        if hint_text:
+            # Same persistent on-canvas reminder as RegionCaptureOverlay -- see there.
+            cx = self.winfo_screenwidth() // 2
+            text_id = self.canvas.create_text(
+                cx, 24, text=hint_text, fill="white", font=("Segoe UI", 12, "bold"))
+            bbox = self.canvas.bbox(text_id)
+            if bbox:
+                pad = 8
+                self.canvas.create_rectangle(
+                    bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
+                    fill="black", outline="", stipple="gray50")
+                self.canvas.tag_raise(text_id)
 
         self.canvas.bind("<ButtonRelease-1>", self._on_click)
         self.bind("<Escape>", self._on_cancel)

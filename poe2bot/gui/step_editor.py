@@ -2,9 +2,32 @@ import copy
 import threading
 
 import tkinter as tk
-from tkinter import messagebox
 
+from poe2bot.gui import dialogs as messagebox
 from poe2bot.models import Step, replace_step_fields
+
+# (StringVar attr, Entry attr, parser, allow_blank, Step field name, display label) for
+# every numeric field on the Selected Step form (including Cooldown/Buff Check's own
+# numeric fields) -- driving both _read_step_form's per-field validation and the section
+# auto-expand-on-error in _read_step_form below.
+_NUMERIC_FIELDS = (
+    ("step_delay_var", "step_delay_entry", int, False, "delay_ms", "Delay"),
+    ("step_jitter_var", "step_jitter_entry", int, False, "jitter_ms", "Jitter"),
+    ("step_hold_var", "step_hold_entry", int, False, "hold_ms", "Hold"),
+    ("step_hold_jitter_var", "step_hold_jitter_entry", int, False, "hold_jitter_ms", "Hold Jitter"),
+    ("step_repeat_var", "step_repeat_entry", int, False, "repeat_count", "Repeat"),
+    ("step_ready_timeout_var", "step_ready_timeout_entry", int, False, "ready_timeout_ms", "Timeout"),
+    ("step_ready_confidence_var", "step_ready_confidence_entry", float, False, "ready_confidence", "Confidence"),
+    ("step_buff_hold_var", "step_buff_hold_entry", int, True, "buff_hold_ms", "Buff Hold"),
+    ("step_buff_delay_var", "step_buff_delay_entry", int, True, "buff_delay_ms", "Buff Delay"),
+)
+# Which CollapsibleSection a field lives in, for auto-expanding it when that field is
+# the one that failed to parse -- fields absent here live in the always-visible
+# Selected Step group, which needs no expanding.
+_SECTION_BY_FIELD = {
+    "ready_timeout_ms": "cooldown", "ready_confidence": "cooldown",
+    "buff_hold_ms": "buff", "buff_delay_ms": "buff",
+}
 
 
 class StepEditorMixin:
@@ -67,6 +90,25 @@ class StepEditorMixin:
         self.step_repeat_combine_hold_var.set(False)
         self.condition_name_var.set("")
         self.condition_negate_var.set(False)
+        self.conditions_section.set_collapsed(True)
+        self._clear_form_errors()
+        # Blanking the form always means nothing is meaningfully "selected" for
+        # auto-commit/dirty-check purposes, even for call sites (_new_rotation,
+        # _load_rotation_into_form) that never touch self.tree's own selection
+        # and so would otherwise leave this pointing at a step from a rotation
+        # that isn't even open anymore.
+        self._selected_step_ref = None
+
+    def _clear_form_errors(self):
+        """Resets every numeric Entry's invalid-state highlight and hides the
+        shared error label -- called whenever the form is about to show a
+        different step (or a blank one), so a discarded error left over from
+        whichever step was previously loaded can never visually leak onto
+        this one."""
+        for _var_attr, entry_attr, _parser, _allow_blank, _key, _label in _NUMERIC_FIELDS:
+            getattr(self, entry_attr).state(["!invalid"])
+        self.step_form_error_var.set("")
+        self.step_form_error_label.pack_forget()
 
     def _reset_ready_form(self):
         self.step_ready_match_type = "image"
@@ -79,6 +121,7 @@ class StepEditorMixin:
         self.step_ready_timeout_var.set("0")
         self.step_ready_confidence_var.set("0.90")
         self._refresh_ready_status()
+        self.cooldown_section.set_collapsed(True)
 
     def _refresh_ready_status(self):
         if self.step_ready_match_type == "pixel" and self.step_ready_pixel_color:
@@ -99,6 +142,7 @@ class StepEditorMixin:
         self.step_buff_hold_var.set("")
         self.step_buff_delay_var.set("")
         self._refresh_buff_status()
+        self.buff_section.set_collapsed(True)
 
     def _refresh_buff_status(self):
         self.step_buff_status_var.set(
@@ -126,13 +170,7 @@ class StepEditorMixin:
                 (previously_open if self.tree.item(iid, "open") else previously_closed).add(id(step))
         self.tree.delete(*self.tree.get_children())
         for i, step in enumerate(self.editing_steps):
-            if step.key is None:
-                key_col, fallback_label = "(no key)", "No Key"
-            elif step.key == "":
-                key_col, fallback_label = "(sleep)", "Sleep"
-            else:
-                key_col, fallback_label = step.key, step.key
-            label = step.name or fallback_label
+            label, key_col = self._step_row_text_and_key(step)
             step_iid = f"step-{i}"
             if id(step) in previously_closed:
                 is_open = False
@@ -150,6 +188,36 @@ class StepEditorMixin:
                                   text=self._condition_summary(condition),
                                   values=("", "", "", "", "", ""))
         self._steps_tree_render_order = list(self.editing_steps)
+
+    @staticmethod
+    def _step_row_text_and_key(step) -> tuple:
+        """(display label, Key column text) for one step's tree row --
+        shared by _refresh_steps_tree (building every row) and
+        _update_step_row (patching one row in place)."""
+        if step.key is None:
+            key_col, fallback_label = "(no key)", "No Key"
+        elif step.key == "":
+            key_col, fallback_label = "(sleep)", "Sleep"
+        else:
+            key_col, fallback_label = step.key, step.key
+        return step.name or fallback_label, key_col
+
+    def _update_step_row(self, step_idx: int):
+        """Patches one step's row in place (text + column values only)
+        instead of the full delete-and-reinsert _refresh_steps_tree does --
+        used after an auto-committed edit (_commit_previous_step_edits_if_changed)
+        specifically because that full rebuild does not preserve the tree's
+        selection, which would otherwise silently swallow whatever row the
+        user was actually navigating to when the commit fired. Doesn't touch
+        this step's condition child rows -- nothing about a numeric-field
+        edit ever changes those."""
+        step = self.editing_steps[step_idx]
+        iid = f"step-{step_idx}"
+        if not self.tree.exists(iid):
+            return
+        label, key_col = self._step_row_text_and_key(step)
+        self.tree.item(iid, text=label, values=(
+            key_col, step.delay_ms, step.jitter_ms, step.hold_ms, step.hold_jitter_ms, step.repeat_count))
 
     @staticmethod
     def _condition_summary(condition) -> str:
@@ -180,25 +248,6 @@ class StepEditorMixin:
             return int(parts[1]), int(parts[3])
         return None
 
-    def _selected_step_index(self):
-        """For actions that only make sense on exactly one whole step
-        (Update Selected). Returns None (with an info box explaining why) if
-        nothing, a condition, or more than one row is selected -- there's no
-        bulk-field-edit feature, so silently picking one of several selected
-        steps would be more confusing than asking the user to select just one."""
-        selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo("No step selected", "Select a step in the list first.")
-            return None
-        if len(selection) > 1:
-            messagebox.showinfo("Select one step", "Select exactly one step for this action.")
-            return None
-        parsed = self._parse_tree_iid(selection[0])
-        if parsed is None or parsed[1] is not None:
-            messagebox.showinfo("Select a step", "Select a step (not a condition) for this action.")
-            return None
-        return parsed[0]
-
     def _selected_owning_step_index(self):
         """For actions that attach to a step regardless of whether the step
         itself or one of its conditions is selected (Add Condition)."""
@@ -215,13 +264,17 @@ class StepEditorMixin:
         return parsed[0]
 
     def _on_select_step(self, _event):
+        if not self._suppress_commit_on_select:
+            self._commit_previous_step_edits_if_changed()
         selection = self.tree.selection()
         if not selection:
+            self._selected_step_ref = None
             return
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return
         step = self.editing_steps[parsed[0]]
+        self._clear_form_errors()
         self.condition_name_var.set(step.conditions[parsed[1]].name if parsed[1] is not None else "")
         self.condition_negate_var.set(step.conditions[parsed[1]].negate if parsed[1] is not None else False)
         self.step_name_var.set(step.name)
@@ -246,9 +299,63 @@ class StepEditorMixin:
         self.step_buff_hold_var.set("" if step.buff_hold_ms is None else str(step.buff_hold_ms))
         self.step_buff_delay_var.set("" if step.buff_delay_ms is None else str(step.buff_delay_ms))
         self._refresh_buff_status()
+        self.cooldown_section.set_collapsed(
+            self._section_collapse_state(step, "cooldown", not step.has_ready_check()))
+        self.buff_section.set_collapsed(
+            self._section_collapse_state(step, "buff", step.buff_check is None))
+        self.conditions_section.set_collapsed(
+            self._section_collapse_state(step, "conditions", not step.conditions))
+        self._selected_step_ref = step
         self._selected_step_core_snapshot = self._core_step_form_snapshot()
         self._selected_step_ready_snapshot = self._ready_check_form_snapshot()
         self._selected_step_buff_snapshot = self._buff_check_form_snapshot()
+
+    def _section_collapse_state(self, step, key: str, default_collapsed: bool) -> bool:
+        return self._section_collapse_overrides.get(id(step), {}).get(key, default_collapsed)
+
+    def _on_section_toggled(self, key: str, collapsed: bool):
+        """The on_toggle callback wired to each CollapsibleSection -- fires
+        only on a user click, so it never overrides the smart per-step
+        default in _on_select_step above except when the user actually
+        chose to override it for this specific step."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None:
+            return
+        step = self.editing_steps[parsed[0]]
+        self._section_collapse_overrides.setdefault(id(step), {})[key] = collapsed
+
+    def _commit_previous_step_edits_if_changed(self):
+        """Writes the Selected Step form back onto whichever step it was
+        loaded from (by identity, not index -- stable across reorders), if
+        anything in it actually changed since _on_select_step last populated
+        it. Called right before _on_select_step loads a *different* row, so
+        navigating away from a step auto-saves an in-progress edit -- there
+        is no separate "Update Selected" step anymore. An edit that doesn't
+        parse is silently discarded rather than blocked, since this fires at
+        a navigation point (the user has already moved on), not a keystroke,
+        where a popup would be jarring."""
+        step = self._selected_step_ref
+        if step is None or not any(s is step for s in self.editing_steps):
+            return
+        if (self._core_step_form_snapshot() == self._selected_step_core_snapshot
+                and self._ready_check_form_snapshot() == self._selected_step_ready_snapshot
+                and self._buff_check_form_snapshot() == self._selected_step_buff_snapshot):
+            return
+        parsed = self._read_step_form(conditions=step.conditions, is_new_step=False,
+                                       original_key=step.key, alt_key=step.alt_key)
+        if parsed is None:
+            self.status_var.set(f"Discarded an unsaved, invalid edit to '{step.name or step.key or 'a step'}'.")
+            return
+        replace_step_fields(step, parsed)
+        # _update_step_row, NOT _refresh_steps_tree -- this runs from _on_select_step,
+        # partway through processing a selection change (the row the user is
+        # navigating TO). _refresh_steps_tree's full delete-and-reinsert clears the
+        # tree's selection as a side effect, which would silently swallow that
+        # navigation; patching this one row's displayed values in place does not.
+        self._update_step_row(next(i for i, s in enumerate(self.editing_steps) if s is step))
 
     def _core_step_form_snapshot(self) -> tuple:
         """A cheap, side-effect-free snapshot of the Name/Key/Delay/.../Repeat
@@ -277,35 +384,57 @@ class StepEditorMixin:
         return self.step_buff_check, self.step_buff_hold_var.get(), self.step_buff_delay_var.get()
 
     def _read_step_form(self, conditions=None, is_new_step=True, original_key=None, alt_key=None):
-        """Builds a Step from the form's current contents. `original_key`
-        (the key the step being *replaced* already had; ignored when
-        is_new_step) resolves what a blank Key field means, since the Entry
-        shows the same blank text for both "not yet assigned" (None) and "a
-        deliberate sleep step" (""). A brand new step (is_new_step, e.g. Add
-        Step) left blank means "not yet assigned" (None). An *existing* step
-        left blank means: still unassigned if it already was (original_key is
-        None) -- editing other fields shouldn't accidentally turn an
-        unassigned step into a sleep step -- otherwise a deliberate sleep
-        step (""), preserving the documented "clear Key + Update Selected"
-        conversion for a step that had a real key before."""
-        try:
-            delay = int(self.step_delay_var.get())
-            jitter = int(self.step_jitter_var.get())
-            hold = int(self.step_hold_var.get())
-            hold_jitter = int(self.step_hold_jitter_var.get())
-            timeout = int(self.step_ready_timeout_var.get())
-            confidence = float(self.step_ready_confidence_var.get())
-            buff_hold_text = self.step_buff_hold_var.get().strip()
-            buff_delay_text = self.step_buff_delay_var.get().strip()
-            buff_hold = int(buff_hold_text) if buff_hold_text else None
-            buff_delay = int(buff_delay_text) if buff_delay_text else None
-            repeat = int(self.step_repeat_var.get())
-        except ValueError:
-            messagebox.showerror(
-                "Invalid step",
-                "Delay/jitter/hold/hold jitter/timeout/buff hold/buff delay/repeat must be whole "
-                "numbers (buff hold/delay may be left blank), and confidence must be a decimal (e.g. 0.9).")
+        """Builds a Step from the form's current contents, or None if any
+        numeric field fails to parse. Each field is validated independently
+        (rather than one try/except around all of them), so a bad field gets
+        its own red border via ttk's native "invalid" Entry state, and the
+        shared error label names exactly which field(s) are wrong instead of
+        a single generic message covering every possible field. A bad field
+        that lives inside a currently-collapsed Cooldown/Buff Check section
+        also expands that section, so the red border is actually visible.
+
+        `original_key` (the key the step being *replaced* already had;
+        ignored when is_new_step) resolves what a blank Key field means,
+        since the Entry shows the same blank text for both "not yet
+        assigned" (None) and "a deliberate sleep step" (""). A brand new
+        step (is_new_step, e.g. Add Step) left blank means "not yet
+        assigned" (None). An *existing* step left blank means: still
+        unassigned if it already was (original_key is None) -- editing other
+        fields shouldn't accidentally turn an unassigned step into a sleep
+        step -- otherwise a deliberate sleep step (""), preserving the
+        documented "clear Key, navigate away" conversion for a step that had
+        a real key before."""
+        values = {}
+        bad_labels = []
+        bad_sections = set()
+        for var_attr, entry_attr, parser, allow_blank, key, label in _NUMERIC_FIELDS:
+            entry = getattr(self, entry_attr)
+            text = getattr(self, var_attr).get().strip()
+            if not text and allow_blank:
+                values[key] = None
+                entry.state(["!invalid"])
+                continue
+            try:
+                values[key] = parser(text)
+                entry.state(["!invalid"])
+            except ValueError:
+                entry.state(["invalid"])
+                bad_labels.append(label)
+                if key in _SECTION_BY_FIELD:
+                    bad_sections.add(_SECTION_BY_FIELD[key])
+        if bad_labels:
+            self.step_form_error_var.set(
+                f"Invalid: {', '.join(bad_labels)} -- Confidence needs a decimal (e.g. 0.9), "
+                "the rest need whole numbers.")
+            self.step_form_error_label.pack(anchor="w", pady=(4, 0))
+            if "cooldown" in bad_sections:
+                self.cooldown_section.set_collapsed(False)
+            if "buff" in bad_sections:
+                self.buff_section.set_collapsed(False)
             return None
+        self.step_form_error_var.set("")
+        self.step_form_error_label.pack_forget()
+
         key_text = self.step_key_var.get().strip()
         if key_text:
             key = key_text
@@ -317,10 +446,10 @@ class StepEditorMixin:
             key=key,
             alt_key=alt_key,
             name=self.step_name_var.get().strip(),
-            delay_ms=delay,
-            jitter_ms=jitter,
-            hold_ms=hold,
-            hold_jitter_ms=hold_jitter,
+            delay_ms=values["delay_ms"],
+            jitter_ms=values["jitter_ms"],
+            hold_ms=values["hold_ms"],
+            hold_jitter_ms=values["hold_jitter_ms"],
             ready_match_type=self.step_ready_match_type,
             ready_template=self.step_ready_template,
             ready_region=self.step_ready_region,
@@ -328,17 +457,17 @@ class StepEditorMixin:
             ready_search_region=self.step_ready_search_region,
             ready_pixel_pos=self.step_ready_pixel_pos,
             ready_pixel_color=self.step_ready_pixel_color,
-            ready_confidence=confidence,
-            ready_timeout_ms=timeout,
+            ready_confidence=values["ready_confidence"],
+            ready_timeout_ms=values["ready_timeout_ms"],
             buff_check=self.step_buff_check,
-            buff_hold_ms=buff_hold,
-            buff_delay_ms=buff_delay,
-            repeat_count=repeat,
+            buff_hold_ms=values["buff_hold_ms"],
+            buff_delay_ms=values["buff_delay_ms"],
+            repeat_count=values["repeat_count"],
             repeat_combine_hold=self.step_repeat_combine_hold_var.get(),
         )
         if conditions is not None:
-            # The form has no fields of its own for conditions -- Update Selected
-            # must carry over the step's existing conditions explicitly, or they'd
+            # The form has no fields of its own for conditions -- an existing
+            # step's own conditions must be carried over explicitly, or they'd
             # silently be wiped out by this fresh Step (whose conditions default
             # to an empty list).
             step.conditions = conditions
@@ -361,7 +490,16 @@ class StepEditorMixin:
         similarly-timed steps still works."""
         if not self.tree.selection():
             return
-        self.tree.selection_remove(*self.tree.selection())
+        # Clearing the selection fires <<TreeviewSelect>> like any other selection
+        # change, which would otherwise make _on_select_step auto-commit the form
+        # onto the step being navigated away from -- exactly what this method's own
+        # docstring says must NOT happen (values the user touched are meant to carry
+        # forward into a new step, not get written back onto the old one).
+        self._suppress_commit_on_select = True
+        try:
+            self.tree.selection_remove(*self.tree.selection())
+        finally:
+            self._suppress_commit_on_select = False
         if self._core_step_form_snapshot() == self._selected_step_core_snapshot:
             self._reset_step_core_fields()
         if self._ready_check_form_snapshot() == self._selected_step_ready_snapshot:
@@ -402,11 +540,19 @@ class StepEditorMixin:
         in-memory clipboard that lives on the App itself, so it survives
         switching to a different rotation -- that's what makes pasting into a
         different rotation than the one you copied from work."""
+        # Captured before _apply_pending_step_edits, which -- if it actually applies
+        # an edit -- calls _refresh_steps_tree and clears the tree's selection (see
+        # _on_paste_clicked below for the same reason); editing_steps' order/indices
+        # are unaffected by the apply, so reading them now and using them after is safe.
         selection = self.tree.selection()
         step_indices = sorted({p[0] for p in (self._parse_tree_iid(iid) for iid in selection)
                                 if p is not None and p[1] is None})
         if not step_indices:
             messagebox.showinfo("No step selected", "Select at least one step to copy.")
+            return
+        # Applied here (like Paste/Move/Save/drag-drop already do) so Copy can't
+        # silently copy stale, pre-edit data if the form has an untouched change.
+        if not self._apply_pending_step_edits():
             return
         self._step_clipboard = copy.deepcopy([self.editing_steps[i] for i in step_indices])
 
@@ -427,23 +573,6 @@ class StepEditorMixin:
         self.editing_steps[insert_at:insert_at] = pasted
         self._refresh_steps_tree()
         self.tree.selection_set(*(f"step-{insert_at + offset}" for offset in range(len(pasted))))
-
-    def _update_selected_step(self):
-        i = self._selected_step_index()
-        if i is None:
-            return
-        step = self._read_step_form(
-            conditions=self.editing_steps[i].conditions,
-            is_new_step=False, original_key=self.editing_steps[i].key,
-            alt_key=self.editing_steps[i].alt_key)
-        if step is None:
-            return
-        # In place, not editing_steps[i] = step -- preserves this Step object's
-        # identity so a manually collapsed/expanded row (tracked by id() in
-        # _refresh_steps_tree) doesn't spring back to its default state on
-        # every Update Selected, even one with no actual field changes.
-        replace_step_fields(self.editing_steps[i], step)
-        self._refresh_steps_tree()
 
     def _remove_selected_step(self):
         selection = self.tree.selection()

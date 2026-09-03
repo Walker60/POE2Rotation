@@ -1,7 +1,7 @@
 import threading
-from tkinter import messagebox
 
 from poe2bot import storage
+from poe2bot.gui import dialogs as messagebox
 from poe2bot.hotkeys import display_name
 
 
@@ -74,7 +74,7 @@ class HotkeysMixin:
         if not messagebox.askyesno(
                 "Unbind all rotations",
                 f"Remove the hotkey binding from all {len(bound)} bound rotation(s)? "
-                "Each will be saved immediately."):
+                "Each will be saved immediately.", danger=True):
             return
         for rotation in bound:
             self.hotkey_manager.unbind(rotation.name)

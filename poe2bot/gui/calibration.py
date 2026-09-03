@@ -1,9 +1,11 @@
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 import pyautogui
 
 from poe2bot import templates
+from poe2bot.gui import dialogs as messagebox
+from poe2bot.gui import theme
 from poe2bot.models import Condition
 from poe2bot.gui.overlays import RegionCaptureOverlay, PointCaptureOverlay
 
@@ -13,6 +15,18 @@ class CalibrationMixin:
     search-area capture-overlay machinery both of those (and ConditionsMixin's
     Add/recalibrate Condition flows) reuse. Mixed into App (see
     poe2bot/gui/app.py)."""
+
+    def _show_calibration_hint_once(self, title: str, message: str):
+        """The full instructional popup (what a capture involves, how to
+        cancel) is only genuinely needed the first time a user does this in
+        a session -- every subsequent capture reuses the same mechanic, and
+        the overlay itself now carries a persistent on-canvas reminder (see
+        overlays.py's `hint_text`), so repeating the popup every single time
+        is pure friction, not information."""
+        if self._calibration_hint_shown:
+            return
+        self._calibration_hint_shown = True
+        messagebox.showinfo(title, message)
 
     # ---- cooldown-check calibration -----------------------------------------
 
@@ -61,7 +75,7 @@ class CalibrationMixin:
         Recalibrate Condition). search_mode/search_region come from the optional
         second click-drag pass offered in the preview dialog -- see
         _show_image_match_preview and _start_search_area_capture."""
-        messagebox.showinfo(
+        self._show_calibration_hint_once(
             "Calibrate image match",
             "After you click OK, the bot window will hide.\n\n"
             "Make sure the skill's icon is visible and OFF cooldown (ready to cast), "
@@ -72,7 +86,8 @@ class CalibrationMixin:
 
     def _open_region_capture_overlay(self, on_use=None, default_confidence=0.90):
         RegionCaptureOverlay(
-            self, on_done=lambda region: self._on_image_region_captured(region, on_use, default_confidence))
+            self, on_done=lambda region: self._on_image_region_captured(region, on_use, default_confidence),
+            hint_text="Click-drag tightly around the icon  ·  Esc to cancel")
 
     def _on_image_region_captured(self, region, on_use=None, default_confidence=0.90):
         if region is None:
@@ -95,7 +110,14 @@ class CalibrationMixin:
         self.deiconify()
         self._show_image_match_preview(filename, region, on_use, default_confidence)
 
-    def _show_image_match_preview(self, filename, region, on_use=None, default_confidence=0.90):
+    def _show_image_match_preview(self, filename, region, on_use=None, default_confidence=0.90,
+                                   inline_error=None):
+        """inline_error, when set, shows a warning line above the "search a
+        larger area" checkbox instead of a separate popup-then-reopen round
+        trip -- used when re-showing this preview after a search-area
+        capture was cancelled or came back too small (see
+        _on_search_area_captured). The checkbox starts pre-checked in that
+        case too, since the user has already shown they want a search area."""
         preview = tk.Toplevel(self)
         preview.title("Confirm image match")
         preview.transient(self)
@@ -110,6 +132,10 @@ class CalibrationMixin:
         ttk.Label(preview, image=image).pack(padx=8, pady=8)
         ttk.Label(preview, text=f"{region[2]} x {region[3]} px at ({region[0]}, {region[1]})").pack()
 
+        if inline_error:
+            ttk.Label(preview, text=inline_error, foreground=theme.DANGER_COLOR,
+                      wraplength=280, justify="left").pack(padx=8, pady=(6, 0))
+
         confidence_var = None
         if on_use is not None:
             conf_row = ttk.Frame(preview)
@@ -118,7 +144,7 @@ class CalibrationMixin:
             confidence_var = tk.StringVar(value=f"{default_confidence:.2f}")
             ttk.Entry(conf_row, textvariable=confidence_var, width=5).pack(side="left")
 
-        area_var = tk.BooleanVar(value=False)
+        area_var = tk.BooleanVar(value=bool(inline_error))
         ttk.Checkbutton(preview, variable=area_var,
                         text="Search a larger area (icon may shift slightly)").pack(pady=(4, 0))
 
@@ -154,9 +180,11 @@ class CalibrationMixin:
             templates.delete_template(filename)  # safe: same as above
             preview.destroy()
 
-        ttk.Button(btns, text="Use This", command=use_this).pack(side="left", padx=4)
+        ttk.Button(btns, text="Use This", style=theme.ACCENT_BUTTON_STYLE, command=use_this).pack(
+            side="left", padx=4)
         ttk.Button(btns, text="Retry", command=retry).pack(side="left", padx=4)
-        ttk.Button(btns, text="Cancel", command=cancel).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancel", style=theme.DANGER_BUTTON_STYLE, command=cancel).pack(
+            side="left", padx=4)
 
     def _apply_image_match_to_ready_form(self, filename, region, search_mode, search_region):
         """Finalizes an image-match calibration into the step's own cooldown
@@ -185,7 +213,7 @@ class CalibrationMixin:
         captured, or so the confirmation dialog can be redisplayed unchanged
         (with `confidence` as its new default) if this pass is cancelled or
         the rectangle turns out too small."""
-        messagebox.showinfo(
+        self._show_calibration_hint_once(
             "Calibrate search area",
             "After you click OK, the bot window will hide again.\n\n"
             "Click-drag a LARGER rectangle that comfortably contains the icon, "
@@ -196,25 +224,26 @@ class CalibrationMixin:
         self.after(150, lambda: self._open_search_area_overlay(filename, region, confidence, on_use))
 
     def _open_search_area_overlay(self, filename, region, confidence, on_use):
-        RegionCaptureOverlay(self, on_done=lambda search_region: self._on_search_area_captured(
-            search_region, filename, region, confidence, on_use))
+        RegionCaptureOverlay(
+            self, on_done=lambda search_region: self._on_search_area_captured(
+                search_region, filename, region, confidence, on_use),
+            hint_text="Drag a LARGER rectangle around the icon  ·  Esc to cancel")
 
     def _on_search_area_captured(self, search_region, filename, region, confidence, on_use):
         self.deiconify()
         if search_region is None:
-            messagebox.showinfo(
-                "Search area cancelled",
-                "Search area capture was cancelled. The icon capture from before is "
-                "still confirmed -- check the box and click \"Use This\" again to "
-                "retry the search area, or leave it unchecked to use exact mode instead.")
-            self._show_image_match_preview(filename, region, on_use, confidence)
+            self._show_image_match_preview(
+                filename, region, on_use, confidence,
+                inline_error="Search area capture cancelled -- the icon itself is still confirmed. "
+                             "Check the box and click \"Use This\" again to retry, or leave it "
+                             "unchecked to use exact mode instead.")
             return
         if search_region[2] < region[2] or search_region[3] < region[3]:
-            messagebox.showerror(
-                "Search area too small",
-                f"The search area ({search_region[2]}x{search_region[3]}) must be at least as "
-                f"large as the icon ({region[2]}x{region[3]}) in both dimensions. Try again.")
-            self._show_image_match_preview(filename, region, on_use, confidence)
+            self._show_image_match_preview(
+                filename, region, on_use, confidence,
+                inline_error=f"Search area ({search_region[2]}x{search_region[3]}) must be at least "
+                             f"as large as the icon ({region[2]}x{region[3]}) in both dimensions -- "
+                             f"try again.")
             return
         if on_use is not None:
             on_use(filename, region, confidence, "area", search_region)
@@ -226,7 +255,7 @@ class CalibrationMixin:
 
     def _start_pixel_capture(self, on_use=None, default_confidence=0.90):
         """Same shape as _start_image_capture, for the pixel-match flow."""
-        messagebox.showinfo(
+        self._show_calibration_hint_once(
             "Calibrate pixel match",
             "After you click OK, the bot window will hide.\n\n"
             "Make sure the skill's icon is visible and OFF cooldown (ready to cast), "
@@ -237,7 +266,8 @@ class CalibrationMixin:
 
     def _open_point_capture_overlay(self, on_use=None, default_confidence=0.90):
         PointCaptureOverlay(
-            self, on_done=lambda point: self._on_point_captured(point, on_use, default_confidence))
+            self, on_done=lambda point: self._on_point_captured(point, on_use, default_confidence),
+            hint_text="Click exactly on the pixel  ·  Esc to cancel")
 
     def _on_point_captured(self, point, on_use=None, default_confidence=0.90):
         if point is None:
@@ -305,6 +335,8 @@ class CalibrationMixin:
             preview.destroy()
             self._start_pixel_capture(on_use, default_confidence)
 
-        ttk.Button(btns, text="Use This", command=use_this).pack(side="left", padx=4)
+        ttk.Button(btns, text="Use This", style=theme.ACCENT_BUTTON_STYLE, command=use_this).pack(
+            side="left", padx=4)
         ttk.Button(btns, text="Retry", command=retry).pack(side="left", padx=4)
-        ttk.Button(btns, text="Cancel", command=preview.destroy).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancel", style=theme.DANGER_BUTTON_STYLE, command=preview.destroy).pack(
+            side="left", padx=4)

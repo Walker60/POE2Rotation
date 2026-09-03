@@ -1,7 +1,7 @@
 import copy
-from tkinter import messagebox, simpledialog
 
 from poe2bot import storage, templates
+from poe2bot.gui import dialogs as messagebox
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Condition
 
@@ -37,7 +37,7 @@ class ConditionsMixin:
         step_idx = self._selected_owning_step_index()
         if step_idx is None:
             return
-        seconds = simpledialog.askfloat(
+        seconds = messagebox.askfloat(
             "Add Timer Condition", "Minimum seconds since this step's last use:",
             initialvalue=5.0, minvalue=0.1, parent=self)
         if seconds is None:
@@ -146,7 +146,7 @@ class ConditionsMixin:
             self._refresh_steps_tree()
 
         if condition.match_type == "timer":
-            seconds = simpledialog.askfloat(
+            seconds = messagebox.askfloat(
                 "Edit Timer Condition", "Minimum seconds since this step's last use:",
                 initialvalue=condition.timer_seconds, minvalue=0.1, parent=self)
             if seconds is None:

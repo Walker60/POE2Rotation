@@ -1,6 +1,8 @@
 import tkinter as tk
 from tkinter import ttk
 
+from poe2bot.gui import geometry
+
 
 class SettingsWindow(tk.Toplevel):
     """App-wide settings that don't belong to any one rotation: which input
@@ -11,6 +13,7 @@ class SettingsWindow(tk.Toplevel):
 
     def __init__(self, master):
         super().__init__(master)
+        self._master = master
         self.title("Settings")
         self.resizable(False, False)
         bg = ttk.Style().lookup("TFrame", "background")
@@ -29,10 +32,22 @@ class SettingsWindow(tk.Toplevel):
 
         appearance_frame = ttk.LabelFrame(container, text="Appearance", padding=8)
         appearance_frame.pack(fill="x", pady=(8, 0))
-        ttk.Button(appearance_frame, text="Toggle Light/Dark",
-                   command=master._toggle_theme).pack(fill="x")
+        self._theme_btn = ttk.Button(appearance_frame, command=master._toggle_theme)
+        self._theme_btn.pack(fill="x")
+        self.refresh_theme_label()
 
         window_frame = ttk.LabelFrame(container, text="Windows", padding=8)
         window_frame.pack(fill="x", pady=(8, 0))
         ttk.Button(window_frame, text="Show Activity Window",
                    command=master._on_show_activity_window_clicked).pack(fill="x")
+
+        geometry.size_window_to_contents(self)
+
+    def refresh_theme_label(self):
+        """Reflects the *current* theme rather than a static "Toggle..."
+        label -- called once at construction and again from
+        App._toggle_theme() (this window is created once and reused via
+        deiconify(), so a label baked in only at construction would go
+        stale after the first toggle)."""
+        other = "Light" if self._master._theme == "dark" else "Dark"
+        self._theme_btn.configure(text=f"Switch to {other} Mode")

@@ -2,11 +2,11 @@ import copy
 import os
 
 import tkinter as tk
-from tkinter import messagebox, simpledialog
 
 from poe2bot import app_state, storage
 from poe2bot.hotkeys import display_name
 from poe2bot.models import Rotation, folder_path_problem, folder_in_scope
+from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui.constants import STATUS_LABELS
 
 
@@ -27,6 +27,9 @@ class RotationListMixin:
         self.rotation_tree.delete(*self.rotation_tree.get_children())
         self._folder_nodes = {}
 
+        filter_text = self.rotation_filter_var.get().strip().lower()
+        matching_names = {name for name in self.rotations if not filter_text or filter_text in name.lower()}
+
         def ensure_folder_node(folder_path: str) -> str:
             """Return the tree item id for folder_path (the root tree item id,
             "", for an ungrouped rotation), creating it -- and any missing
@@ -37,9 +40,13 @@ class RotationListMixin:
                 return self._folder_nodes[folder_path]
             parent_path, _, label = folder_path.rpartition("/")
             parent_id = ensure_folder_node(parent_path)
+            # While filtering, force every visible folder open (it must contain
+            # a match, or it wouldn't be inserted below) rather than respecting
+            # its remembered state, so a match is never hidden behind a
+            # collapsed folder.
+            is_open = folder_path in previously_open or bool(filter_text)
             item_id = self.rotation_tree.insert(
-                parent_id, tk.END, iid=f"folder:{folder_path}",
-                text=f"\U0001F4C1 {label}", open=folder_path in previously_open)
+                parent_id, tk.END, iid=f"folder:{folder_path}", text=label, open=is_open)
             self._folder_nodes[folder_path] = item_id
             return item_id
 
@@ -47,14 +54,18 @@ class RotationListMixin:
         # ungrouped rotations (folder == "") sorting before every folder name.
         for name in sorted(self.rotations, key=lambda n: (
                 self.rotations[n].folder == "", self.rotations[n].folder.lower(), n.lower())):
+            if name not in matching_names:
+                continue
             rotation = self.rotations[name]
             parent_id = ensure_folder_node(rotation.folder)
             shared_suffix = ""
             if rotation.hotkey and len(self.hotkey_manager.bound_to(rotation.hotkey)) > 1:
                 shared_suffix = f" (shared {display_name(rotation.hotkey)})"
-            suffix = STATUS_LABELS.get(self.rotation_manager.status(name), "")
+            status = self.rotation_manager.status(name)
+            status_text = STATUS_LABELS.get(status, "").strip(" ()").capitalize()
             self.rotation_tree.insert(
-                parent_id, tk.END, iid=f"rotation:{name}", text=f"{name}{shared_suffix}{suffix}")
+                parent_id, tk.END, iid=f"rotation:{name}", text=f"{name}{shared_suffix}",
+                values=(status_text,), tags=(status,))
 
         # Keeps the Active Folder combobox's options current with whatever folders
         # actually exist -- called after every rotation-set mutation (add/delete/
@@ -127,7 +138,7 @@ class RotationListMixin:
         """Renames/moves folder_path to a new path, taking every rotation in it
         (and any nested subfolders) along -- a bulk operation, unlike editing a
         single rotation's Folder field one at a time."""
-        new_path = simpledialog.askstring(
+        new_path = messagebox.askstring(
             "Rename Folder", "New folder path:", initialvalue=folder_path, parent=self)
         if new_path is None:
             return
@@ -167,7 +178,7 @@ class RotationListMixin:
             if rotation.name == self.editing_original_name:
                 self.folder_var.set(new_folder)
             self._reconcile_hotkey_scope(rotation, was_in_scope)
-        app_state.save_state(self.active_folder, self.active_device)
+        app_state.save_state(self.active_folder, self.active_device, self._theme)
         self._refresh_rotation_tree()
 
     def _move_selected_to_folder(self):
@@ -178,7 +189,7 @@ class RotationListMixin:
             messagebox.showinfo("No rotations selected", "Select one or more rotations in the list first.")
             return
         current_folder = self.rotations[names[0]].folder
-        new_path = simpledialog.askstring(
+        new_path = messagebox.askstring(
             "Move to Folder", "Destination folder (blank = ungrouped):",
             initialvalue=current_folder, parent=self)
         if new_path is None:
@@ -231,6 +242,7 @@ class RotationListMixin:
         self._reset_ready_form()
         self._reset_buff_form()
         self._refresh_steps_tree()
+        self._capture_saved_snapshot()
 
     def _new_rotation(self):
         self.editing_original_name = None
@@ -254,6 +266,7 @@ class RotationListMixin:
         self._reset_buff_form()
         self._refresh_steps_tree()
         self.rotation_tree.selection_remove(*self.rotation_tree.selection())
+        self._capture_saved_snapshot()
 
     def _on_revert_clicked(self):
         """Discards unsaved edits to whichever rotation is currently open --
@@ -309,7 +322,7 @@ class RotationListMixin:
         name = self._selected_rotation_name()
         if name is None:
             return
-        if not messagebox.askyesno("Delete rotation", f"Delete '{name}'?"):
+        if not messagebox.askyesno("Delete rotation", f"Delete '{name}'?", danger=True):
             return
         rotation = self.rotations.pop(name)
         self._clear_rotation_hotkeys(name)
