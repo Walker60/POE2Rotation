@@ -102,13 +102,13 @@ def _ensure_dracula_theme(style: ttk.Style) -> None:
         "TLabelframe.Label": {"configure": {"background": d["bg"], "foreground": d["fg"]}},
         "TButton": {
             "configure": {"background": d["current_line"], "foreground": d["fg"],
-                          "bordercolor": d["current_line"], "padding": (10, 5), "relief": "flat"},
+                          "bordercolor": d["comment"], "borderwidth": 1, "padding": (10, 5), "relief": "solid"},
             "map": {"background": [("disabled", d["bg_alt"]), ("pressed", "#383a4c"), ("active", "#565973")],
                     "foreground": [("disabled", d["comment"])]},
         },
         "Accent.TButton": {
             "configure": {"background": d["purple"], "foreground": d["bg"],
-                          "bordercolor": d["purple"], "padding": (10, 5), "relief": "flat"},
+                          "bordercolor": d["comment"], "borderwidth": 1, "padding": (10, 5), "relief": "solid"},
             "map": {"background": [("disabled", d["current_line"]), ("pressed", "#a67ef0"), ("active", "#cba6fb")],
                     "foreground": [("disabled", d["comment"])]},
         },
@@ -129,12 +129,12 @@ def _ensure_dracula_theme(style: ttk.Style) -> None:
         },
         "TCheckbutton": {
             "configure": {"background": d["bg"], "foreground": d["fg"], "focuscolor": "",
-                          "indicatorcolor": d["current_line"]},
+                          "indicatorcolor": d["current_line"], "indicatormargin": (0, 2, 8, 2)},
             "map": {"indicatorcolor": [("selected", d["purple"])]},
         },
         "TRadiobutton": {
             "configure": {"background": d["bg"], "foreground": d["fg"], "focuscolor": "",
-                          "indicatorcolor": d["current_line"]},
+                          "indicatorcolor": d["current_line"], "indicatormargin": (0, 2, 8, 2)},
             "map": {"indicatorcolor": [("selected", d["purple"])]},
         },
         "TScrollbar": {

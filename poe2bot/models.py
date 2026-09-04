@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field, asdict, fields
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import keyboard
 
@@ -161,6 +161,67 @@ class Step:
         )
 
 
+@dataclass
+class ConditionGroup:
+    """A rotation-level gate: `condition` (always match_type "image" or
+    "pixel", action "fire" or "block" -- never "timer"/"hold", see
+    validate_rotation) decides once per pass whether every step in `steps`
+    runs at all, exactly like a Step's own fire/block Conditions decide for
+    one step -- just applied to a whole ordered block of steps together.
+    Never nests -- `steps` only ever holds Step objects, never another
+    ConditionGroup."""
+    condition: Condition = field(default_factory=Condition)
+    steps: List[Step] = field(default_factory=list)
+
+    @staticmethod
+    def from_dict(data: dict) -> "ConditionGroup":
+        return ConditionGroup(
+            condition=Condition.from_dict(data.get("condition") or {}),
+            steps=[Step.from_dict(s) for s in data.get("steps", [])])
+
+
+def _step_entry_to_dict(entry) -> dict:
+    """Rotation.steps is a heterogeneous Step | ConditionGroup list -- this
+    (and _step_entry_from_dict below) is where that gets an explicit "type"
+    discriminator in the persisted JSON, so a pre-existing rotation file
+    (saved before ConditionGroup existed, with no "type" key at all) still
+    loads every entry as a plain Step rather than needing a migration."""
+    if isinstance(entry, ConditionGroup):
+        return {"type": "group", "condition": asdict(entry.condition),
+                "steps": [asdict(s) for s in entry.steps]}
+    return {"type": "step", **asdict(entry)}
+
+
+def _step_entry_from_dict(data: dict):
+    return ConditionGroup.from_dict(data) if data.get("type") == "group" else Step.from_dict(data)
+
+
+def iter_steps(entries):
+    """Every Step in `entries` (a Rotation.steps-shaped list), including
+    ones nested inside a ConditionGroup -- not the group's own condition
+    itself, see iter_conditions for that. Used anywhere something needs to
+    see every leaf step regardless of grouping (e.g. the Active Device
+    key/alt_key swap, or a Loop rotation's "at least one step with a key"
+    check)."""
+    for entry in entries:
+        yield from entry.steps if isinstance(entry, ConditionGroup) else (entry,)
+
+
+def iter_conditions(entries):
+    """Every Condition anywhere in `entries`: each step's own conditions
+    (top-level or nested inside a group), plus each ConditionGroup's own
+    single gating condition. Used by the calibrated-template GC sweep,
+    which must not delete a template still referenced by a group's own
+    condition."""
+    for entry in entries:
+        if isinstance(entry, ConditionGroup):
+            yield entry.condition
+            for step in entry.steps:
+                yield from step.conditions
+        else:
+            yield from entry.conditions
+
+
 def replace_step_fields(target: Step, source: Step) -> None:
     """Copy every field of `source` onto `target` in place, preserving
     `target`'s identity. The step-editing form always builds a brand-new Step
@@ -191,7 +252,7 @@ class Rotation:
     folder: str = ""   # "/"-separated group path (e.g. "Bosses/HardMode"); "" = ungrouped. NOT persisted
                         # in the JSON -- it's derived from where the file actually lives on disk each time
                         # it's loaded (see storage.py), so there's no way for it to drift out of sync.
-    steps: List[Step] = field(default_factory=list)
+    steps: List[Union[Step, ConditionGroup]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -208,7 +269,7 @@ class Rotation:
             "alt_pause_key": self.alt_pause_key,
             "pause_mode": self.pause_mode,
             "pause_duration_ms": self.pause_duration_ms,
-            "steps": [asdict(step) for step in self.steps],
+            "steps": [_step_entry_to_dict(entry) for entry in self.steps],
         }
 
     @staticmethod
@@ -227,7 +288,7 @@ class Rotation:
             alt_pause_key=data.get("alt_pause_key"),
             pause_mode=data.get("pause_mode", "duration"),
             pause_duration_ms=_int_or(data, "pause_duration_ms", 1000),
-            steps=[Step.from_dict(step) for step in data.get("steps", [])],
+            steps=[_step_entry_from_dict(entry) for entry in data.get("steps", [])],
         )
 
 
@@ -325,9 +386,9 @@ def validate_rotation(rotation: Rotation) -> List[str]:
     if folder_problem:
         problems.append(folder_problem)
 
-    if not rotation.steps:
+    if not any(True for _ in iter_steps(rotation.steps)):
         problems.append("Rotation must have at least one step.")
-    elif rotation.mode == "loop" and all(step.key is None for step in rotation.steps):
+    elif rotation.mode == "loop" and all(step.key is None for step in iter_steps(rotation.steps)):
         # A step with key=None (unassigned) has no wait of any kind at runtime --
         # it's just skipped instantly, unlike a real key or a deliberate ""
         # sleep step. If *every* step in a Loop rotation is like that, the
@@ -338,84 +399,112 @@ def validate_rotation(rotation: Rotation) -> List[str]:
             "A Loop rotation needs at least one step with a key assigned (or a Sleep step) -- "
             "otherwise it would repeat with no delay between passes.")
 
-    for i, step in enumerate(rotation.steps, start=1):
-        # key is None -- no keybind assigned yet -- means this step is skipped
-        # entirely at runtime (not an error; the GUI's Add Step defaults to this).
-        # key == "" means this step is a deliberate sleep/pause: no key to press,
-        # it just waits out delay_ms (+/- jitter_ms) like any other step's
-        # post-fire wait. Both are falsy, so this check is skipped for either.
-        # alt_key gets the identical check -- it's just the other device's key,
-        # same None/""/string semantics, swapped in by the Active Device toggle.
-        for key, label in ((step.key, f"Step {i}"), (step.alt_key, f"Step {i} (alt key)")):
-            if key and key.strip():
-                if controller.is_controller_key(key):
-                    if controller.controller_button_of(key) not in controller.VALID_BUTTON_NAMES:
-                        problems.append(f"{label}: '{key}' is not a recognized controller button.")
-                elif hotkeys.is_mouse_hotkey(key):
-                    if hotkeys.mouse_button_of(key) not in hotkeys.MOUSE_DISPLAY_NAMES:
-                        problems.append(f"{label}: '{key}' is not a recognized mouse button.")
-                else:
-                    try:
-                        keyboard.key_to_scan_codes(key)
-                    except ValueError:
-                        problems.append(f"{label}: '{key}' is not a recognized key name.")
+    for i, entry in enumerate(rotation.steps, start=1):
+        if isinstance(entry, ConditionGroup):
+            problems.extend(_condition_problems(
+                f"Condition Group {i}", entry.condition, ("fire", "block"), allow_timer=False))
+            for j, step in enumerate(entry.steps, start=1):
+                problems.extend(_step_problems(f"Condition Group {i}, Step {j}", step))
+        else:
+            problems.extend(_step_problems(f"Step {i}", entry))
 
-        if step.delay_ms < 0:
-            problems.append(f"Step {i}: delay_ms cannot be negative.")
-        if step.jitter_ms < 0:
-            problems.append(f"Step {i}: jitter_ms cannot be negative.")
-        if step.hold_ms < 0:
-            problems.append(f"Step {i}: hold_ms cannot be negative.")
-        if step.hold_jitter_ms < 0:
-            problems.append(f"Step {i}: hold_jitter_ms cannot be negative.")
+    return problems
 
-        for j, condition in enumerate(step.conditions, start=1):
-            if not condition.has_check():
-                # Not yet calibrated -- treated as "this condition is off," not an
-                # error. Only reachable via hand-edited JSON; the GUI's own Add
-                # Condition flow always produces a fully-calibrated one.
-                continue
-            if condition.match_type not in VALID_CONDITION_MATCH_TYPES:
-                problems.append(f"Step {i}, condition {j}: match_type must be one of {VALID_CONDITION_MATCH_TYPES}.")
-            if condition.action not in VALID_CONDITION_ACTIONS:
-                problems.append(f"Step {i}, condition {j}: action must be one of {VALID_CONDITION_ACTIONS}.")
-            if condition.match_type != "timer" and not (0 < condition.confidence <= 1):
-                # Confidence is a visual-match fuzziness threshold -- meaningless for a
-                # pure time gate, which has no "how close is close enough" to tune.
-                problems.append(f"Step {i}, condition {j}: confidence must be greater than 0 and at most 1.")
-            if condition.match_type == "timer":
-                pass  # has_check() above already proved timer_seconds is a positive number
-            elif condition.match_type == "pixel":
-                if not (isinstance(condition.pixel_pos, tuple) and len(condition.pixel_pos) == 2):
-                    problems.append(f"Step {i}, condition {j}: has no calibrated point (recalibrate).")
-                if not (isinstance(condition.pixel_color, tuple) and len(condition.pixel_color) == 3):
-                    problems.append(f"Step {i}, condition {j}: has no calibrated color (recalibrate).")
+
+def _step_problems(label: str, step: Step) -> List[str]:
+    """Every validation problem with one Step, addressed by `label` (e.g.
+    "Step 3" for a top-level step, or "Condition Group 2, Step 1" for one
+    nested in a group) -- shared by validate_rotation's top-level steps and
+    each ConditionGroup's own nested steps."""
+    problems = []
+    # key is None -- no keybind assigned yet -- means this step is skipped
+    # entirely at runtime (not an error; the GUI's Add Step defaults to this).
+    # key == "" means this step is a deliberate sleep/pause: no key to press,
+    # it just waits out delay_ms (+/- jitter_ms) like any other step's
+    # post-fire wait. Both are falsy, so this check is skipped for either.
+    # alt_key gets the identical check -- it's just the other device's key,
+    # same None/""/string semantics, swapped in by the Active Device toggle.
+    for key, key_label in ((step.key, label), (step.alt_key, f"{label} (alt key)")):
+        if key and key.strip():
+            if controller.is_controller_key(key):
+                if controller.controller_button_of(key) not in controller.VALID_BUTTON_NAMES:
+                    problems.append(f"{key_label}: '{key}' is not a recognized controller button.")
+            elif hotkeys.is_mouse_hotkey(key):
+                if hotkeys.mouse_button_of(key) not in hotkeys.MOUSE_DISPLAY_NAMES:
+                    problems.append(f"{key_label}: '{key}' is not a recognized mouse button.")
             else:
-                if not (isinstance(condition.region, tuple) and len(condition.region) == 4):
-                    problems.append(f"Step {i}, condition {j}: has no calibrated region (recalibrate).")
-                if not condition.template or not os.path.isfile(templates.template_path(condition.template)):
-                    problems.append(f"Step {i}, condition {j}: calibrated template image is missing on disk (recalibrate).")
-                problems.extend(_search_area_problems(
-                    f"Step {i}, condition {j}", "", condition.search_mode, condition.search_region, condition.region))
+                try:
+                    keyboard.key_to_scan_codes(key)
+                except ValueError:
+                    problems.append(f"{key_label}: '{key}' is not a recognized key name.")
 
-            if condition.action == "fire":
-                if condition.timeout_ms < 0:
-                    problems.append(f"Step {i}, condition {j}: wait timeout cannot be negative.")
-            elif condition.action == "hold":
-                if condition.hold_ms is not None and condition.hold_ms < 0:
-                    problems.append(f"Step {i}, condition {j}: hold override cannot be negative.")
-                if condition.delay_ms is not None and condition.delay_ms < 0:
-                    problems.append(f"Step {i}, condition {j}: delay override cannot be negative.")
-                if condition.hold_ms is None and condition.delay_ms is None:
-                    problems.append(
-                        f"Step {i}, condition {j}: action is 'Change key hold amount' but neither Hold nor "
-                        f"Delay override is set, so it would never have any effect.")
+    if step.delay_ms < 0:
+        problems.append(f"{label}: delay_ms cannot be negative.")
+    if step.jitter_ms < 0:
+        problems.append(f"{label}: jitter_ms cannot be negative.")
+    if step.hold_ms < 0:
+        problems.append(f"{label}: hold_ms cannot be negative.")
+    if step.hold_jitter_ms < 0:
+        problems.append(f"{label}: hold_jitter_ms cannot be negative.")
 
-        if step.repeat_count < 1:
-            problems.append(f"Step {i}: repeat count must be at least 1.")
-        elif step.repeat_count > MAX_REPEAT_COUNT:
-            problems.append(f"Step {i}: repeat count of {step.repeat_count} is over the sanity limit of "
-                             f"{MAX_REPEAT_COUNT} -- with Combine Hold this would hold a key down for a "
-                             f"very long time. Lower it, or split this into a Loop rotation instead.")
+    for j, condition in enumerate(step.conditions, start=1):
+        problems.extend(_condition_problems(f"{label}, condition {j}", condition, VALID_CONDITION_ACTIONS, allow_timer=True))
 
+    if step.repeat_count < 1:
+        problems.append(f"{label}: repeat count must be at least 1.")
+    elif step.repeat_count > MAX_REPEAT_COUNT:
+        problems.append(f"{label}: repeat count of {step.repeat_count} is over the sanity limit of "
+                         f"{MAX_REPEAT_COUNT} -- with Combine Hold this would hold a key down for a "
+                         f"very long time. Lower it, or split this into a Loop rotation instead.")
+    return problems
+
+
+def _condition_problems(label: str, condition: Condition, allowed_actions, allow_timer: bool) -> List[str]:
+    """Every validation problem with one Condition, addressed by `label`.
+    Shared by a Step's own conditions (`allowed_actions` = every action,
+    `allow_timer=True`) and a ConditionGroup's single gating condition
+    (`allowed_actions=("fire", "block")`, `allow_timer=False` -- a group
+    never uses "hold" or a pure time gate, see ConditionGroup)."""
+    problems = []
+    if not condition.has_check():
+        # Not yet calibrated -- treated as "this condition is off," not an
+        # error. Only reachable via hand-edited JSON; the GUI's own Add
+        # Condition flow always produces a fully-calibrated one.
+        return problems
+    valid_match_types = VALID_CONDITION_MATCH_TYPES if allow_timer else ("image", "pixel")
+    if condition.match_type not in valid_match_types:
+        problems.append(f"{label}: match_type must be one of {valid_match_types}.")
+    if condition.action not in allowed_actions:
+        problems.append(f"{label}: action must be one of {allowed_actions}.")
+    if condition.match_type != "timer" and not (0 < condition.confidence <= 1):
+        # Confidence is a visual-match fuzziness threshold -- meaningless for a
+        # pure time gate, which has no "how close is close enough" to tune.
+        problems.append(f"{label}: confidence must be greater than 0 and at most 1.")
+    if condition.match_type == "timer":
+        pass  # has_check() above already proved timer_seconds is a positive number
+    elif condition.match_type == "pixel":
+        if not (isinstance(condition.pixel_pos, tuple) and len(condition.pixel_pos) == 2):
+            problems.append(f"{label}: has no calibrated point (recalibrate).")
+        if not (isinstance(condition.pixel_color, tuple) and len(condition.pixel_color) == 3):
+            problems.append(f"{label}: has no calibrated color (recalibrate).")
+    else:
+        if not (isinstance(condition.region, tuple) and len(condition.region) == 4):
+            problems.append(f"{label}: has no calibrated region (recalibrate).")
+        if not condition.template or not os.path.isfile(templates.template_path(condition.template)):
+            problems.append(f"{label}: calibrated template image is missing on disk (recalibrate).")
+        problems.extend(_search_area_problems(
+            label, "", condition.search_mode, condition.search_region, condition.region))
+
+    if condition.action == "fire":
+        if condition.timeout_ms < 0:
+            problems.append(f"{label}: wait timeout cannot be negative.")
+    elif condition.action == "hold":
+        if condition.hold_ms is not None and condition.hold_ms < 0:
+            problems.append(f"{label}: hold override cannot be negative.")
+        if condition.delay_ms is not None and condition.delay_ms < 0:
+            problems.append(f"{label}: delay override cannot be negative.")
+        if condition.hold_ms is None and condition.delay_ms is None:
+            problems.append(
+                f"{label}: action is 'Override Hold Time' but neither Hold nor "
+                f"Delay override is set, so it would never have any effect.")
     return problems

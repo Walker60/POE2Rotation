@@ -14,7 +14,7 @@ from PIL import Image, ImageChops, ImageStat
 from poe2bot import config, controller, hotkeys, templates
 from poe2bot.focus import is_game_focused
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Condition, Rotation, Step
+from poe2bot.models import Condition, ConditionGroup, Rotation, Step, iter_steps
 
 log = get_logger()
 
@@ -133,6 +133,18 @@ def _fire_gate_passes(step: Step, seconds_since_fired: Optional[float]) -> bool:
             if not _check_condition(condition, step.key or "step", seconds_since_fired):
                 return False
     return True
+
+
+def _group_gate_passes(group: ConditionGroup) -> bool:
+    """Mirrors _fire_gate_passes but for a ConditionGroup's own single
+    condition: "fire" requires it to currently match for the group's nested
+    steps to run this pass, "block" vetoes running while it matches. Always
+    an instant, one-shot check -- unlike a step's own Fire condition, a
+    group's condition never polls/waits (timeout_ms is meaningless here;
+    validate_rotation never lets a group's condition use "hold" or
+    "timer")."""
+    matched = _check_condition(group.condition, "condition group")
+    return (not matched) if group.condition.action == "block" else matched
 
 
 def _max_fire_timeout_ms(step: Step) -> int:
@@ -299,7 +311,7 @@ class RotationRunner:
         self._reset_requested = False
         self._pause_requested = False
         self._paused = threading.Event()
-        self._current_step_index = 0   # touched only by _run_once's own thread
+        self._current_path = (0, None)   # (top_index, nested_index_or_None) -- touched only by _run_once's own thread
         # id(step) -> time.perf_counter() of that step's own last actual fire, for
         # any "timer" Condition gating it (see _check_condition). Survives a Loop
         # wraparound and a pause/resume -- a real cooldown keeps ticking regardless
@@ -321,7 +333,7 @@ class RotationRunner:
         self._reset_requested = False
         self._pause_requested = False
         self._paused.clear()
-        self._current_step_index = 0
+        self._current_path = (0, None)
         self._thread = threading.Thread(
             target=self._run, name=f"rotation-{self.rotation.name}", daemon=True)
         self._thread.start()
@@ -392,7 +404,7 @@ class RotationRunner:
 
     def _run(self):
         if self.rotation.mode == "loop" and (
-                not self.rotation.steps or all(step.key is None for step in self.rotation.steps)):
+                not self.rotation.steps or all(step.key is None for step in iter_steps(self.rotation.steps))):
             # Same condition validate_rotation now rejects at save time -- kept
             # here too since a rotation can reach the runtime without ever
             # passing through it (a pre-existing file saved before that check
@@ -408,12 +420,12 @@ class RotationRunner:
         log.info(f"[{self.rotation.name}] starting ({self.rotation.mode})")
         self._notify(STATUS_RUNNING)
         self._notify_activity(f"Rotation started ({self.rotation.mode} mode)")
-        resume_index = 0
+        resume_index = (0, None)
         try:
             while True:
                 if self._stop_requested:
                     break
-                completed = self._run_once(resume_index)
+                completed = self._run_once(*resume_index)
                 # A genuine stop() always wins over a reset()/pause() that happened to
                 # arrive around the same instant -- all three share the same stop_event
                 # to wake any in-flight cooperative wait instantly, so without this
@@ -426,21 +438,21 @@ class RotationRunner:
                     self._notify_activity("Reset to step 1")
                     self._reset_requested = False
                     self._stop_event.clear()
-                    resume_index = 0
+                    resume_index = (0, None)
                     self._step_last_fired.clear()
                     if self.rotation.reset_delay_ms > 0 and not self._wait_reset_delay():
                         break  # a genuine stop() arrived during the reset delay
                     continue
                 if self._pause_requested:
                     self._pause_requested = False
-                    resume_index = self._current_step_index
+                    resume_index = self._current_path
                     self._stop_event.clear()
                     if self._do_pause():
                         continue
                     break  # a genuine stop() arrived while paused
                 if not completed or self.rotation.mode != "loop":
                     break
-                resume_index = 0
+                resume_index = (0, None)
         except Exception as e:
             # Anything escaping here (e.g. an unrecognized key name reaching
             # keyboard.press/send -- validate_rotation only runs at GUI save
@@ -506,62 +518,93 @@ class RotationRunner:
         finally:
             self._notify(STATUS_RUNNING)
 
-    def _run_once(self, start_index: int = 0) -> bool:
-        for i in range(start_index, len(self.rotation.steps)):
-            step = self.rotation.steps[i]
-            self._current_step_index = i
+    def _run_once(self, start_top: int = 0, start_nested: Optional[int] = None) -> bool:
+        """Runs one full pass over self.rotation.steps (a Step | ConditionGroup
+        list), starting at top-level index `start_top` -- and, if that entry is
+        a ConditionGroup, at nested index `start_nested` within its own steps
+        (None means "start fresh," i.e. check the group's gate first). Only
+        ever non-None for the *first* top-level entry visited (a resume from
+        pause/reset), never for a group reached normally later in the same
+        pass -- see the `nested_start == 0` gate check below."""
+        for gi in range(start_top, len(self.rotation.steps)):
+            entry = self.rotation.steps[gi]
             if self._stop_event.is_set():
                 return False
-            if not self._wait_for_focus_or_stop():
-                return False
-            if step.key is None:
-                # No keybind assigned yet -- skip this step entirely, the same as a
-                # not-ready/conditions-not-met skip below: no fire, no delay, straight
-                # to the next step. Distinct from a "" (sleep) step, which still waits.
-                log.info(f"[{self.rotation.name}] step {i + 1} has no keybind assigned; skipping")
-                self._notify_activity(f"Step {i + 1}: no key assigned, skipping")
-                continue
-            if not step.key:
-                # Sleep step: no key to fire, just pause for delay_ms (+/- jitter_ms)
-                # like any other step's post-fire wait, repeat_count times if set.
-                # Conditions still gate it exactly like a normal step's do -- always
-                # an instant check here, never polled (a sleep step has nothing to
-                # wait to become "ready", only to gate on).
-                if not _fire_gate_passes(step, self._seconds_since_fired(step)):
-                    if not self._stop_event.is_set():
-                        log.info(f"[{self.rotation.name}] sleep step's conditions not met; skipping")
-                        self._notify_activity(f"Step {i + 1}: sleep conditions not met, skipping")
-                    continue
-                hold_condition = _hold_override(step, self._seconds_since_fired(step))
-                log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms"
-                          + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
-                self._notify_activity(
-                    f"Step {i + 1}: sleeping {step.delay_ms}ms"
-                    + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
-                if not self._fire_repeats(step, hold_condition):
+            if isinstance(entry, ConditionGroup):
+                nested_start = start_nested if gi == start_top and start_nested is not None else 0
+                if nested_start == 0:
+                    self._current_path = (gi, None)
+                    if not self._wait_for_focus_or_stop():
+                        return False
+                    if not _group_gate_passes(entry):
+                        if not self._stop_event.is_set():
+                            log.info(f"[{self.rotation.name}] condition group {gi + 1}'s condition not met; skipping")
+                            self._notify_activity(f"Condition Group {gi + 1}: condition not met, skipping")
+                        continue
+                for si in range(nested_start, len(entry.steps)):
+                    self._current_path = (gi, si)
+                    if not self._run_step(entry.steps[si], f"Condition Group {gi + 1}, Step {si + 1}"):
+                        return False
+            else:
+                self._current_path = (gi, None)
+                if not self._run_step(entry, f"Step {gi + 1}"):
                     return False
-                continue
-            gate_passed = self._wait_for_fire_gate(step)
-            if gate_passed:
-                hold_condition = _hold_override(step, self._seconds_since_fired(step))
+        return True
+
+    def _run_step(self, step: Step, label: str) -> bool:
+        """Runs exactly one Step -- its own fire/block gate, hold override,
+        and repeat_count firing -- regardless of whether it's a top-level
+        step or nested inside a ConditionGroup (the caller has already
+        decided the group it belongs to, if any, currently allows it to
+        run). Returns False the moment stop_event fires, mirroring
+        _fire_repeats' own contract, so _run_once can bail out immediately."""
+        if not self._wait_for_focus_or_stop():
+            return False
+        if step.key is None:
+            # No keybind assigned yet -- skip this step entirely, the same as a
+            # not-ready/conditions-not-met skip below: no fire, no delay, straight
+            # to the next step. Distinct from a "" (sleep) step, which still waits.
+            log.info(f"[{self.rotation.name}] {label} has no keybind assigned; skipping")
+            self._notify_activity(f"{label}: no key assigned, skipping")
+            return True
+        if not step.key:
+            # Sleep step: no key to fire, just pause for delay_ms (+/- jitter_ms)
+            # like any other step's post-fire wait, repeat_count times if set.
+            # Conditions still gate it exactly like a normal step's do -- always
+            # an instant check here, never polled (a sleep step has nothing to
+            # wait to become "ready", only to gate on).
+            if not _fire_gate_passes(step, self._seconds_since_fired(step)):
+                if not self._stop_event.is_set():
+                    log.info(f"[{self.rotation.name}] sleep step's conditions not met; skipping")
+                    self._notify_activity(f"{label}: sleep conditions not met, skipping")
+                return True
+            hold_condition = _hold_override(step, self._seconds_since_fired(step))
+            log.debug(f"[{self.rotation.name}] sleep {step.delay_ms}ms"
+                      + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
+            self._notify_activity(
+                f"{label}: sleeping {step.delay_ms}ms"
+                + (f" x{step.repeat_count}" if step.repeat_count > 1 else ""))
+            return self._fire_repeats(step, hold_condition)
+        gate_passed = self._wait_for_fire_gate(step)
+        if gate_passed:
+            hold_condition = _hold_override(step, self._seconds_since_fired(step))
+            self._notify_activity(
+                f"{label} ('{step.key}'): casting" + (" (hold override)" if hold_condition else ""))
+            # Only pay the post-cast delay/jitter after an actual fire -- there's no
+            # cast animation to wait out for a step that was skipped, so a skipped
+            # cast falls straight through to the next step instead of also eating
+            # this step's full delay on top of the condition-check time.
+            return self._fire_repeats(step, hold_condition)
+        elif not self._stop_event.is_set():
+            timeout_ms = _max_fire_timeout_ms(step)
+            if timeout_ms > 0:
+                log.warning(f"[{self.rotation.name}] '{step.key}' conditions not met after "
+                            f"{timeout_ms}ms; skipping this cast")
                 self._notify_activity(
-                    f"Step {i + 1} ('{step.key}'): casting" + (" (hold override)" if hold_condition else ""))
-                # Only pay the post-cast delay/jitter after an actual fire -- there's no
-                # cast animation to wait out for a step that was skipped, so a skipped
-                # cast falls straight through to the next step instead of also eating
-                # this step's full delay on top of the condition-check time.
-                if not self._fire_repeats(step, hold_condition):
-                    return False
-            elif not self._stop_event.is_set():
-                timeout_ms = _max_fire_timeout_ms(step)
-                if timeout_ms > 0:
-                    log.warning(f"[{self.rotation.name}] '{step.key}' conditions not met after "
-                                f"{timeout_ms}ms; skipping this cast")
-                    self._notify_activity(
-                        f"Step {i + 1} ('{step.key}'): conditions not met after {timeout_ms}ms, skipping")
-                else:
-                    log.info(f"[{self.rotation.name}] '{step.key}' conditions not met; skipping this cast")
-                    self._notify_activity(f"Step {i + 1} ('{step.key}'): conditions not met, skipping")
+                    f"{label} ('{step.key}'): conditions not met after {timeout_ms}ms, skipping")
+            else:
+                log.info(f"[{self.rotation.name}] '{step.key}' conditions not met; skipping this cast")
+                self._notify_activity(f"{label} ('{step.key}'): conditions not met, skipping")
         return True
 
     def _wait_for_focus_or_stop(self) -> bool:

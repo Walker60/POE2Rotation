@@ -1,7 +1,5 @@
 import threading
 
-from poe2bot import storage
-from poe2bot.gui import dialogs as messagebox
 from poe2bot.hotkeys import display_name
 
 
@@ -65,25 +63,6 @@ class HotkeysMixin:
         self.pending_hotkey = None
         self.hotkey_label_var.set(display_name(None))
         self._save_rotation()
-
-    def _unbind_all_rotations(self):
-        bound = [r for r in self.rotations.values() if r.hotkey]
-        if not bound:
-            messagebox.showinfo("Unbind all", "No rotations currently have a hotkey bound.")
-            return
-        if not messagebox.askyesno(
-                "Unbind all rotations",
-                f"Remove the hotkey binding from all {len(bound)} bound rotation(s)? "
-                "Each will be saved immediately.", danger=True):
-            return
-        for rotation in bound:
-            self.hotkey_manager.unbind(rotation.name)
-            rotation.hotkey = None
-            storage.save_rotation(rotation)
-        if self.editing_original_name in self.rotations:
-            self.pending_hotkey = None
-            self.hotkey_label_var.set(display_name(None))
-        self._refresh_rotation_tree()
 
     # ---- cancel key -----------------------------------------------------------
 

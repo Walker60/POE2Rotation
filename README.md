@@ -58,20 +58,20 @@ online, note the upstream project renamed in 2023; functionally unaffected eithe
   the way a keyboard tap does, so an instant press+release risks the game's next input
   poll never seeing it; raise this if a controller step still doesn't reliably register.
 
-## Conditions (optional, per step)
+## Skill Conditions (optional, per step)
 
 Everything that gates whether a step fires, or changes how it fires, is a
 **Condition** — a step can have any number of them. Each one is an
 image/pixel/timer match plus an **Action** deciding what happens once it
 matches:
 
-- **Fire the skill** — this step only fires while the condition matches.
-  Every "Fire" condition on a step must currently match for it to fire at
-  all (they're AND'd together).
-- **Not fire the skill** — a veto: while this condition matches, the step is
-  skipped this pass, regardless of any "Fire" conditions passing. Handy for
-  "don't cast this while stunned/silenced" style checks.
-- **Change key hold amount** — doesn't affect whether the step fires at all;
+- **Execute Step** — this step only fires while the condition matches.
+  Every "Execute Step" condition on a step must currently match for it to
+  fire at all (they're AND'd together).
+- **Skip Step** — a veto: while this condition matches, the step is
+  skipped this pass, regardless of any "Execute Step" conditions passing.
+  Handy for "don't cast this while stunned/silenced" style checks.
+- **Override Hold Time** — doesn't affect whether the step fires at all;
   while this condition matches, it overrides the step's Hold and/or Delay
   with its own **Hold override (ms)**/**Delay override (ms)** values instead
   (leaving either blank means that particular value is never overridden). For
@@ -100,24 +100,24 @@ Three ways to calibrate what a condition actually matches against:
   seconds since this step's own last actual fire. Useful for a plain cooldown
   gate that has no reliable on-screen indicator to check instead.
 
-A newly added condition defaults to **Fire the skill** with no wait — exactly
+A newly added condition defaults to **Execute Step** with no wait — exactly
 an always-instant gate. Select it (it's auto-selected right after adding) to
 change its Action, Name, Negate, or the fields below, then click **Update
 Selected Condition** to apply.
 
-**A "Fire the skill" condition can optionally wait instead of failing
+**An "Execute Step" condition can optionally wait instead of failing
 instantly.** Set **Wait up to (ms)** above 0 and, if the condition doesn't
 match yet, the bot polls it for up to that long (checking a few times a
 second) before giving up on this pass and skipping the cast — this is what
-used to be a separate "Cooldown Check" concept, now just any Fire condition
-with a wait configured. Leaving it at 0 (the default) is an instant, one-shot
-check with no waiting, suited to things like "is this buff currently active"
-rather than "wait for this skill to come off cooldown." The bot blocks the
-*entire* rotation for up to the wait time on that one step, so a large value
-makes a fast rotation feel like it stalls on whichever skill is still
-cooling down — it's not hung, it's waiting out the timeout before moving on.
-"Not fire the skill" and "Change key hold amount" conditions are always
-instant, one-shot checks; only "Fire the skill" ever waits.
+used to be a separate "Cooldown Check" concept, now just any Execute Step
+condition with a wait configured. Leaving it at 0 (the default) is an
+instant, one-shot check with no waiting, suited to things like "is this buff
+currently active" rather than "wait for this skill to come off cooldown."
+The bot blocks the *entire* rotation for up to the wait time on that one
+step, so a large value makes a fast rotation feel like it stalls on
+whichever skill is still cooling down — it's not hung, it's waiting out the
+timeout before moving on. "Skip Step" and "Override Hold Time" conditions
+are always instant, one-shot checks; only "Execute Step" ever waits.
 
 **Image matching defaults to a direct comparison against exactly the
 calibrated spot, not a search.** In this default "exact" mode, a check takes a
@@ -186,16 +186,65 @@ persist across further edits to the step list.
   Selected Condition** to give it a label (e.g. "Bleeding") — it's shown in
   the list instead of the auto-generated "Pixel RGB(...)"/"Image WxH"
   description, purely cosmetic, and survives recalibration.
-- Select a condition and click **Move Up**/**Move Down** (in Step Actions), or
-  just drag it, to reorder it within its own step. Reordering "Fire"/"Not
-  fire" conditions is cosmetic only (they're still combined the same way
-  regardless of order); with more than one "Change key hold amount"
+- Select a condition and click **Move Up**/**Move Down** (in Skill Steps), or
+  just drag it, to reorder it within its own step. Reordering "Execute
+  Step"/"Skip Step" conditions is cosmetic only (they're still combined the
+  same way regardless of order); with more than one "Override Hold Time"
   condition on the same step, the first one (in list order) that currently
   matches is the one whose override applies.
 
 Copying a step (Copy/Paste, or copying a whole rotation) carries its
 conditions along with it. Conditions with an image-match template participate
 in the same template-file portability/cleanup rules described above.
+
+## Condition Groups (optional, rotation-level)
+
+A **Condition Group** is the rotation-level counterpart to a step's own
+Conditions above: instead of gating one step, it gates a whole block of
+steps nested under it at once. Handy for a burst combo that should only run
+in its entirety while some buff/debuff is up, without adding the same
+condition to every step in that combo individually.
+
+A group holds exactly one condition (an image or pixel match — never a
+Timer condition, and never an AND'd list the way a step's Conditions can be)
+and an **Action**:
+
+- **Execute Group** — every step nested in the group only runs while the
+  condition matches; while it doesn't, the whole group is skipped this pass
+  (no fire, no delay, for any step nested in it) and the rotation moves on
+  to whatever comes after the group.
+- **Skip Group** — a veto: while the condition matches, the whole group is
+  skipped this pass, regardless of Execute Group. Handy for "don't run this
+  combo while stunned/silenced."
+
+There's no Override Hold Time option and no Wait-up-to-ms polling at the
+group level (both stay per-step, on a step's own Conditions) — a group's
+condition is always a single, instant check. Groups never nest inside each
+other; a group holds steps directly.
+
+**Add Condition Group (Image)...**/**Add Condition Group (Pixel)...** (in
+the **Rotation Conditions** section) calibrate the group's condition
+exactly like adding a step's own Image/Pixel Condition does, then add a
+new, empty group to the end of the step list — select it afterward to set
+its Name/Action/Negate right there in Rotation Conditions and click
+**Update Selected Condition Group** to apply. Unlike Selected Step/Skill
+Conditions (which hide while a group's own row is selected, since a group
+has no Key/Delay/Hold/Repeat/per-step Conditions of its own), Rotation
+Conditions stays visible no matter what's selected — its Name/Action/Negate
+fields just blank out until a group is actually selected. Double-click a
+group's row to recalibrate its match, the same as double-clicking a step's
+condition.
+
+Steps end up nested under a group two ways: select the group (or one of its
+own nested steps/conditions) and click **Add Step**/**Add Sleep**, which
+appends into that group instead of the top level; or drag an existing step
+onto the group's row to move it in — dragging a nested step out to the top
+level, or into a different group, works the same way in reverse. Move
+Up/Move Down and a plain drag reorder a nested step within its own group,
+or a group itself among the rotation's other top-level steps/groups, the
+same way Move Up/Move Down and dragging already work for a plain step.
+Removing a non-empty group (Remove Selected) asks for confirmation first,
+since it deletes every step nested inside it along with the group.
 
 ## Repeat and Combine Hold (optional, per step)
 
@@ -217,7 +266,7 @@ skills that need a fresh, discrete press each time. Combine Hold has no effect
 (and isn't needed) on a tap, or when Repeat is 1.
 
 Repeat only fires once through the step's own Conditions — they aren't
-re-checked between reps, including any "Change key hold amount" override,
+re-checked between reps, including any "Override Hold Time" condition,
 which is captured once (before the first rep) and used for all of them.
 
 ## Multi-select, drag-and-drop, and clipboard
@@ -226,12 +275,18 @@ The step list supports multi-select (ctrl/shift-click, same as the rotation
 list on the left) and drag-and-drop, on top of the buttons described above:
 
 - **Drag** one or more selected rows to reorder them — drag a step (or
-  several multi-selected steps) to reposition it in the rotation; drag a
-  condition (or several, multi-selected) to reposition it within its own
-  step. A highlighted row shows where it'll land as you drag. Dragging a mix
-  of steps and conditions together, or conditions from more than one step at
-  once, isn't supported — nothing happens rather than doing something
-  surprising. Move Up/Move Down still work as a click-based alternative.
+  several multi-selected steps sharing the same current group, or lack of
+  one) to reposition it, including onto a Condition Group's row (or a step
+  already nested in one) to move it into/out of/between groups; drag a
+  Condition Group (or several) to reposition it among the rotation's other
+  top-level steps/groups — groups never nest, so a group drag only ever
+  lands at the top level; drag a condition (or several, multi-selected) to
+  reposition it within its own step. A highlighted row shows where it'll
+  land as you drag. Dragging a mix of groups/steps/conditions together, or
+  conditions from more than one step at once, isn't supported — nothing
+  happens rather than doing something surprising. Move Up/Move Down still
+  work as a click-based alternative, moving a step within its own group (or
+  a group within the top level) the same way dragging does.
 - **Copy** copies every currently-selected step (with its conditions) to an
   in-memory clipboard; **Paste** inserts a copy of the clipboard's contents
   after whichever step/condition is selected (or at the end, if nothing is).
@@ -327,9 +382,7 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
 
    **Unbind** clears this rotation's hotkey and saves immediately — use it when you
    want to move a hotkey to a different rotation: Unbind it here first to free the
-   key up, then Bind Hotkey it on the other rotation. **Unbind All** does the same
-   for every saved rotation at once (with a confirmation prompt first), for
-   starting your key bindings over from scratch.
+   key up, then Bind Hotkey it on the other rotation.
 3. **Cancel Key** (optional) immediately stops this rotation if it's currently
    running — bind it the same way as the trigger hotkey, e.g. to your dodge key,
    so rolling away instantly cuts off whatever the rotation was doing instead of

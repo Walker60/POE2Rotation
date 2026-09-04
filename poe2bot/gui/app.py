@@ -11,7 +11,7 @@ from poe2bot import app_state, controller, storage
 from poe2bot.executor import RotationManager, STATUS_RUNNING
 from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Rotation, validate_rotation, replace_step_fields, folder_in_scope
+from poe2bot.models import Rotation, validate_rotation, replace_step_fields, folder_in_scope, iter_steps
 
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
@@ -22,6 +22,7 @@ from poe2bot.gui.step_editor import StepEditorMixin
 from poe2bot.gui.drag_drop import DragDropMixin
 from poe2bot.gui.calibration import CalibrationMixin
 from poe2bot.gui.conditions import ConditionsMixin, CONDITION_ACTION_LABELS
+from poe2bot.gui.condition_groups import ConditionGroupsMixin, GROUP_CONDITION_ACTION_LABELS
 from poe2bot.gui.hotkeys_ui import HotkeysMixin
 from poe2bot.gui.widgets import CollapsibleSection
 from poe2bot.gui.constants import STATUS_COLORS
@@ -30,7 +31,7 @@ log = get_logger()
 
 
 class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
-          CalibrationMixin, ConditionsMixin, HotkeysMixin):
+          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, HotkeysMixin):
     def __init__(self):
         super().__init__()
         self.title("POE2 Rotation Bot")
@@ -80,6 +81,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                                                # (not index) so navigating to a different tree row
                                                # can auto-commit an in-progress edit onto the right
                                                # object even after a reorder (see _on_select_step)
+        self._selected_group_ref = None       # the actual ConditionGroup object currently loaded
+                                               # into the Rotation Conditions section's fields, or
+                                               # None -- mutually exclusive with _selected_step_ref
         self._suppress_commit_on_select = False  # True only while _discard_selected_step_edits is
                                                   # clearing the tree's selection itself, so that
                                                   # doesn't get misread as "user navigated away" and
@@ -202,7 +206,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             rotation.cancel_key, rotation.alt_cancel_key = rotation.alt_cancel_key, rotation.cancel_key
             rotation.reset_key, rotation.alt_reset_key = rotation.alt_reset_key, rotation.reset_key
             rotation.pause_key, rotation.alt_pause_key = rotation.alt_pause_key, rotation.pause_key
-            for step in rotation.steps:
+            for step in iter_steps(rotation.steps):
                 step.key, step.alt_key = step.alt_key, step.key
             storage.save_rotation(rotation)
             if self._folder_in_scope(rotation.folder):
@@ -216,6 +220,25 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
     # ---- widget layout -------------------------------------------------
 
     def _build_widgets(self):
+        # Packed first (before left/right below) and side="bottom", so it claims a
+        # full-width strip at the bottom of the window while the cavity still has
+        # its full width -- packing it last (as originally written) let the
+        # side="left" panels' cavity carving claim the full window width first,
+        # squeezing this bar into a thin sliver instead of spanning edge-to-edge
+        # (verified empirically: mixing pack sides only behaves as expected when
+        # the differently-sided widget is packed before its same-axis siblings).
+        bottom = ttk.Frame(self, padding=8)
+        bottom.pack(side="bottom", fill="x")
+        self.toggle_btn = ttk.Button(bottom, text="Stop Bot", command=self._toggle_bot)
+        self.toggle_btn.pack(side="left")
+        self.status_var = tk.StringVar(value="Bot running. Hotkeys are live.")
+        ttk.Label(bottom, textvariable=self.status_var).pack(side="left", padx=8)
+        # Bound to the "Keyboard"/"Controller" radio buttons in SettingsWindow --
+        # created here, unconditionally, since _on_active_device_changed reads it
+        # regardless of whether Settings has ever been opened this session.
+        self.active_device_var = tk.StringVar(value=self.active_device)
+        ttk.Button(bottom, text="Settings...", command=self._on_show_settings_clicked).pack(side="right")
+
         left = ttk.Frame(self, padding=8)
         left.pack(side="left", fill="y")
 
@@ -252,13 +275,26 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
 
         btns = ttk.Frame(left)
         btns.pack(fill="x", pady=4)
-        ttk.Button(btns, text="New", command=self._new_rotation).pack(side="left", expand=True, fill="x")
-        ttk.Button(btns, text="Copy", command=self._copy_rotation).pack(side="left", expand=True, fill="x")
+        ttk.Button(btns, text="New", command=self._new_rotation).pack(
+            side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(btns, text="Copy", command=self._copy_rotation).pack(
+            side="left", expand=True, fill="x", padx=(0, 4))
         ttk.Button(btns, text="Delete", style=theme.DANGER_BUTTON_STYLE,
                    command=self._delete_rotation).pack(side="left", expand=True, fill="x")
 
         right = ttk.Frame(self, padding=8)
         right.pack(side="left", fill="both", expand=True)
+
+        # Packed side="bottom" and packed here (before the expand=True tree_frame
+        # below) so it keeps its reserved space and stays pinned to the bottom of
+        # this panel instead of being pushed off-screen when the window is
+        # shrunk -- see the similar note on the root-level `bottom` bar above.
+        save_row = ttk.Frame(right)
+        save_row.pack(side="bottom", fill="x", pady=(4, 0))
+        ttk.Button(save_row, text="Revert to Saved", style=theme.DANGER_BUTTON_STYLE,
+                   command=self._on_revert_clicked).pack(side="right", padx=(4, 0))
+        self.save_rotation_btn = ttk.Button(save_row, text="Save Rotation", command=self._save_rotation)
+        self.save_rotation_btn.pack(side="right")
 
         name_row = ttk.Frame(right)
         name_row.pack(fill="x")
@@ -276,50 +312,93 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
 
         mode_row = ttk.Frame(right)
         mode_row.pack(fill="x", pady=4)
-        ttk.Label(mode_row, text="Mode:").pack(side="left")
+        ttk.Label(mode_row, text="Mode:").pack(side="left", padx=(0, 8))
         self.mode_var = tk.StringVar(value="once")
-        ttk.Radiobutton(mode_row, text="Once", variable=self.mode_var, value="once").pack(side="left")
+        ttk.Radiobutton(mode_row, text="Once", variable=self.mode_var, value="once").pack(side="left", padx=(0, 12))
         ttk.Radiobutton(mode_row, text="Loop", variable=self.mode_var, value="loop").pack(side="left")
+
+        # Everything below (hotkeys, the steps list, step actions/fields, and
+        # conditions) can add up to more vertical space than the window has --
+        # a Canvas + Scrollbar is the standard Tk way to make an arbitrary
+        # stack of widgets scrollable (ttk has no native scrollable frame).
+        # Name/Folder/Mode above stay outside this canvas so they're always
+        # visible; Save Rotation/Revert below stay pinned via side="bottom"
+        # (see the note there) so they're unaffected by this either.
+        scroll_container = ttk.Frame(right)
+        scroll_container.pack(fill="both", expand=True, pady=(4, 0))
+        # A plain tk.Canvas (there's no ttk one) isn't auto-styled the way the
+        # rest of the GUI is -- its background needs to be kept in sync with
+        # the current theme by hand, same idea as _sync_root_background below.
+        editor_canvas = tk.Canvas(
+            scroll_container, highlightthickness=0, bd=0, bg=ttk.Style().lookup("TFrame", "background"))
+        self.editor_canvas = editor_canvas
+        editor_scroll = ttk.Scrollbar(scroll_container, orient="vertical", command=editor_canvas.yview)
+        editor_canvas.configure(yscrollcommand=editor_scroll.set)
+        editor_canvas.pack(side="left", fill="both", expand=True)
+        editor_scroll.pack(side="right", fill="y")
+        scroll_body = ttk.Frame(editor_canvas)
+        scroll_window = editor_canvas.create_window((0, 0), window=scroll_body, anchor="nw")
+
+        def _on_scroll_body_configure(_event):
+            editor_canvas.configure(scrollregion=editor_canvas.bbox("all"))
+        scroll_body.bind("<Configure>", _on_scroll_body_configure)
+
+        def _on_editor_canvas_configure(event):
+            # Keeps scroll_body (and everything packed fill="x" inside it) the
+            # same width as the visible canvas, instead of shrink-wrapping to
+            # its widest child -- otherwise fill="x" rows would have nothing
+            # meaningful to fill against.
+            editor_canvas.itemconfigure(scroll_window, width=event.width)
+        editor_canvas.bind("<Configure>", _on_editor_canvas_configure)
+
+        def _on_editor_mousewheel(event):
+            editor_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # Bound/unbound on hover (not bind_all for the app's lifetime) so scrolling
+        # over the rotation list or the steps tree's own scrollbar isn't hijacked.
+        editor_canvas.bind("<Enter>", lambda _e: editor_canvas.bind_all("<MouseWheel>", _on_editor_mousewheel))
+        editor_canvas.bind("<Leave>", lambda _e: editor_canvas.unbind_all("<MouseWheel>"))
 
         # ---- key bindings: one compact grid instead of 4 near-duplicate rows ----
         self.hotkey_label_var = tk.StringVar(value="(unbound)")
         self.cancel_key_label_var = tk.StringVar(value="(unbound)")
         self.reset_key_label_var = tk.StringVar(value="(unbound)")
         self.pause_key_label_var = tk.StringVar(value="(unbound)")
-        keys_frame = ttk.Frame(right)
-        keys_frame.pack(fill="x", pady=(6, 4))
+        self.hotkeys_section = CollapsibleSection(scroll_body, title="Hotkeys", padding=6)
+        self.hotkeys_section.pack(fill="x", pady=(6, 4))
+        keys_frame = ttk.Frame(self.hotkeys_section.body)
+        keys_frame.pack(fill="x")
         key_bind_rows = (
             ("Hotkey:", self.hotkey_label_var, "bind_hotkey_btn",
-             self._on_bind_hotkey_clicked, "Unbind", self._on_unbind_clicked),
+             self._on_bind_hotkey_clicked, self._on_unbind_clicked),
             ("Cancel Key:", self.cancel_key_label_var, "bind_cancel_btn",
-             self._on_bind_cancel_clicked, "Clear", self._on_clear_cancel_key),
+             self._on_bind_cancel_clicked, self._on_clear_cancel_key),
             ("Reset Key:", self.reset_key_label_var, "bind_reset_btn",
-             self._on_bind_reset_clicked, "Clear", self._on_clear_reset_key),
+             self._on_bind_reset_clicked, self._on_clear_reset_key),
             ("Pause Key:", self.pause_key_label_var, "bind_pause_btn",
-             self._on_bind_pause_clicked, "Clear", self._on_clear_pause_key),
+             self._on_bind_pause_clicked, self._on_clear_pause_key),
         )
-        for row_i, (label, var, btn_attr, bind_cmd, clear_text, clear_cmd) in enumerate(key_bind_rows):
-            ttk.Label(keys_frame, text=label).grid(row=row_i, column=0, sticky="w", pady=2)
-            ttk.Label(keys_frame, textvariable=var, width=14).grid(row=row_i, column=1, padx=(4, 8), sticky="w")
+        for row_i, (label, var, btn_attr, bind_cmd, unbind_cmd) in enumerate(key_bind_rows):
+            ttk.Label(keys_frame, text=label).grid(row=row_i, column=0, sticky="w", padx=(0, 4), pady=4)
+            ttk.Label(keys_frame, textvariable=var, width=14).grid(
+                row=row_i, column=1, padx=(4, 12), pady=4, sticky="w")
             btn = ttk.Button(keys_frame, text="Bind...", width=10, command=bind_cmd)
-            btn.grid(row=row_i, column=2, padx=(0, 4))
+            btn.grid(row=row_i, column=2, padx=(0, 8), pady=4)
             setattr(self, btn_attr, btn)
-            ttk.Button(keys_frame, text=clear_text, style=theme.DANGER_BUTTON_STYLE,
-                       command=clear_cmd).grid(row=row_i, column=3, padx=(0, 4), sticky="w")
-        ttk.Button(keys_frame, text="Unbind All", style=theme.DANGER_BUTTON_STYLE,
-                   command=self._unbind_all_rotations).grid(row=0, column=4, padx=(12, 0), sticky="w")
-        reset_extra = ttk.Frame(keys_frame)
-        reset_extra.grid(row=2, column=4, padx=(12, 0), sticky="w")
-        ttk.Label(reset_extra, text="Delay (ms)").pack(side="left", padx=(0, 2))
-        self.reset_delay_var = tk.StringVar(value="0")
-        ttk.Entry(reset_extra, textvariable=self.reset_delay_var, width=6).pack(side="left")
+            ttk.Button(keys_frame, text="Unbind", style=theme.DANGER_BUTTON_STYLE,
+                       command=unbind_cmd).grid(row=row_i, column=3, padx=(0, 4), pady=4, sticky="w")
         ttk.Label(keys_frame,
                   text="Cancel = e.g. your dodge key, stops instantly. Reset restarts from step 1. "
                        "Pause freezes in place.",
-                  foreground="gray").grid(row=4, column=0, columnspan=5, sticky="w", pady=(4, 0))
+                  foreground="gray").grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
-        pause_mode_row = ttk.Frame(right)
-        pause_mode_row.pack(fill="x", pady=(0, 4))
+        reset_delay_row = ttk.Frame(self.hotkeys_section.body)
+        reset_delay_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(reset_delay_row, text="Reset delay (ms)").pack(side="left", padx=(0, 4))
+        self.reset_delay_var = tk.StringVar(value="0")
+        ttk.Entry(reset_delay_row, textvariable=self.reset_delay_var, width=6).pack(side="left")
+
+        pause_mode_row = ttk.Frame(self.hotkeys_section.body)
+        pause_mode_row.pack(fill="x", pady=(8, 0))
         ttk.Label(pause_mode_row, text="Pause behavior:").pack(side="left")
         self.pause_mode_var = tk.StringVar(value="duration")
         ttk.Radiobutton(pause_mode_row, text="For", variable=self.pause_mode_var, value="duration").pack(side="left")
@@ -331,7 +410,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Label(pause_mode_row, text="freezes this rotation in place, resuming the same step",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
-        tree_frame = ttk.Frame(right)
+        tree_frame = ttk.Frame(scroll_body)
         tree_frame.pack(fill="both", expand=True, pady=(8, 4))
         self.tree = ttk.Treeview(
             tree_frame, columns=("key", "delay", "jitter", "hold", "hold_jitter", "repeat"),
@@ -366,11 +445,11 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.tree.bind("<ButtonRelease-1>", self._on_tree_release)
         self.tree.tag_configure("drop_target", background=self._drop_target_color())
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(0, 8))
+        ttk.Separator(scroll_body, orient="horizontal").pack(fill="x", pady=(0, 8))
 
-        step_actions_group = ttk.LabelFrame(right, text="Step Actions", padding=6)
-        step_actions_group.pack(fill="x", pady=(0, 6))
-        step_btns = ttk.Frame(step_actions_group)
+        self.skill_steps_section = CollapsibleSection(scroll_body, title="Skill Steps", padding=6)
+        self.skill_steps_section.pack(fill="x", pady=(0, 6))
+        step_btns = ttk.Frame(self.skill_steps_section.body)
         step_btns.pack(fill="x")
         for text, cmd, style in (
             ("Add Step", self._add_step, None), ("Add Sleep", self._add_sleep_step, None),
@@ -381,7 +460,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             kwargs = {"style": style} if style else {}
             ttk.Button(step_btns, text=text, command=cmd, **kwargs).pack(side="left", padx=(0, 4))
 
-        step_fields_group = ttk.LabelFrame(right, text="Selected Step", padding=6)
+        step_fields_group = ttk.LabelFrame(scroll_body, text="Selected Step", padding=6)
+        self.step_fields_group = step_fields_group
         step_fields_group.pack(fill="x", pady=(0, 6))
         self.step_name_var = tk.StringVar(value="Skill")
         self.step_key_var = tk.StringVar()
@@ -436,7 +516,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # Not packed here -- only shown while there's an actual error, see _read_step_form.
 
         self.conditions_section = CollapsibleSection(
-            right, title="Conditions", padding=6, start_collapsed=True,
+            scroll_body, title="Skill Conditions", padding=6, start_collapsed=True,
             on_toggle=lambda collapsed: self._on_section_toggled("conditions", collapsed))
         self.conditions_section.pack(fill="x", pady=(0, 6))
         condition_btns = ttk.Frame(self.conditions_section.body)
@@ -453,7 +533,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                    command=self._on_paste_conditions_clicked).pack(side="left", padx=(0, 4))
         ttk.Label(condition_btns,
                   text="(double-click a condition in the list to recalibrate its match;"
-                       " use Move Up/Move Down in Step Actions to reorder it)",
+                       " use Move Up/Move Down in Skill Steps to reorder it)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         condition_name_row = ttk.Frame(self.conditions_section.body)
@@ -497,24 +577,53 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Button(condition_apply_row, text="Update Selected Condition",
                    command=self._on_update_condition_clicked).pack(side="left")
 
-        save_row = ttk.Frame(right)
-        save_row.pack(fill="x", pady=(4, 0))
-        ttk.Button(save_row, text="Revert to Saved", style=theme.DANGER_BUTTON_STYLE,
-                   command=self._on_revert_clicked).pack(side="right", padx=(4, 0))
-        self.save_rotation_btn = ttk.Button(save_row, text="Save Rotation", command=self._save_rotation)
-        self.save_rotation_btn.pack(side="right")
+        # Unlike step_fields_group/conditions_section (hidden whenever a
+        # condition group's own row is selected, since a group has no Key/
+        # Delay/Hold/Repeat/per-step Conditions of its own -- see
+        # ConditionGroupsMixin._set_step_panels_visible), this section is
+        # always visible: its Add Condition Group buttons don't depend on
+        # any particular selection, only the Name/Action/Negate fields below
+        # them do (blanked via _populate_group_condition_form(None) when
+        # nothing/a step is selected).
+        self.rotation_conditions_section = CollapsibleSection(
+            scroll_body, title="Rotation Conditions", padding=6, start_collapsed=True)
+        self.rotation_conditions_section.pack(fill="x", pady=(0, 6))
+        group_action_btns = ttk.Frame(self.rotation_conditions_section.body)
+        group_action_btns.pack(fill="x")
+        ttk.Button(group_action_btns, text="Add Condition Group (Image)...",
+                   command=self._on_add_image_condition_group_clicked).pack(side="left", padx=(0, 4))
+        ttk.Button(group_action_btns, text="Add Condition Group (Pixel)...",
+                   command=self._on_add_pixel_condition_group_clicked).pack(side="left", padx=(0, 4))
+        ttk.Label(group_action_btns,
+                  text="(gates a whole block of steps at once -- select it, then Add Step/Add Sleep in"
+                       " Skill Steps, or drag an existing step onto it, to nest steps under it)",
+                  foreground="gray").pack(side="left", padx=(8, 0))
 
-        bottom = ttk.Frame(self, padding=8)
-        bottom.pack(side="bottom", fill="x")
-        self.toggle_btn = ttk.Button(bottom, text="Stop Bot", command=self._toggle_bot)
-        self.toggle_btn.pack(side="left")
-        self.status_var = tk.StringVar(value="Bot running. Hotkeys are live.")
-        ttk.Label(bottom, textvariable=self.status_var).pack(side="left", padx=8)
-        # Bound to the "Keyboard"/"Controller" radio buttons in SettingsWindow --
-        # created here, unconditionally, since _on_active_device_changed reads it
-        # regardless of whether Settings has ever been opened this session.
-        self.active_device_var = tk.StringVar(value=self.active_device)
-        ttk.Button(bottom, text="Settings...", command=self._on_show_settings_clicked).pack(side="right")
+        group_name_row = ttk.Frame(self.rotation_conditions_section.body)
+        group_name_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(group_name_row, text="Name:").pack(side="left")
+        self.group_name_var = tk.StringVar()
+        ttk.Entry(group_name_row, textvariable=self.group_name_var, width=16).pack(side="left", padx=(2, 12))
+        ttk.Label(group_name_row, text="Action:").pack(side="left")
+        self.group_action_var = tk.StringVar(value=GROUP_CONDITION_ACTION_LABELS["fire"])
+        ttk.Combobox(group_name_row, textvariable=self.group_action_var,
+                     values=list(GROUP_CONDITION_ACTION_LABELS.values()), state="readonly", width=16).pack(
+            side="left", padx=(2, 12))
+        self.group_negate_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(group_name_row, text="Negate (invert the match)",
+                        variable=self.group_negate_var).pack(side="left")
+
+        group_summary_row = ttk.Frame(self.rotation_conditions_section.body)
+        group_summary_row.pack(fill="x", pady=(6, 0))
+        self.group_match_summary_var = tk.StringVar()
+        ttk.Label(group_summary_row, textvariable=self.group_match_summary_var).pack(side="left")
+        ttk.Label(group_summary_row, text="  (double-click this row in the list to recalibrate its match)",
+                  foreground="gray").pack(side="left")
+
+        group_apply_row = ttk.Frame(self.rotation_conditions_section.body)
+        group_apply_row.pack(fill="x", pady=(4, 0))
+        ttk.Button(group_apply_row, text="Update Selected Condition Group",
+                   command=self._on_update_condition_group_clicked).pack(side="left")
 
     # ---- appearance -----------------------------------------------------------
 
@@ -527,6 +636,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         bg = ttk.Style().lookup("TFrame", "background")
         if bg:
             self.configure(bg=bg)
+            if getattr(self, "editor_canvas", None) is not None:
+                self.editor_canvas.configure(bg=bg)
 
     def _toggle_theme(self):
         self._theme = theme.toggle_theme(self._theme)
@@ -605,18 +716,20 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return True
-        step_idx = parsed[0]
+        group_idx, step_idx, _cond_idx = parsed
+        if step_idx is None:
+            return True  # a condition group's own header row is selected -- no step form pending
+        existing = self._steps_list_for(group_idx)[step_idx]
         step = self._read_step_form(
-            conditions=self.editing_steps[step_idx].conditions,
-            is_new_step=False, original_key=self.editing_steps[step_idx].key,
-            alt_key=self.editing_steps[step_idx].alt_key)
+            conditions=existing.conditions, is_new_step=False,
+            original_key=existing.key, alt_key=existing.alt_key)
         if step is None:
             return False
         # In place, preserving identity -- so a manually collapsed/expanded tree
         # row or CollapsibleSection override (both tracked by id(step)) doesn't
         # spring back to its default state on every apply, even one with no
         # actual field changes.
-        replace_step_fields(self.editing_steps[step_idx], step)
+        replace_step_fields(existing, step)
         self._refresh_steps_tree()
         return True
 

@@ -3,16 +3,16 @@ import copy
 from poe2bot import storage, templates
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Condition
+from poe2bot.models import Condition, iter_conditions
 
 log = get_logger()
 
 # Human labels for Condition.action, and back -- shared by the Action combobox
 # (app.py), _populate_condition_form, and _on_update_condition_clicked below.
 CONDITION_ACTION_LABELS = {
-    "fire": "Fire the skill",
-    "block": "Not fire the skill",
-    "hold": "Change key hold amount",
+    "fire": "Execute Step",
+    "block": "Skip Step",
+    "hold": "Override Hold Time",
 }
 _CONDITION_ACTION_BY_LABEL = {label: action for action, label in CONDITION_ACTION_LABELS.items()}
 
@@ -25,47 +25,52 @@ class ConditionsMixin:
     Check, plain Condition) -- see Condition.action in models.py. Mixed into
     App (see poe2bot/gui/app.py) -- Add/recalibrate Condition reuse
     CalibrationMixin's _start_image_capture/_start_pixel_capture via the
-    on_use callback."""
+    on_use callback. See poe2bot/gui/condition_groups.py for the parallel
+    rotation-level Condition Group concept (one condition gating a whole
+    block of steps rather than one step's own conditions)."""
 
     def _on_add_image_condition_clicked(self):
-        step_idx = self._selected_owning_step_index()
-        if step_idx is None:
+        location = self._selected_owning_step_location()
+        if location is None:
             return
+        group_idx, step_idx = location
         self._start_image_capture(on_use=lambda filename, region, confidence, search_mode, search_region: self._add_condition(
-            step_idx, Condition(match_type="image", template=filename, region=region, confidence=confidence,
-                                 search_mode=search_mode, search_region=search_region)))
+            group_idx, step_idx, Condition(match_type="image", template=filename, region=region, confidence=confidence,
+                                            search_mode=search_mode, search_region=search_region)))
 
     def _on_add_pixel_condition_clicked(self):
-        step_idx = self._selected_owning_step_index()
-        if step_idx is None:
+        location = self._selected_owning_step_location()
+        if location is None:
             return
+        group_idx, step_idx = location
         self._start_pixel_capture(on_use=lambda point, color, confidence: self._add_condition(
-            step_idx, Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)))
+            group_idx, step_idx, Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)))
 
     def _on_add_timer_condition_clicked(self):
         # No screen capture needed -- unlike image/pixel, the value is just
         # typed in directly, so this skips CalibrationMixin's overlay flow
         # entirely.
-        step_idx = self._selected_owning_step_index()
-        if step_idx is None:
+        location = self._selected_owning_step_location()
+        if location is None:
             return
+        group_idx, step_idx = location
         seconds = messagebox.askfloat(
             "Add Timer Condition", "Minimum seconds since this step's last use:",
             initialvalue=5.0, minvalue=0.1, parent=self)
         if seconds is None:
             return
-        self._add_condition(step_idx, Condition(match_type="timer", timer_seconds=seconds))
+        self._add_condition(group_idx, step_idx, Condition(match_type="timer", timer_seconds=seconds))
 
-    def _add_condition(self, step_idx: int, condition: Condition):
+    def _add_condition(self, group_idx, step_idx: int, condition: Condition):
         """Appends `condition` (default action="fire", exactly today's plain
         gating behavior) and selects its new row, so the Action/Timeout/
         Hold/Delay editor is immediately showing it -- picking Block or
         Change Key Hold Amount, or a wait timeout, is a follow-up step now
         that those are no longer separate calibration flows of their own."""
-        self.editing_steps[step_idx].conditions.append(condition)
+        conditions = self._steps_list_for(group_idx)[step_idx].conditions
+        conditions.append(condition)
         self._refresh_steps_tree()
-        cond_idx = len(self.editing_steps[step_idx].conditions) - 1
-        self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx}")
+        self.tree.selection_set(self._location_iid(group_idx, step_idx, len(conditions) - 1))
 
     # ---- the per-condition editor (Name/Action/Negate/Timeout/Hold/Delay) ----
 
@@ -121,10 +126,10 @@ class ConditionsMixin:
             messagebox.showinfo("Select one condition", "Select exactly one condition to update.")
             return
         parsed = self._parse_tree_iid(selection[0])
-        if parsed is None or parsed[1] is None:
+        if parsed is None or parsed[2] is None:
             messagebox.showinfo("Select a condition", "Select a condition (not a step) to update.")
             return
-        step_idx, cond_idx = parsed
+        group_idx, step_idx, cond_idx = parsed
         action = _CONDITION_ACTION_BY_LABEL.get(self.condition_action_var.get(), "fire")
         try:
             timeout_ms = int(self.condition_timeout_var.get() or 0)
@@ -140,7 +145,7 @@ class ConditionsMixin:
         if timeout_ms < 0 or (hold_ms is not None and hold_ms < 0) or (delay_ms is not None and delay_ms < 0):
             messagebox.showerror("Invalid condition", "Wait timeout, Hold override, and Delay override cannot be negative.")
             return
-        condition = self.editing_steps[step_idx].conditions[cond_idx]
+        condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
         condition.name = self.condition_name_var.get().strip()
         condition.negate = self.condition_negate_var.get()
         condition.action = action
@@ -148,7 +153,7 @@ class ConditionsMixin:
         condition.hold_ms = hold_ms
         condition.delay_ms = delay_ms
         self._refresh_steps_tree()
-        self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx}")
+        self.tree.selection_set(self._location_iid(group_idx, step_idx, cond_idx))
 
     def _on_tree_double_click(self, _event):
         """Double-clicking a condition row recalibrates its match in place
@@ -158,15 +163,23 @@ class ConditionsMixin:
         recalibrating is only meant to fix *what's being matched*, not
         *what happens when it matches*. Double-clicking a step row is a
         no-op -- steps are recalibrated via a condition's own row, there's
-        no equivalent step-level check anymore."""
+        no equivalent step-level check anymore. Double-clicking a condition
+        GROUP's own row dispatches to its own recalibrate flow instead (see
+        ConditionGroupsMixin._on_group_row_double_click) -- a group has a
+        single condition living directly on it, not a list of child rows."""
         selection = self.tree.selection()
         if not selection:
             return
         parsed = self._parse_tree_iid(selection[0])
-        if parsed is None or parsed[1] is None:
+        if parsed is None:
             return
-        step_idx, cond_idx = parsed
-        condition = self.editing_steps[step_idx].conditions[cond_idx]
+        group_idx, step_idx, cond_idx = parsed
+        if step_idx is None:
+            self._on_group_row_double_click(group_idx)
+            return
+        if cond_idx is None:
+            return
+        condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
 
         def replace(new_condition: Condition):
             new_condition.name = condition.name
@@ -175,7 +188,7 @@ class ConditionsMixin:
             new_condition.timeout_ms = condition.timeout_ms
             new_condition.hold_ms = condition.hold_ms
             new_condition.delay_ms = condition.delay_ms
-            self.editing_steps[step_idx].conditions[cond_idx] = new_condition
+            self._steps_list_for(group_idx)[step_idx].conditions[cond_idx] = new_condition
             self._refresh_steps_tree()
             self._populate_condition_form(new_condition)
 
@@ -207,10 +220,11 @@ class ConditionsMixin:
         in-memory clipboard that lives on the App, so it survives switching
         rotations (enables cross-rotation paste), mirroring
         StepEditorMixin._on_copy_clicked's whole-step clipboard."""
-        step_idx = self._selected_owning_step_index()
-        if step_idx is None:
+        location = self._selected_owning_step_location()
+        if location is None:
             return
-        conditions = self.editing_steps[step_idx].conditions
+        group_idx, step_idx = location
+        conditions = self._steps_list_for(group_idx)[step_idx].conditions
         if not conditions:
             messagebox.showinfo("No conditions to copy", "This step has no conditions to copy.")
             return
@@ -227,13 +241,13 @@ class ConditionsMixin:
             messagebox.showinfo("Clipboard is empty", "Copy conditions from a step first.")
             return
         selection = self.tree.selection()
-        step_indices = sorted({p[0] for p in (self._parse_tree_iid(iid) for iid in selection)
-                                if p is not None})
-        if not step_indices:
+        step_locations = {(p[0], p[1]) for p in (self._parse_tree_iid(iid) for iid in selection)
+                           if p is not None and p[1] is not None}
+        if not step_locations:
             messagebox.showinfo("No step selected", "Select at least one step to paste conditions onto.")
             return
-        for step_idx in step_indices:
-            self.editing_steps[step_idx].conditions.extend(copy.deepcopy(self._condition_clipboard))
+        for group_idx, step_idx in step_locations:
+            self._steps_list_for(group_idx)[step_idx].conditions.extend(copy.deepcopy(self._condition_clipboard))
         self._refresh_steps_tree()
 
     # ---- template lifecycle ---------------------------------------------------
@@ -241,14 +255,8 @@ class ConditionsMixin:
     def _referenced_templates(self) -> set:
         keep = set()
         for rotation in self.rotations.values():
-            for step in rotation.steps:
-                for condition in step.conditions:
-                    if condition.template:
-                        keep.add(condition.template)
-        for step in self.editing_steps:
-            for condition in step.conditions:
-                if condition.template:
-                    keep.add(condition.template)
+            keep.update(c.template for c in iter_conditions(rotation.steps) if c.template)
+        keep.update(c.template for c in iter_conditions(self.editing_steps) if c.template)
         return keep
 
     def _sweep_templates(self):

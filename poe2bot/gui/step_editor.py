@@ -4,7 +4,7 @@ import threading
 import tkinter as tk
 
 from poe2bot.gui import dialogs as messagebox
-from poe2bot.models import Step, replace_step_fields
+from poe2bot.models import ConditionGroup, Step, replace_step_fields
 
 # (StringVar attr, Entry attr, parser, allow_blank, Step field name, display label) for
 # every numeric field on the Selected Step form -- drives _read_step_form's per-field
@@ -24,7 +24,23 @@ class StepEditorMixin:
     it, the reset helpers that blank it for a fresh step (also called from
     RotationListMixin when switching rotations), Add/Update/Remove/Copy/
     Paste/Move, and capturing a controller button press directly into the
-    Key field. Mixed into App (see poe2bot/gui/app.py)."""
+    Key field. Mixed into App (see poe2bot/gui/app.py).
+
+    self.editing_steps is a heterogeneous list of Step | ConditionGroup (see
+    poe2bot/models.py). Every tree row is addressed by a 3-tuple
+    (group_idx, step_idx, cond_idx), each part either an int or None:
+      (g, None, None)  -- a ConditionGroup's own header row (top-level index g)
+      (None, s, None)  -- a top-level Step
+      (None, s, c)     -- a top-level Step's c'th condition
+      (g, s, None)     -- a Step nested inside group g
+      (g, s, c)        -- that nested Step's c'th condition
+    `_parse_tree_iid` is the single place that turns a tree iid string into
+    this tuple; `_steps_list_for(group_idx)` turns `group_idx` into the
+    actual list a `step_idx` indexes into (self.editing_steps, or that
+    group's own .steps). See poe2bot/gui/condition_groups.py for the
+    parallel per-group condition editor and creation flow, and
+    poe2bot/gui/drag_drop.py for reordering/reparenting across these lists.
+    """
 
     # ---- controller-button capture for the Key field -----------------------
 
@@ -79,12 +95,15 @@ class StepEditorMixin:
         self._populate_condition_form(None)
         self.conditions_section.set_collapsed(True)
         self._clear_form_errors()
+        self._set_step_panels_visible(True)
+        self._populate_group_condition_form(None)
         # Blanking the form always means nothing is meaningfully "selected" for
         # auto-commit/dirty-check purposes, even for call sites (_new_rotation,
         # _load_rotation_into_form) that never touch self.tree's own selection
         # and so would otherwise leave this pointing at a step from a rotation
         # that isn't even open anymore.
         self._selected_step_ref = None
+        self._selected_group_ref = None
 
     def _clear_form_errors(self):
         """Resets every numeric Entry's invalid-state highlight and hides the
@@ -97,46 +116,155 @@ class StepEditorMixin:
         self.step_form_error_var.set("")
         self.step_form_error_label.pack_forget()
 
+    # ---- addressing: tree iid <-> (group_idx, step_idx, cond_idx) -------------
+
+    def _steps_list_for(self, group_idx):
+        """The actual list a `step_idx` indexes into: self.editing_steps
+        (top-level) when `group_idx` is None, else that group's own nested
+        .steps list."""
+        return self.editing_steps if group_idx is None else self.editing_steps[group_idx].steps
+
+    @staticmethod
+    def _parse_tree_iid(iid: str):
+        """Turns a tree iid string into a (group_idx, step_idx, cond_idx)
+        location -- see this class's own docstring for the five shapes this
+        recognizes -- or None if `iid` matches none of them."""
+        parts = iid.split("-")
+        if len(parts) == 2 and parts[0] == "group":
+            return int(parts[1]), None, None
+        if len(parts) == 2 and parts[0] == "step":
+            return None, int(parts[1]), None
+        if len(parts) == 4 and parts[0] == "step" and parts[2] == "cond":
+            return None, int(parts[1]), int(parts[3])
+        if len(parts) == 4 and parts[0] == "group" and parts[2] == "step":
+            return int(parts[1]), int(parts[3]), None
+        if len(parts) == 6 and parts[0] == "group" and parts[2] == "step" and parts[4] == "cond":
+            return int(parts[1]), int(parts[3]), int(parts[5])
+        return None
+
+    @staticmethod
+    def _location_iid(group_idx, step_idx, cond_idx=None) -> str:
+        """The inverse of _parse_tree_iid -- builds the iid string for a
+        given location, so callers that just computed/moved to a location
+        (reselecting after a reorder, a paste, etc.) don't have to know the
+        string format themselves."""
+        if step_idx is None:
+            return f"group-{group_idx}"
+        base = f"step-{step_idx}" if group_idx is None else f"group-{group_idx}-step-{step_idx}"
+        return base if cond_idx is None else f"{base}-cond-{cond_idx}"
+
+    def _find_step_location(self, step) -> tuple:
+        """(group_idx, step_idx) locating `step` (by identity) in
+        self.editing_steps, wherever it currently lives -- top-level or
+        nested inside a ConditionGroup -- or None if it's no longer present
+        at all (e.g. removed since being selected)."""
+        for i, entry in enumerate(self.editing_steps):
+            if entry is step:
+                return None, i
+        for gi, entry in enumerate(self.editing_steps):
+            if isinstance(entry, ConditionGroup):
+                for si, s in enumerate(entry.steps):
+                    if s is step:
+                        return gi, si
+        return None
+
+    def _all_step_locations_in_order(self):
+        """Every (group_idx, step_idx) Step location in self.editing_steps,
+        in top-to-bottom tree order -- a top-level step or group by its own
+        position, each group's nested steps immediately after it in their
+        own order. Used to give a multi-selection spanning several groups
+        (or a mix of top-level and nested) a stable, visually-sensible
+        order for Copy."""
+        locations = []
+        for i, entry in enumerate(self.editing_steps):
+            if isinstance(entry, ConditionGroup):
+                locations.extend((i, si) for si in range(len(entry.steps)))
+            else:
+                locations.append((None, i))
+        return locations
+
+    def _current_group_scope(self):
+        """Which group (if any) a newly-added step (Add Step/Add Sleep)
+        should land in: the group currently in scope via the tree selection
+        -- its own header row, or one of its nested steps/conditions -- or
+        None for top-level. Multi-selection or no selection both mean
+        top-level, same as today's "append to the end" default."""
+        selection = self.tree.selection()
+        if len(selection) != 1:
+            return None
+        parsed = self._parse_tree_iid(selection[0])
+        return parsed[0] if parsed is not None else None
+
+    def _selected_owning_step_location(self):
+        """(group_idx, step_idx) for whichever step is in scope for an
+        action that attaches to a step regardless of whether the step
+        itself or one of its conditions is selected (Add Condition) --
+        rejects a group header row (step_idx is None), which has its own
+        single condition edited via the separate Rotation Conditions
+        section, not a list of per-step Conditions."""
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("No step selected", "Select a step (or one of its conditions) first.")
+            return None
+        if len(selection) > 1:
+            messagebox.showinfo("Select one step", "Select exactly one step (or one of its conditions) for this action.")
+            return None
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None or parsed[1] is None:
+            messagebox.showinfo("Select a step", "Select a step (not a condition group) for this action.")
+            return None
+        return parsed[0], parsed[1]
+
     # ---- step editing ----------------------------------------------------
 
     def _refresh_steps_tree(self):
-        # Steps don't have stable ids of their own, only a position that shifts on
-        # every add/remove/reorder -- so "was this step's row open?" is tracked by
-        # the Step object's identity (stable across a reorder/move, since those
-        # just relocate the same objects) rather than by index, otherwise a manual
-        # collapse/expand would silently jump to whatever step next lands at that
-        # same row number instead of following the step the user actually toggled.
-        # The tree's current rows still reflect whatever order self.editing_steps
-        # was in on the *previous* call (cached below), not its current order --
-        # e.g. right after a reorder, "step-0" on screen right now is still the
-        # step that used to be first, so that previous order (not today's) is
-        # what must be used to look up each row's current open/closed state.
+        # Steps/groups don't have stable ids of their own, only a position that
+        # shifts on every add/remove/reorder -- so "was this row open?" is
+        # tracked by object identity (stable across a reorder/move, since those
+        # just relocate the same objects) rather than by index, otherwise a
+        # manual collapse/expand would silently jump to whatever step/group
+        # next lands at that same row number instead of following the one the
+        # user actually toggled. The tree's current rows still reflect whatever
+        # order self.editing_steps was in on the *previous* call (cached
+        # below), not its current order -- e.g. right after a reorder, "step-0"
+        # on screen right now is still the entry that used to be first, so
+        # that previous order (not today's) is what must be used to look up
+        # each row's current open/closed state.
         previously_open = set()
         previously_closed = set()
-        for i, step in enumerate(getattr(self, "_steps_tree_render_order", [])):
-            iid = f"step-{i}"
+        for i, entry in enumerate(getattr(self, "_steps_tree_render_order", [])):
+            iid = f"group-{i}" if isinstance(entry, ConditionGroup) else f"step-{i}"
             if self.tree.exists(iid):
-                (previously_open if self.tree.item(iid, "open") else previously_closed).add(id(step))
+                (previously_open if self.tree.item(iid, "open") else previously_closed).add(id(entry))
+
+        def open_state(entry, default_open: bool) -> bool:
+            if id(entry) in previously_closed:
+                return False
+            if id(entry) in previously_open:
+                return True
+            return default_open
+
         self.tree.delete(*self.tree.get_children())
-        for i, step in enumerate(self.editing_steps):
-            label, key_col = self._step_row_text_and_key(step)
-            step_iid = f"step-{i}"
-            if id(step) in previously_closed:
-                is_open = False
-            elif id(step) in previously_open:
-                is_open = True
+        for i, entry in enumerate(self.editing_steps):
+            if isinstance(entry, ConditionGroup):
+                group_iid = f"group-{i}"
+                self.tree.insert("", tk.END, iid=group_iid, text=self._condition_summary(entry.condition),
+                                  values=("", "", "", "", "", ""), open=open_state(entry, bool(entry.steps)))
+                for k, step in enumerate(entry.steps):
+                    self._insert_step_row(group_iid, f"{group_iid}-step-{k}", step, open_state)
             else:
-                is_open = bool(step.conditions)  # a step never shown before -- today's default
-            self.tree.insert("", tk.END, iid=step_iid, text=label,
-                              values=(key_col, step.delay_ms,
-                                      step.jitter_ms, step.hold_ms, step.hold_jitter_ms,
-                                      step.repeat_count),
-                              open=is_open)
-            for j, condition in enumerate(step.conditions):
-                self.tree.insert(step_iid, tk.END, iid=f"{step_iid}-cond-{j}",
-                                  text=self._condition_summary(condition),
-                                  values=("", "", "", "", "", ""))
+                self._insert_step_row("", f"step-{i}", entry, open_state)
         self._steps_tree_render_order = list(self.editing_steps)
+
+    def _insert_step_row(self, parent_iid: str, step_iid: str, step, open_state):
+        label, key_col = self._step_row_text_and_key(step)
+        self.tree.insert(parent_iid, tk.END, iid=step_iid, text=label,
+                          values=(key_col, step.delay_ms, step.jitter_ms, step.hold_ms,
+                                  step.hold_jitter_ms, step.repeat_count),
+                          open=open_state(step, bool(step.conditions)))
+        for j, condition in enumerate(step.conditions):
+            self.tree.insert(step_iid, tk.END, iid=f"{step_iid}-cond-{j}",
+                              text=self._condition_summary(condition), values=("", "", "", "", "", ""))
 
     @staticmethod
     def _step_row_text_and_key(step) -> tuple:
@@ -151,7 +279,7 @@ class StepEditorMixin:
             key_col, fallback_label = step.key, step.key
         return step.name or fallback_label, key_col
 
-    def _update_step_row(self, step_idx: int):
+    def _update_step_row(self, location: tuple):
         """Patches one step's row in place (text + column values only)
         instead of the full delete-and-reinsert _refresh_steps_tree does --
         used after an auto-committed edit (_commit_previous_step_edits_if_changed)
@@ -160,15 +288,16 @@ class StepEditorMixin:
         user was actually navigating to when the commit fired. Doesn't touch
         this step's condition child rows -- nothing about a numeric-field
         edit ever changes those."""
-        step = self.editing_steps[step_idx]
-        iid = f"step-{step_idx}"
+        group_idx, step_idx = location
+        step = self._steps_list_for(group_idx)[step_idx]
+        iid = self._location_iid(group_idx, step_idx)
         if not self.tree.exists(iid):
             return
         label, key_col = self._step_row_text_and_key(step)
         self.tree.item(iid, text=label, values=(
             key_col, step.delay_ms, step.jitter_ms, step.hold_ms, step.hold_jitter_ms, step.repeat_count))
 
-    _ACTION_SUMMARY_LABELS = {"fire": "Fire", "block": "Block", "hold": "Hold"}
+    _ACTION_SUMMARY_LABELS = {"fire": "Execute", "block": "Skip", "hold": "Override"}
 
     @classmethod
     def _condition_summary(cls, condition) -> str:
@@ -203,46 +332,36 @@ class StepEditorMixin:
             extra = f" (wait up to {condition.timeout_ms}ms)"
         return f"[{action_label}] {not_marker}{base}{extra}"
 
-    @staticmethod
-    def _parse_tree_iid(iid: str):
-        """("step-N", None) for a step row's index, (N, M) for the M'th
-        condition of step N, or None if `iid` doesn't match either scheme."""
-        parts = iid.split("-")
-        if len(parts) == 2 and parts[0] == "step":
-            return int(parts[1]), None
-        if len(parts) == 4 and parts[0] == "step" and parts[2] == "cond":
-            return int(parts[1]), int(parts[3])
-        return None
-
-    def _selected_owning_step_index(self):
-        """For actions that attach to a step regardless of whether the step
-        itself or one of its conditions is selected (Add Condition)."""
-        selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo("No step selected", "Select a step (or one of its conditions) first.")
-            return None
-        if len(selection) > 1:
-            messagebox.showinfo("Select one step", "Select exactly one step (or one of its conditions) for this action.")
-            return None
-        parsed = self._parse_tree_iid(selection[0])
-        if parsed is None:
-            return None
-        return parsed[0]
-
     def _on_select_step(self, _event):
         if not self._suppress_commit_on_select:
             self._commit_previous_step_edits_if_changed()
         selection = self.tree.selection()
         if not selection:
             self._selected_step_ref = None
+            self._selected_group_ref = None
             self._populate_condition_form(None)
+            self._set_step_panels_visible(True)
+            self._populate_group_condition_form(None)
             return
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return
-        step = self.editing_steps[parsed[0]]
+        group_idx, step_idx, cond_idx = parsed
+        if step_idx is None:
+            # A condition group's own header row is selected -- it has no Key/
+            # Delay/Hold/Repeat of its own, just the one condition gating it.
+            group = self.editing_steps[group_idx]
+            self._selected_step_ref = None
+            self._selected_group_ref = group
+            self._set_step_panels_visible(False)
+            self._populate_group_condition_form(group)
+            return
+        self._selected_group_ref = None
+        self._set_step_panels_visible(True)
+        self._populate_group_condition_form(None)
+        step = self._steps_list_for(group_idx)[step_idx]
         self._clear_form_errors()
-        self._populate_condition_form(step.conditions[parsed[1]] if parsed[1] is not None else None)
+        self._populate_condition_form(step.conditions[cond_idx] if cond_idx is not None else None)
         self.step_name_var.set(step.name)
         self.step_key_var.set(step.key or "")
         self.step_delay_var.set(str(step.delay_ms))
@@ -251,7 +370,7 @@ class StepEditorMixin:
         self.step_hold_jitter_var.set(str(step.hold_jitter_ms))
         self.step_repeat_var.set(str(step.repeat_count))
         self.step_repeat_combine_hold_var.set(step.repeat_combine_hold)
-        if parsed[1] is not None:
+        if cond_idx is not None:
             # A condition row is selected -- always show its editor, regardless of
             # this step's smart per-step default/override below, since the user is
             # clearly here to look at (or update) that specific condition.
@@ -274,9 +393,10 @@ class StepEditorMixin:
         if not selection:
             return
         parsed = self._parse_tree_iid(selection[0])
-        if parsed is None:
+        if parsed is None or parsed[1] is None:
             return
-        step = self.editing_steps[parsed[0]]
+        group_idx, step_idx, _cond_idx = parsed
+        step = self._steps_list_for(group_idx)[step_idx]
         self._section_collapse_overrides.setdefault(id(step), {})[key] = collapsed
 
     def _commit_previous_step_edits_if_changed(self):
@@ -290,7 +410,10 @@ class StepEditorMixin:
         a navigation point (the user has already moved on), not a keystroke,
         where a popup would be jarring."""
         step = self._selected_step_ref
-        if step is None or not any(s is step for s in self.editing_steps):
+        if step is None:
+            return
+        location = self._find_step_location(step)
+        if location is None:
             return
         if self._core_step_form_snapshot() == self._selected_step_core_snapshot:
             return
@@ -300,12 +423,7 @@ class StepEditorMixin:
             self.status_var.set(f"Discarded an unsaved, invalid edit to '{step.name or step.key or 'a step'}'.")
             return
         replace_step_fields(step, parsed)
-        # _update_step_row, NOT _refresh_steps_tree -- this runs from _on_select_step,
-        # partway through processing a selection change (the row the user is
-        # navigating TO). _refresh_steps_tree's full delete-and-reinsert clears the
-        # tree's selection as a side effect, which would silently swallow that
-        # navigation; patching this one row's displayed values in place does not.
-        self._update_step_row(next(i for i, s in enumerate(self.editing_steps) if s is step))
+        self._update_step_row(location)
 
     def _core_step_form_snapshot(self) -> tuple:
         """A cheap, side-effect-free snapshot of the Name/Key/Delay/.../Repeat
@@ -415,6 +533,7 @@ class StepEditorMixin:
             self._reset_step_core_fields()
 
     def _add_step(self):
+        scope = self._current_group_scope()
         self._discard_selected_step_edits()
         # No original_key -- this is a brand new step, so a blank Key field means
         # "not yet assigned" (None, skipped at runtime), never a sleep step. Use
@@ -422,42 +541,48 @@ class StepEditorMixin:
         step = self._read_step_form()
         if step is None:
             return
-        self.editing_steps.append(step)
+        self._steps_list_for(scope).append(step)
         self._refresh_steps_tree()
 
     def _add_sleep_step(self):
         """A sleep step has no key -- it's just a pause of delay_ms (+/- jitter_ms)
         with nothing pressed, for a deliberate wait that isn't tied to any skill.
         Reuses the same form fields as Add Step; whatever's in Key is ignored."""
+        scope = self._current_group_scope()
         self._discard_selected_step_edits()
         step = self._read_step_form()
         if step is None:
             return
         step.key = ""
-        self.editing_steps.append(step)
+        self._steps_list_for(scope).append(step)
         self._refresh_steps_tree()
 
     def _on_copy_clicked(self):
-        """Copies every currently-selected step (condition-only selections are
-        ignored -- conditions aren't independently copy/pasteable) to an
-        in-memory clipboard that lives on the App itself, so it survives
-        switching to a different rotation -- that's what makes pasting into a
-        different rotation than the one you copied from work."""
+        """Copies every currently-selected step (group header and
+        condition-only selections are ignored -- neither is independently
+        copy/pasteable) to an in-memory clipboard that lives on the App
+        itself, so it survives switching to a different rotation -- that's
+        what makes pasting into a different rotation than the one you
+        copied from work. A selection spanning multiple groups (or a mix of
+        top-level and nested steps) is copied in top-to-bottom tree order,
+        not selection order."""
         # Captured before _apply_pending_step_edits, which -- if it actually applies
         # an edit -- calls _refresh_steps_tree and clears the tree's selection (see
         # _on_paste_clicked below for the same reason); editing_steps' order/indices
         # are unaffected by the apply, so reading them now and using them after is safe.
         selection = self.tree.selection()
-        step_indices = sorted({p[0] for p in (self._parse_tree_iid(iid) for iid in selection)
-                                if p is not None and p[1] is None})
-        if not step_indices:
+        selected_locations = {(g, s) for g, s, c in (self._parse_tree_iid(iid) for iid in selection)
+                               if s is not None and c is None} if selection else set()
+        # (the generator above never yields None -- selection is only ever real iids)
+        if not selected_locations:
             messagebox.showinfo("No step selected", "Select at least one step to copy.")
             return
         # Applied here (like Paste/Move/Save/drag-drop already do) so Copy can't
         # silently copy stale, pre-edit data if the form has an untouched change.
         if not self._apply_pending_step_edits():
             return
-        self._step_clipboard = copy.deepcopy([self.editing_steps[i] for i in step_indices])
+        ordered = [loc for loc in self._all_step_locations_in_order() if loc in selected_locations]
+        self._step_clipboard = copy.deepcopy([self._steps_list_for(g)[s] for g, s in ordered])
 
     def _on_paste_clicked(self):
         if not self._step_clipboard:
@@ -471,35 +596,77 @@ class StepEditorMixin:
         parsed = self._parse_tree_iid(selection[0]) if selection else None
         if not self._apply_pending_step_edits():
             return
-        insert_at = parsed[0] + 1 if parsed is not None else len(self.editing_steps)
+        group_idx, step_idx = (parsed[0], parsed[1]) if parsed is not None else (None, None)
+        target_list = self._steps_list_for(group_idx)
+        # step_idx is None when nothing (or a group's own header row) is selected --
+        # both mean "append to the end of whichever list is in scope" instead of
+        # "insert right after a specific step," exactly like Add Step's own default.
+        insert_at = step_idx + 1 if step_idx is not None else len(target_list)
         pasted = copy.deepcopy(self._step_clipboard)  # independent objects each time, so repeated pastes don't share state
-        self.editing_steps[insert_at:insert_at] = pasted
+        target_list[insert_at:insert_at] = pasted
         self._refresh_steps_tree()
-        self.tree.selection_set(*(f"step-{insert_at + offset}" for offset in range(len(pasted))))
+        self.tree.selection_set(*(self._location_iid(group_idx, insert_at + offset) for offset in range(len(pasted))))
 
     def _remove_selected_step(self):
         selection = self.tree.selection()
         if not selection:
             return
         parsed_list = [p for p in (self._parse_tree_iid(iid) for iid in selection) if p is not None]
-        step_indices = {s for s, c in parsed_list if c is None}
-        # Conditions belonging to a step that's also being fully removed are
-        # already handled by removing that step -- skip them to avoid deleting
-        # from a conditions list that's about to disappear anyway.
-        condition_deletions = [(s, c) for s, c in parsed_list if c is not None and s not in step_indices]
-        conditions_by_step = {}
-        for s, c in condition_deletions:
-            conditions_by_step.setdefault(s, []).append(c)
-        for s, cond_indices in conditions_by_step.items():
+        group_removals = {g for g, s, c in parsed_list if s is None}
+        if group_removals:
+            total_nested_steps = sum(len(self.editing_steps[g].steps) for g in group_removals)
+            if total_nested_steps and not messagebox.askyesno(
+                    "Remove Condition Group",
+                    f"Remove {len(group_removals)} condition group(s) and the {total_nested_steps} "
+                    f"step(s) nested inside them?", danger=True):
+                return
+        # Conditions/steps whose owner is itself also being fully removed are
+        # skipped -- removing the group (or the step, for a condition) already
+        # takes care of them, same idea one level deeper than before.
+        step_deletions = {(g, s) for g, s, c in parsed_list if s is not None and c is None and g not in group_removals}
+        condition_deletions = [(g, s, c) for g, s, c in parsed_list
+                                if c is not None and (g, s) not in step_deletions and g not in group_removals]
+        conditions_by_owner = {}
+        for g, s, c in condition_deletions:
+            conditions_by_owner.setdefault((g, s), []).append(c)
+        for (g, s), cond_indices in conditions_by_owner.items():
+            owning_conditions = self._steps_list_for(g)[s].conditions
             for c in sorted(cond_indices, reverse=True):
-                del self.editing_steps[s].conditions[c]
-        for s in sorted(step_indices, reverse=True):
-            del self.editing_steps[s]
+                del owning_conditions[c]
+        # Nested-step deletions (from a group that's surviving) mutate that
+        # group's own .steps list directly, which never shifts anything in
+        # self.editing_steps itself -- safe to do in any order relative to the
+        # combined top-level pass below.
+        steps_by_owner = {}
+        for g, s in step_deletions:
+            steps_by_owner.setdefault(g, []).append(s)
+        for g, indices in steps_by_owner.items():
+            if g is None:
+                continue  # top-level step removals are handled below, together with group removals
+            owning_list = self._steps_list_for(g)
+            for s in sorted(indices, reverse=True):
+                del owning_list[s]
+        # Top-level group removals and top-level step removals both index into
+        # the SAME self.editing_steps list, so they must be combined into one
+        # descending-index pass -- deleting them separately would shift indices
+        # out from under whichever pass ran second.
+        top_level_removals = group_removals | set(steps_by_owner.get(None, []))
+        for i in sorted(top_level_removals, reverse=True):
+            del self.editing_steps[i]
         self._refresh_steps_tree()
 
     def _move_step_up(self):
-        """Moves the selected step, or -- if a condition is selected instead --
-        that condition up within its own step's conditions list."""
+        self._move_selected(-1)
+
+    def _move_step_down(self):
+        self._move_selected(1)
+
+    def _move_selected(self, direction: int):
+        """Moves the selected row `direction` (-1 = up, 1 = down) within
+        whichever list it belongs to: a condition moves within its own
+        step's conditions; a step (top-level or nested) moves within its
+        own owning list; a group header moves within the top-level list,
+        exactly like a top-level step does."""
         selection = self.tree.selection()
         if not selection:
             return
@@ -507,51 +674,23 @@ class StepEditorMixin:
         if parsed is None:
             return
         # Apply whatever's pending in the step form first (e.g. an edit the user
-        # was about to click Update Selected for) so moving the step doesn't
-        # silently discard it -- same protection Save Rotation already has.
+        # was about to have auto-committed) so moving the step doesn't silently
+        # discard it -- same protection Save Rotation already has.
         if not self._apply_pending_step_edits():
             return
-        step_idx, cond_idx = parsed
-        if cond_idx is None:
-            if step_idx == 0:
-                return
-            self.editing_steps[step_idx - 1], self.editing_steps[step_idx] = \
-                self.editing_steps[step_idx], self.editing_steps[step_idx - 1]
-            self._refresh_steps_tree()
-            self.tree.selection_set(f"step-{step_idx - 1}")
+        group_idx, step_idx, cond_idx = parsed
+        if cond_idx is not None:
+            items, idx = self._steps_list_for(group_idx)[step_idx].conditions, cond_idx
+            new_iid = lambda new_idx: self._location_iid(group_idx, step_idx, new_idx)  # noqa: E731
+        elif step_idx is not None:
+            items, idx = self._steps_list_for(group_idx), step_idx
+            new_iid = lambda new_idx: self._location_iid(group_idx, new_idx)  # noqa: E731
         else:
-            if cond_idx == 0:
-                return
-            conditions = self.editing_steps[step_idx].conditions
-            conditions[cond_idx - 1], conditions[cond_idx] = conditions[cond_idx], conditions[cond_idx - 1]
-            self._refresh_steps_tree()
-            self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx - 1}")
-
-    def _move_step_down(self):
-        """Moves the selected step, or -- if a condition is selected instead --
-        that condition down within its own step's conditions list."""
-        selection = self.tree.selection()
-        if not selection:
+            items, idx = self.editing_steps, group_idx
+            new_iid = lambda new_idx: self._location_iid(new_idx, None)  # noqa: E731
+        new_idx = idx + direction
+        if not (0 <= new_idx < len(items)):
             return
-        parsed = self._parse_tree_iid(selection[0])
-        if parsed is None:
-            return
-        # See _move_step_up: apply any pending form edit before moving, so it
-        # isn't silently discarded.
-        if not self._apply_pending_step_edits():
-            return
-        step_idx, cond_idx = parsed
-        if cond_idx is None:
-            if step_idx >= len(self.editing_steps) - 1:
-                return
-            self.editing_steps[step_idx + 1], self.editing_steps[step_idx] = \
-                self.editing_steps[step_idx], self.editing_steps[step_idx + 1]
-            self._refresh_steps_tree()
-            self.tree.selection_set(f"step-{step_idx + 1}")
-        else:
-            conditions = self.editing_steps[step_idx].conditions
-            if cond_idx >= len(conditions) - 1:
-                return
-            conditions[cond_idx + 1], conditions[cond_idx] = conditions[cond_idx], conditions[cond_idx + 1]
-            self._refresh_steps_tree()
-            self.tree.selection_set(f"step-{step_idx}-cond-{cond_idx + 1}")
+        items[idx], items[new_idx] = items[new_idx], items[idx]
+        self._refresh_steps_tree()
+        self.tree.selection_set(new_iid(new_idx))
