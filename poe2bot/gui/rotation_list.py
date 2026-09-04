@@ -94,7 +94,13 @@ class RotationListMixin:
 
     def _on_select_rotation(self, _event):
         name = self._selected_rotation_name()
-        if name is not None and name in self.rotations:
+        # The `!= self.editing_original_name` guard also matters for autosave:
+        # AutosaveMixin._persist_rotation_to_disk re-selects the current rotation
+        # at the end of every _refresh_rotation_tree() call it makes (which runs
+        # on every keystroke), and selection_set() re-fires <<TreeviewSelect>> --
+        # without this guard, that would reload the whole form (wiping the
+        # current tree selection/mid-edit state) on every single keystroke.
+        if name is not None and name in self.rotations and name != self.editing_original_name:
             self._load_rotation_into_form(self.rotations[name])
 
     def _on_rotation_tree_right_click(self, event):
@@ -122,7 +128,8 @@ class RotationListMixin:
         (substituting in each mover's *new* folder), so this catches both
         "two rotations being moved together collide with each other" and
         "a moved rotation collides with one that's staying put" -- the same
-        kind of check App._save_rotation already does for a single save."""
+        kind of check AutosaveMixin._persist_rotation_to_disk already does for
+        a single save."""
         paths = {}
         collisions = []
         for name, rotation in self.rotations.items():
@@ -222,63 +229,53 @@ class RotationListMixin:
         self._refresh_rotation_tree()
 
     def _load_rotation_into_form(self, rotation: Rotation):
-        self.editing_original_name = rotation.name
-        self.pending_hotkey = rotation.hotkey
-        self.pending_cancel_key = rotation.cancel_key
-        self.pending_reset_key = rotation.reset_key
-        self.pending_pause_key = rotation.pause_key
-        self.editing_steps = copy.deepcopy(rotation.steps)
-        self.name_var.set(rotation.name)
-        self.folder_var.set(rotation.folder)
-        self.mode_var.set(rotation.mode)
-        self.hotkey_label_var.set(display_name(rotation.hotkey))
-        self.cancel_key_label_var.set(display_name(rotation.cancel_key))
-        self.reset_key_label_var.set(display_name(rotation.reset_key))
-        self.reset_delay_var.set(str(rotation.reset_delay_ms))
-        self.pause_key_label_var.set(display_name(rotation.pause_key))
-        self.pause_mode_var.set(rotation.pause_mode)
-        self.pause_duration_var.set(str(rotation.pause_duration_ms))
-        self._reset_step_core_fields()
-        self._refresh_steps_tree()
-        self._capture_saved_snapshot()
+        # Wrapped in _autosave_suppressed() -- every .set() below is code
+        # populating the form from `rotation`, not the user editing it, and
+        # must never misfire an autosave onto whatever rotation was open a
+        # moment ago (see AutosaveMixin, poe2bot/gui/autosave.py).
+        with self._autosave_suppressed():
+            self.editing_original_name = rotation.name
+            self.pending_hotkey = rotation.hotkey
+            self.pending_cancel_key = rotation.cancel_key
+            self.pending_reset_key = rotation.reset_key
+            self.pending_pause_key = rotation.pause_key
+            self.editing_steps = copy.deepcopy(rotation.steps)
+            self.name_var.set(rotation.name)
+            self.folder_var.set(rotation.folder)
+            self.mode_var.set(rotation.mode)
+            self.hotkey_label_var.set(display_name(rotation.hotkey))
+            self.cancel_key_label_var.set(display_name(rotation.cancel_key))
+            self.reset_key_label_var.set(display_name(rotation.reset_key))
+            self.reset_delay_var.set(str(rotation.reset_delay_ms))
+            self.pause_key_label_var.set(display_name(rotation.pause_key))
+            self.pause_mode_var.set(rotation.pause_mode)
+            self.pause_duration_var.set(str(rotation.pause_duration_ms))
+            self._reset_step_core_fields()
+            self._refresh_steps_tree()
+        self._update_title()
 
     def _new_rotation(self):
-        self.editing_original_name = None
-        self.pending_hotkey = None
-        self.pending_cancel_key = None
-        self.pending_reset_key = None
-        self.pending_pause_key = None
-        self.editing_steps = []
-        self.name_var.set("New Rotation")
-        self.folder_var.set("")
-        self.mode_var.set("once")
-        self.hotkey_label_var.set("(unbound)")
-        self.cancel_key_label_var.set("(unbound)")
-        self.reset_key_label_var.set("(unbound)")
-        self.reset_delay_var.set("0")
-        self.pause_key_label_var.set("(unbound)")
-        self.pause_mode_var.set("duration")
-        self.pause_duration_var.set("1000")
-        self._reset_step_core_fields()
-        self._refresh_steps_tree()
-        self.rotation_tree.selection_remove(*self.rotation_tree.selection())
-        self._capture_saved_snapshot()
-
-    def _on_revert_clicked(self):
-        """Discards unsaved edits to whichever rotation is currently open --
-        a safety net now that drag-and-drop/multi-select make it easier to
-        mess one up by accident."""
-        if self.editing_original_name and self.editing_original_name in self.rotations:
-            if not messagebox.askyesno(
-                    "Discard unsaved changes",
-                    f"Discard unsaved changes to '{self.editing_original_name}'?"):
-                return
-            self._load_rotation_into_form(self.rotations[self.editing_original_name])
-        else:
-            if not messagebox.askyesno(
-                    "Discard unsaved changes", "Discard this new, unsaved rotation?"):
-                return
-            self._new_rotation()
+        with self._autosave_suppressed():
+            self.editing_original_name = None
+            self.pending_hotkey = None
+            self.pending_cancel_key = None
+            self.pending_reset_key = None
+            self.pending_pause_key = None
+            self.editing_steps = []
+            self.name_var.set("New Rotation")
+            self.folder_var.set("")
+            self.mode_var.set("once")
+            self.hotkey_label_var.set("(unbound)")
+            self.cancel_key_label_var.set("(unbound)")
+            self.reset_key_label_var.set("(unbound)")
+            self.reset_delay_var.set("0")
+            self.pause_key_label_var.set("(unbound)")
+            self.pause_mode_var.set("duration")
+            self.pause_duration_var.set("1000")
+            self._reset_step_core_fields()
+            self._refresh_steps_tree()
+            self.rotation_tree.selection_remove(*self.rotation_tree.selection())
+        self._update_title()
 
     def _copy_rotation(self):
         name = self._selected_rotation_name()
@@ -305,6 +302,9 @@ class RotationListMixin:
         )
         self._load_rotation_into_form(duplicate)
         self.rotation_tree.selection_remove(*self.rotation_tree.selection())
+        # A duplicate should exist on disk immediately, same as everything else --
+        # not stay phantom until some later field edit happens to trigger a save.
+        self._autosave()
 
     def _unique_rotation_name(self, base_name: str) -> str:
         if base_name not in self.rotations:

@@ -1,5 +1,6 @@
 import threading
 
+from poe2bot.gui import dialogs as messagebox
 from poe2bot.hotkeys import display_name
 
 
@@ -45,24 +46,55 @@ class HotkeysMixin:
         key = self.hotkey_manager.capture_next_key()
         self.status_queue.put(("__capture__", key))
 
+    def _confirm_hotkey_share_if_needed(self, hotkey) -> bool:
+        """True if it's fine to proceed with `hotkey` as this rotation's
+        trigger -- either nothing else currently uses it, or the user just
+        confirmed sharing it. This is the one interactive confirmation that
+        survives from the old "Save Rotation" button, kept right here at the
+        moment a NEW hotkey is actually being chosen -- asking it from the
+        generic autosave path instead (AutosaveMixin._persist_rotation_to_disk)
+        would re-prompt on every single keystroke of an unrelated field for
+        as long as the hotkey stays shared, since nothing about a Name/Delay
+        edit would ever change the answer."""
+        if not hotkey:
+            return True
+        folder = self.folder_var.get().strip()
+        # bound_to() only reflects currently-live (in-scope) bindings -- also warn
+        # about another rotation in the SAME folder sharing this hotkey even if
+        # that folder isn't the active one right now, since it's just as real a
+        # conflict the moment either rotation's folder becomes active.
+        same_folder_conflicts = [
+            r.name for r in self.rotations.values()
+            if r.name != self.editing_original_name and r.folder == folder and r.hotkey == hotkey]
+        sharing_with = list(dict.fromkeys(
+            [n for n in self.hotkey_manager.bound_to(hotkey) if n != self.editing_original_name]
+            + same_folder_conflicts))
+        if not sharing_with:
+            return True
+        return messagebox.askyesno(
+            "Hotkey already in use",
+            f"'{display_name(hotkey)}' is already bound to {', '.join(sharing_with)}. "
+            "Also bind it to this rotation?")
+
     def _on_hotkey_captured(self, key: str):
+        self.bind_hotkey_btn.config(text="Bind Hotkey...")
+        self._set_bind_buttons_enabled(True)
+        if not self._confirm_hotkey_share_if_needed(key):
+            return  # declined -- leave the old hotkey in place, nothing to save
         # Saves immediately (like _on_unbind_clicked below) so binding a key
-        # takes effect as a single click/press instead of
-        # capture-then-remember-to-Save -- if the rotation isn't valid yet
-        # (e.g. a brand new one with no steps), _save_rotation shows its usual
+        # takes effect as a single click/press -- if the rotation isn't valid yet
+        # (e.g. a brand new one with no steps), _autosave shows its usual inline
         # error and the capture is simply left pending until it is.
         self.pending_hotkey = key
         self.hotkey_label_var.set(display_name(key))
-        self.bind_hotkey_btn.config(text="Bind Hotkey...")
-        self._set_bind_buttons_enabled(True)
-        self._save_rotation()
+        self._autosave()
 
     def _on_unbind_clicked(self):
         # Clears and immediately saves, so freeing this hotkey up for another
-        # rotation is a single click instead of unbind-then-remember-to-Save.
+        # rotation is a single click instead of unbind-then-remember-to-save.
         self.pending_hotkey = None
         self.hotkey_label_var.set(display_name(None))
-        self._save_rotation()
+        self._autosave()
 
     # ---- cancel key -----------------------------------------------------------
 
@@ -80,12 +112,12 @@ class HotkeysMixin:
         self.cancel_key_label_var.set(display_name(key))
         self.bind_cancel_btn.config(text="Bind Cancel Key...")
         self._set_bind_buttons_enabled(True)
-        self._save_rotation()
+        self._autosave()
 
     def _on_clear_cancel_key(self):
         self.pending_cancel_key = None
         self.cancel_key_label_var.set(display_name(None))
-        self._save_rotation()
+        self._autosave()
 
     # ---- reset key ------------------------------------------------------------
 
@@ -103,12 +135,12 @@ class HotkeysMixin:
         self.reset_key_label_var.set(display_name(key))
         self.bind_reset_btn.config(text="Bind Reset Key...")
         self._set_bind_buttons_enabled(True)
-        self._save_rotation()
+        self._autosave()
 
     def _on_clear_reset_key(self):
         self.pending_reset_key = None
         self.reset_key_label_var.set(display_name(None))
-        self._save_rotation()
+        self._autosave()
 
     # ---- pause key ------------------------------------------------------------
 
@@ -126,9 +158,9 @@ class HotkeysMixin:
         self.pause_key_label_var.set(display_name(key))
         self.bind_pause_btn.config(text="Bind Pause Key...")
         self._set_bind_buttons_enabled(True)
-        self._save_rotation()
+        self._autosave()
 
     def _on_clear_pause_key(self):
         self.pending_pause_key = None
         self.pause_key_label_var.set(display_name(None))
-        self._save_rotation()
+        self._autosave()

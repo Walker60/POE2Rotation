@@ -135,6 +135,11 @@ class Step:
     alt_key: Optional[str] = None            # whichever device's key ISN'T currently active -- same None/""/string
                                               # semantics as `key`. Swapped with `key` by App's Active Device toggle;
                                               # never edited directly through its own UI.
+    enabled: bool = True    # False = always skipped at runtime (no fire, no delay, conditions never even
+                             # checked) regardless of key/conditions -- distinct from key=None ("not yet
+                             # assigned") and key="" (a deliberate sleep step, which still waits out its
+                             # delay when enabled). Toggled via the Skill Steps section's Disable/Enable
+                             # Step button, not a form field of its own -- see StepEditorMixin._read_step_form.
 
     @staticmethod
     def from_dict(data: dict) -> "Step":
@@ -158,6 +163,7 @@ class Step:
             repeat_count=_int_or(data, "repeat_count", 1),
             repeat_combine_hold=bool(data.get("repeat_combine_hold", False)),
             alt_key=alt_key,
+            enabled=bool(data.get("enabled", True)),
         )
 
 
@@ -388,13 +394,14 @@ def validate_rotation(rotation: Rotation) -> List[str]:
 
     if not any(True for _ in iter_steps(rotation.steps)):
         problems.append("Rotation must have at least one step.")
-    elif rotation.mode == "loop" and all(step.key is None for step in iter_steps(rotation.steps)):
-        # A step with key=None (unassigned) has no wait of any kind at runtime --
-        # it's just skipped instantly, unlike a real key or a deliberate ""
-        # sleep step. If *every* step in a Loop rotation is like that, the
-        # runner would spin one full pass after another with no delay
-        # anywhere, pegging a CPU core forever -- catch it here rather than
-        # letting it reach the runtime.
+    elif rotation.mode == "loop" and all(
+            step.key is None or not step.enabled for step in iter_steps(rotation.steps)):
+        # A step with key=None (unassigned), or a disabled step regardless of its
+        # key, has no wait of any kind at runtime -- it's just skipped instantly,
+        # unlike a real key or a deliberate "" sleep step. If *every* step in a
+        # Loop rotation is like that, the runner would spin one full pass after
+        # another with no delay anywhere, pegging a CPU core forever -- catch it
+        # here rather than letting it reach the runtime.
         problems.append(
             "A Loop rotation needs at least one step with a key assigned (or a Sleep step) -- "
             "otherwise it would repeat with no delay between passes.")

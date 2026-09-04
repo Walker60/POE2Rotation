@@ -1,5 +1,3 @@
-import copy
-import os
 import queue
 import time
 import tkinter as tk
@@ -9,9 +7,9 @@ import keyboard
 
 from poe2bot import app_state, controller, storage
 from poe2bot.executor import RotationManager, STATUS_RUNNING
-from poe2bot.hotkeys import HotkeyManager, display_name
+from poe2bot.hotkeys import HotkeyManager
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Rotation, validate_rotation, replace_step_fields, folder_in_scope, iter_steps
+from poe2bot.models import Rotation, replace_step_fields, folder_in_scope, iter_steps
 
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
@@ -24,6 +22,7 @@ from poe2bot.gui.calibration import CalibrationMixin
 from poe2bot.gui.conditions import ConditionsMixin, CONDITION_ACTION_LABELS
 from poe2bot.gui.condition_groups import ConditionGroupsMixin, GROUP_CONDITION_ACTION_LABELS
 from poe2bot.gui.hotkeys_ui import HotkeysMixin
+from poe2bot.gui.autosave import AutosaveMixin
 from poe2bot.gui.widgets import CollapsibleSection
 from poe2bot.gui.constants import STATUS_COLORS
 
@@ -31,7 +30,7 @@ log = get_logger()
 
 
 class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
-          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, HotkeysMixin):
+          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, HotkeysMixin, AutosaveMixin):
     def __init__(self):
         super().__init__()
         self.title("POE2 Rotation Bot")
@@ -62,9 +61,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.pending_pause_key = None         # pause key chosen in this edit session (may be unchanged)
         # Snapshot of the form's core fields as of the last _on_select_step -- lets
         # Add Step/Add Sleep tell whether the user has touched them since selecting
-        # (see _discard_selected_step_edits), and the auto-commit-on-navigate /
-        # dirty-indicator logic tell whether there's an uncommitted edit pending.
+        # (see _discard_selected_step_edits).
         self._selected_step_core_snapshot = None
+        self._autosave_suppress_depth = 0     # >0 while code (not the user) is populating a
+                                               # tracked field -- see AutosaveMixin._autosave_suppressed
         self._steps_tree_render_order = []    # editing_steps order as of the last _refresh_steps_tree,
                                                # so a manual row collapse/expand can be re-attached to the
                                                # right Step object (by identity) even after a reorder
@@ -88,10 +88,6 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                                                   # clearing the tree's selection itself, so that
                                                   # doesn't get misread as "user navigated away" and
                                                   # trigger an unwanted auto-commit (see there)
-        self._saved_steps_snapshot = None     # deepcopy of editing_steps as of the last load/save,
-                                               # for the unsaved-changes indicator (see
-                                               # _rotation_is_dirty / _capture_saved_snapshot)
-        self._saved_core_snapshot = None      # same idea, for the rotation-level fields
         self._section_collapse_overrides = {}  # id(step) -> {"cooldown"/"buff"/"conditions": bool},
                                                 # in-session only (not persisted) manual overrides of
                                                 # each CollapsibleSection's smart per-step default
@@ -285,22 +281,12 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         right = ttk.Frame(self, padding=8)
         right.pack(side="left", fill="both", expand=True)
 
-        # Packed side="bottom" and packed here (before the expand=True tree_frame
-        # below) so it keeps its reserved space and stays pinned to the bottom of
-        # this panel instead of being pushed off-screen when the window is
-        # shrunk -- see the similar note on the root-level `bottom` bar above.
-        save_row = ttk.Frame(right)
-        save_row.pack(side="bottom", fill="x", pady=(4, 0))
-        ttk.Button(save_row, text="Revert to Saved", style=theme.DANGER_BUTTON_STYLE,
-                   command=self._on_revert_clicked).pack(side="right", padx=(4, 0))
-        self.save_rotation_btn = ttk.Button(save_row, text="Save Rotation", command=self._save_rotation)
-        self.save_rotation_btn.pack(side="right")
-
         name_row = ttk.Frame(right)
         name_row.pack(fill="x")
         ttk.Label(name_row, text="Name:").pack(side="left")
         self.name_var = tk.StringVar()
         ttk.Entry(name_row, textvariable=self.name_var).pack(side="left", fill="x", expand=True, padx=4)
+        self._autosave_on_change(self.name_var)
 
         folder_row = ttk.Frame(right)
         folder_row.pack(fill="x", pady=(4, 0))
@@ -309,6 +295,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Entry(folder_row, textvariable=self.folder_var).pack(side="left", fill="x", expand=True, padx=4)
         ttk.Label(folder_row, text="e.g. Bosses/HardMode (blank = ungrouped)",
                   foreground="gray").pack(side="left")
+        self._autosave_on_change(self.folder_var)
 
         mode_row = ttk.Frame(right)
         mode_row.pack(fill="x", pady=4)
@@ -316,14 +303,19 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.mode_var = tk.StringVar(value="once")
         ttk.Radiobutton(mode_row, text="Once", variable=self.mode_var, value="once").pack(side="left", padx=(0, 12))
         ttk.Radiobutton(mode_row, text="Loop", variable=self.mode_var, value="loop").pack(side="left")
+        self._autosave_on_change(self.mode_var)
+
+        self.rotation_form_error_var = tk.StringVar(value="")
+        self.rotation_form_error_label = ttk.Label(
+            right, textvariable=self.rotation_form_error_var, foreground=theme.DANGER_COLOR)
+        # Not packed here -- only shown while there's an actual problem preventing
+        # a save, see AutosaveMixin._show_rotation_form_error/_clear_rotation_form_error.
 
         # Everything below (hotkeys, the steps list, step actions/fields, and
         # conditions) can add up to more vertical space than the window has --
         # a Canvas + Scrollbar is the standard Tk way to make an arbitrary
         # stack of widgets scrollable (ttk has no native scrollable frame).
-        # Name/Folder/Mode above stay outside this canvas so they're always
-        # visible; Save Rotation/Revert below stay pinned via side="bottom"
-        # (see the note there) so they're unaffected by this either.
+        # Name/Folder/Mode above stay outside this canvas so they're always visible.
         scroll_container = ttk.Frame(right)
         scroll_container.pack(fill="both", expand=True, pady=(4, 0))
         # A plain tk.Canvas (there's no ttk one) isn't auto-styled the way the
@@ -378,14 +370,14 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
              self._on_bind_pause_clicked, self._on_clear_pause_key),
         )
         for row_i, (label, var, btn_attr, bind_cmd, unbind_cmd) in enumerate(key_bind_rows):
-            ttk.Label(keys_frame, text=label).grid(row=row_i, column=0, sticky="w", padx=(0, 4), pady=4)
-            ttk.Label(keys_frame, textvariable=var, width=14).grid(
-                row=row_i, column=1, padx=(4, 12), pady=4, sticky="w")
+            ttk.Label(keys_frame, text=label).grid(row=row_i, column=0, sticky="w", padx=(0, 2), pady=4)
+            ttk.Label(keys_frame, textvariable=var, width=10).grid(
+                row=row_i, column=1, padx=(0, 2), pady=4, sticky="w")
             btn = ttk.Button(keys_frame, text="Bind...", width=10, command=bind_cmd)
-            btn.grid(row=row_i, column=2, padx=(0, 8), pady=4)
+            btn.grid(row=row_i, column=2, padx=(0, 2), pady=4)
             setattr(self, btn_attr, btn)
             ttk.Button(keys_frame, text="Unbind", style=theme.DANGER_BUTTON_STYLE,
-                       command=unbind_cmd).grid(row=row_i, column=3, padx=(0, 4), pady=4, sticky="w")
+                       command=unbind_cmd).grid(row=row_i, column=3, padx=(0, 0), pady=4, sticky="w")
         ttk.Label(keys_frame,
                   text="Cancel = e.g. your dodge key, stops instantly. Reset restarts from step 1. "
                        "Pause freezes in place.",
@@ -396,6 +388,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Label(reset_delay_row, text="Reset delay (ms)").pack(side="left", padx=(0, 4))
         self.reset_delay_var = tk.StringVar(value="0")
         ttk.Entry(reset_delay_row, textvariable=self.reset_delay_var, width=6).pack(side="left")
+        self._autosave_on_change(self.reset_delay_var)
 
         pause_mode_row = ttk.Frame(self.hotkeys_section.body)
         pause_mode_row.pack(fill="x", pady=(8, 0))
@@ -407,6 +400,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Label(pause_mode_row, text="ms").pack(side="left", padx=(2, 8))
         ttk.Radiobutton(pause_mode_row, text="Until pressed again",
                          variable=self.pause_mode_var, value="toggle").pack(side="left")
+        self._autosave_on_change(self.pause_mode_var)
+        self._autosave_on_change(self.pause_duration_var)
         ttk.Label(pause_mode_row, text="freezes this rotation in place, resuming the same step",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
@@ -444,6 +439,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.tree.bind("<B1-Motion>", self._on_tree_motion)
         self.tree.bind("<ButtonRelease-1>", self._on_tree_release)
         self.tree.tag_configure("drop_target", background=self._drop_target_color())
+        self.tree.tag_configure("step_disabled", foreground="gray")
 
         ttk.Separator(scroll_body, orient="horizontal").pack(fill="x", pady=(0, 8))
 
@@ -459,8 +455,15 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ):
             kwargs = {"style": style} if style else {}
             ttk.Button(step_btns, text=text, command=cmd, **kwargs).pack(side="left", padx=(0, 4))
+        # Label toggles between "Disable Step"/"Enable Step" and the button is
+        # disabled entirely with nothing (or a condition group) selected -- see
+        # StepEditorMixin._update_toggle_step_enabled_button, called on every
+        # selection change to keep it in sync.
+        self.toggle_step_enabled_btn = ttk.Button(
+            step_btns, text="Disable Step", state="disabled", command=self._on_toggle_step_enabled_clicked)
+        self.toggle_step_enabled_btn.pack(side="left", padx=(0, 4))
 
-        step_fields_group = ttk.LabelFrame(scroll_body, text="Selected Step", padding=6)
+        step_fields_group = ttk.LabelFrame(self.skill_steps_section.body, text="Selected Step", padding=6)
         self.step_fields_group = step_fields_group
         step_fields_group.pack(fill="x", pady=(0, 6))
         self.step_name_var = tk.StringVar(value="Skill")
@@ -470,6 +473,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.step_hold_var = tk.StringVar(value="30")
         self.step_hold_jitter_var = tk.StringVar(value="10")
         self.step_repeat_var = tk.StringVar(value="1")
+        for step_var in (self.step_name_var, self.step_key_var, self.step_delay_var, self.step_jitter_var,
+                         self.step_hold_var, self.step_hold_jitter_var, self.step_repeat_var):
+            self._autosave_on_change(step_var)
 
         identity_row = ttk.Frame(step_fields_group)
         identity_row.pack(fill="x")
@@ -505,6 +511,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.step_repeat_combine_hold_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(repeat_row, text="Combine Hold",
                          variable=self.step_repeat_combine_hold_var).pack(side="left")
+        self._autosave_on_change(self.step_repeat_combine_hold_var)
         ttk.Label(repeat_row,
                   text="(hold the key once for Hold × Repeat ms, then a single Delay, instead of "
                        "repeating press/release + Delay Repeat times)",
@@ -552,6 +559,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.condition_negate_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(condition_name_row, text="Negate (invert the match)",
                         variable=self.condition_negate_var).pack(side="left")
+        for condition_var in (self.condition_name_var, self.condition_action_var, self.condition_negate_var):
+            self._autosave_on_change(condition_var)
 
         condition_extra_row = ttk.Frame(self.conditions_section.body)
         condition_extra_row.pack(fill="x", pady=(4, 0))
@@ -571,11 +580,14 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             side="left", padx=(2, 0))
         # Neither frame packed yet -- _refresh_condition_extra_visibility shows
         # whichever one is relevant to the currently-selected Action.
+        for condition_numeric_var in (self.condition_timeout_var, self.condition_hold_var, self.condition_delay_var):
+            self._autosave_on_change(condition_numeric_var)
 
-        condition_apply_row = ttk.Frame(self.conditions_section.body)
-        condition_apply_row.pack(fill="x", pady=(4, 0))
-        ttk.Button(condition_apply_row, text="Update Selected Condition",
-                   command=self._on_update_condition_clicked).pack(side="left")
+        self.condition_form_error_var = tk.StringVar(value="")
+        self.condition_form_error_label = ttk.Label(
+            self.conditions_section.body, textvariable=self.condition_form_error_var, foreground=theme.DANGER_COLOR)
+        # Not packed here -- only shown while _apply_pending_condition_edits (see
+        # poe2bot/gui/conditions.py) finds Wait timeout/Hold/Delay override invalid.
 
         # Unlike step_fields_group/conditions_section (hidden whenever a
         # condition group's own row is selected, since a group has no Key/
@@ -612,6 +624,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.group_negate_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(group_name_row, text="Negate (invert the match)",
                         variable=self.group_negate_var).pack(side="left")
+        for group_var in (self.group_name_var, self.group_action_var, self.group_negate_var):
+            self._autosave_on_change(group_var)
 
         group_summary_row = ttk.Frame(self.rotation_conditions_section.body)
         group_summary_row.pack(fill="x", pady=(6, 0))
@@ -619,11 +633,6 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Label(group_summary_row, textvariable=self.group_match_summary_var).pack(side="left")
         ttk.Label(group_summary_row, text="  (double-click this row in the list to recalibrate its match)",
                   foreground="gray").pack(side="left")
-
-        group_apply_row = ttk.Frame(self.rotation_conditions_section.body)
-        group_apply_row.pack(fill="x", pady=(4, 0))
-        ttk.Button(group_apply_row, text="Update Selected Condition Group",
-                   command=self._on_update_condition_group_clicked).pack(side="left")
 
     # ---- appearance -----------------------------------------------------------
 
@@ -650,66 +659,33 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         if self.activity_window is not None and self.activity_window.winfo_exists():
             self.activity_window.refresh_theme()
 
-    # ---- unsaved-changes indicator --------------------------------------------
+    # ---- title ----------------------------------------------------------------
 
-    def _capture_saved_snapshot(self):
-        """Baseline to compare against for the unsaved-changes indicator --
-        call whenever the form starts exactly matching what's considered
-        "saved" (after loading a rotation, after a successful save, or for a
-        brand new/duplicated rotation that has nothing to lose yet)."""
-        self._saved_steps_snapshot = copy.deepcopy(self.editing_steps)
-        self._saved_core_snapshot = self._rotation_core_field_snapshot()
-
-    def _rotation_core_field_snapshot(self) -> tuple:
-        return (
-            self.name_var.get(), self.folder_var.get(), self.mode_var.get(),
-            self.hotkey_label_var.get(), self.cancel_key_label_var.get(),
-            self.reset_key_label_var.get(), self.reset_delay_var.get(),
-            self.pause_key_label_var.get(), self.pause_mode_var.get(), self.pause_duration_var.get(),
-        )
-
-    def _rotation_is_dirty(self) -> bool:
-        """True if anything currently on screen -- including an in-progress
-        Selected Step edit not yet committed to editing_steps -- differs from
-        the last-loaded/last-saved baseline. Recomputed cheaply on every
-        status-queue poll tick rather than tracked imperatively at each
-        mutation site, so no call site can forget to flag it."""
-        if self._saved_steps_snapshot is None:
-            return True
-        # Only meaningful while a step is actually selected -- _selected_step_ref
-        # is explicitly cleared to None whenever the form is blanked (see
-        # StepEditorMixin._reset_step_core_fields), so this can't compare the
-        # live form against a stale snapshot left over from a step that belongs
-        # to a different rotation than the one now open.
-        if (self._selected_step_ref is not None
-                and self._core_step_form_snapshot() != self._selected_step_core_snapshot):
-            return True
-        return (self._rotation_core_field_snapshot() != self._saved_core_snapshot
-                or self.editing_steps != self._saved_steps_snapshot)
-
-    def _refresh_dirty_indicator(self):
-        dirty = self._rotation_is_dirty()
+    def _update_title(self):
         shown_name = self.editing_original_name or "New Rotation"
-        self.title(f"POE2 Rotation Bot -- {shown_name}{' *' if dirty else ''}")
-        self.save_rotation_btn.config(style=theme.ACCENT_BUTTON_STYLE if dirty else "TButton")
+        self.title(f"POE2 Rotation Bot -- {shown_name}")
 
     # ---- save ---------------------------------------------------------------
 
     def _apply_pending_step_edits(self) -> bool:
         """Writes the step-editing form's current contents back into whichever
-        step is currently selected (or owns the selected condition) -- so a
-        mutating action (Save/Paste/Move/drag-drop) always persists what's
-        currently on screen instead of silently discarding it. This is a
-        different code path from the auto-commit-on-navigate in
-        StepEditorMixin._commit_previous_step_edits_if_changed: that one
-        fires when the selection is about to move to a *different* step (and
-        resolves the target by identity, since the tree selection has
-        already moved on by then); this one fires while the *same* step is
-        still selected. Returns False (leaving the inline field error up
-        from _read_step_form) if the form doesn't parse; True if there was
-        nothing to apply (no step, or more than one row, selected -- with
-        several selected there's no single clear target to apply the form
-        to) or the apply succeeded."""
+        step is currently selected (or owns the selected condition) -- called
+        on every keystroke via AutosaveMixin._autosave, as well as before a
+        mutating action (Paste/Move/drag-drop) so it can't silently discard
+        what's currently on screen. This is a different code path from the
+        auto-commit-on-navigate in StepEditorMixin._commit_previous_step_edits_if_changed:
+        that one fires when the selection is about to move to a *different*
+        step (and resolves the target by identity, since the tree selection
+        has already moved on by then); this one fires while the *same* step
+        is still selected. Applies via _update_step_row (patches just this
+        one row's tree label in place) rather than a full _refresh_steps_tree
+        rebuild, which would otherwise drop the tree's current selection on
+        every single keystroke -- see poe2bot/gui/autosave.py's module
+        docstring for why that matters here. Returns False (leaving the
+        inline field error up from _read_step_form) if the form doesn't
+        parse; True if there was nothing to apply (no step, or more than one
+        row, selected -- with several selected there's no single clear
+        target to apply the form to) or the apply succeeded."""
         selection = self.tree.selection()
         if not selection or len(selection) > 1:
             return True
@@ -722,7 +698,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         existing = self._steps_list_for(group_idx)[step_idx]
         step = self._read_step_form(
             conditions=existing.conditions, is_new_step=False,
-            original_key=existing.key, alt_key=existing.alt_key)
+            original_key=existing.key, alt_key=existing.alt_key, enabled=existing.enabled)
         if step is None:
             return False
         # In place, preserving identity -- so a manually collapsed/expanded tree
@@ -730,137 +706,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # spring back to its default state on every apply, even one with no
         # actual field changes.
         replace_step_fields(existing, step)
-        self._refresh_steps_tree()
+        self._update_step_row((group_idx, step_idx))
         return True
-
-    def _save_rotation(self):
-        if not self._apply_pending_step_edits():
-            return
-        name = self.name_var.get().strip()
-        try:
-            pause_duration_ms = int(self.pause_duration_var.get())
-            reset_delay_ms = int(self.reset_delay_var.get())
-        except ValueError:
-            messagebox.showerror(
-                "Cannot save rotation", "Pause duration and reset delay must be whole numbers.")
-            return
-        # Looked up early (not just later for the rename/move check) so the
-        # alt_* fields below -- which have no editing UI of their own, only
-        # ever touched by the Active Device toggle -- get preserved rather
-        # than silently reset to None by this fresh Rotation(...) call.
-        old_rotation = self.rotations.get(self.editing_original_name) if self.editing_original_name else None
-        rotation = Rotation(
-            name=name,
-            mode=self.mode_var.get(),
-            hotkey=self.pending_hotkey,
-            alt_hotkey=old_rotation.alt_hotkey if old_rotation else None,
-            cancel_key=self.pending_cancel_key,
-            alt_cancel_key=old_rotation.alt_cancel_key if old_rotation else None,
-            reset_key=self.pending_reset_key,
-            alt_reset_key=old_rotation.alt_reset_key if old_rotation else None,
-            reset_delay_ms=reset_delay_ms,
-            pause_key=self.pending_pause_key,
-            alt_pause_key=old_rotation.alt_pause_key if old_rotation else None,
-            pause_mode=self.pause_mode_var.get(),
-            pause_duration_ms=pause_duration_ms,
-            folder=self.folder_var.get().strip(),
-            steps=copy.deepcopy(self.editing_steps),
-        )
-        problems = validate_rotation(rotation)
-        if name != self.editing_original_name and name in self.rotations:
-            problems.append(f"A rotation named '{name}' already exists.")
-        else:
-            # Two different display names can still sanitize to the same filename
-            # (storage._slugify folds case/punctuation, e.g. "Fire Ball" and
-            # "Fire-Ball" both become fire_ball.json) -- saving would silently
-            # overwrite whichever rotation got there first, with no warning, so
-            # this is checked by comparing actual on-disk paths, not just names.
-            new_path = os.path.normcase(os.path.normpath(storage.path_for(name, rotation.folder)))
-            for other_name, other_rotation in self.rotations.items():
-                if other_name == self.editing_original_name:
-                    continue
-                other_path = os.path.normcase(os.path.normpath(
-                    storage.path_for(other_name, other_rotation.folder)))
-                if other_path == new_path:
-                    problems.append(
-                        f"'{name}' would save to the same file as existing rotation '{other_name}' "
-                        f"(both simplify to the same filename) -- choose a more distinct name.")
-                    break
-        if rotation.hotkey and rotation.hotkey == self.hotkey_manager.panic_key:
-            problems.append(f"'{display_name(rotation.hotkey)}' is reserved as the panic/stop-all key.")
-        if rotation.alt_hotkey and rotation.alt_hotkey == self.hotkey_manager.panic_key:
-            problems.append(f"'{display_name(rotation.alt_hotkey)}' (alt) is reserved as the panic/stop-all key.")
-        if problems:
-            messagebox.showerror("Cannot save rotation", "\n".join(problems))
-            return
-
-        new_in_scope = self._folder_in_scope(rotation.folder)
-
-        if rotation.hotkey:
-            # bound_to() only reflects currently-live (in-scope) bindings -- also warn
-            # about another rotation in the SAME folder sharing this hotkey even if
-            # that folder isn't the active one right now, since it's just as real a
-            # conflict the moment either rotation's folder becomes active.
-            same_folder_conflicts = [
-                r.name for r in self.rotations.values()
-                if r.name != self.editing_original_name and r.folder == rotation.folder
-                and r.hotkey == rotation.hotkey]
-            sharing_with = list(dict.fromkeys(
-                [n for n in self.hotkey_manager.bound_to(rotation.hotkey) if n != self.editing_original_name]
-                + same_folder_conflicts))
-            if sharing_with and not messagebox.askyesno(
-                    "Hotkey already in use",
-                    f"'{display_name(rotation.hotkey)}' is already bound to "
-                    f"{', '.join(sharing_with)}. Also bind it to this rotation?"):
-                return
-
-        # Rebind hotkey first (release whatever this rotation held before, bind the new
-        # choice) -- before any destructive rename/move step, so a conflict here (shouldn't
-        # happen given the pre-checks above, but kept as a defensive guard) can't leave
-        # the old file deleted with nothing saved in its place. Skipped entirely when this
-        # rotation isn't in the Active Folder's scope -- it has nothing live to conflict with.
-        if new_in_scope:
-            try:
-                self.hotkey_manager.rebind(rotation.hotkey, rotation.name)
-            except ValueError as e:
-                messagebox.showerror("Hotkey conflict", str(e))
-                return
-
-        # A rotation's file path depends on both its name and its folder, so either
-        # changing means the old file needs to go, not just a plain rename.
-        renamed = old_rotation is not None and old_rotation.name != rotation.name
-        moved = old_rotation is not None and (renamed or old_rotation.folder != rotation.folder)
-        if renamed:
-            # Only a genuine rename needs the OLD name's live bindings released -- a
-            # folder-only move keeps the same name, and the (possibly skipped) rebind
-            # above already replaced whatever was live under it; clearing here too in
-            # that case would immediately undo it, since old_rotation.name ==
-            # rotation.name then.
-            self._clear_rotation_hotkeys(old_rotation.name)
-        if moved:
-            # move_rotation writes the new file before removing the old one, so a
-            # crash in between leaves a recoverable stray duplicate rather than
-            # losing the rotation outright.
-            storage.move_rotation(rotation, old_rotation.name, old_rotation.folder)
-            self.rotation_manager.unload(old_rotation.name)
-            del self.rotations[old_rotation.name]
-        else:
-            storage.save_rotation(rotation)
-
-        self.rotation_manager.load(rotation)
-        self.rotations[rotation.name] = rotation
-        if new_in_scope:
-            self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
-            self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
-            self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
-        else:
-            # Covers the case where this rotation had live bindings from before this
-            # edit (e.g. it used to be in-scope) and is only now moving out of scope.
-            self._clear_rotation_hotkeys(rotation.name)
-
-        self._load_rotation_into_form(rotation)
-        self._refresh_rotation_tree()
-        self._sweep_templates()
 
     # ---- global start/stop --------------------------------------------------
 
@@ -959,7 +806,6 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                     self.activity_window.append(name, message, ts)
         except queue.Empty:
             pass
-        self._refresh_dirty_indicator()
         self.after(200, self._poll_status_queue)
 
     # ---- shutdown -------------------------------------------------------------

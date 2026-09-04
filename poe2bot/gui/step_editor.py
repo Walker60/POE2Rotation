@@ -83,20 +83,26 @@ class StepEditorMixin:
         that must guarantee the step-editing form isn't showing stale data
         left over from whatever step or rotation was previously open --
         _discard_selected_step_edits (an untouched selection), and
-        _new_rotation/_load_rotation_into_form (switching rotations)."""
-        self.step_name_var.set("Skill")
-        self.step_key_var.set("")
-        self.step_delay_var.set("20")
-        self.step_jitter_var.set("10")
-        self.step_hold_var.set("30")
-        self.step_hold_jitter_var.set("10")
-        self.step_repeat_var.set("1")
-        self.step_repeat_combine_hold_var.set(False)
-        self._populate_condition_form(None)
-        self.conditions_section.set_collapsed(True)
-        self._clear_form_errors()
-        self._set_step_panels_visible(True)
-        self._populate_group_condition_form(None)
+        _new_rotation/_load_rotation_into_form (switching rotations). Every
+        .set() below is a programmatic reset, not a user edit -- wrapped in
+        _autosave_suppressed() so it never misfires an autosave onto
+        whatever step/condition/group happened to be selected before this
+        ran (see AutosaveMixin, poe2bot/gui/autosave.py)."""
+        with self._autosave_suppressed():
+            self.step_name_var.set("Skill")
+            self.step_key_var.set("")
+            self.step_delay_var.set("20")
+            self.step_jitter_var.set("10")
+            self.step_hold_var.set("30")
+            self.step_hold_jitter_var.set("10")
+            self.step_repeat_var.set("1")
+            self.step_repeat_combine_hold_var.set(False)
+            self._populate_condition_form(None)
+            self.conditions_section.set_collapsed(True)
+            self._clear_form_errors()
+            self._set_step_panels_visible(True)
+            self._populate_group_condition_form(None)
+            self._update_toggle_step_enabled_button()
         # Blanking the form always means nothing is meaningfully "selected" for
         # auto-commit/dirty-check purposes, even for call sites (_new_rotation,
         # _load_rotation_into_form) that never touch self.tree's own selection
@@ -215,6 +221,48 @@ class StepEditorMixin:
             return None
         return parsed[0], parsed[1]
 
+    def _current_toggle_target(self):
+        """(group_idx, step_idx) for whichever single step is in scope for
+        the Disable/Enable Step button -- same resolution as
+        _selected_owning_step_location (a step's own row or one of its
+        conditions), but silent (None, no popup) when nothing/the wrong
+        thing is selected, since this is also polled reactively on every
+        selection change (see _update_toggle_step_enabled_button) rather
+        than only in response to a click."""
+        selection = self.tree.selection()
+        if len(selection) != 1:
+            return None
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None or parsed[1] is None:
+            return None
+        return parsed[0], parsed[1]
+
+    def _update_toggle_step_enabled_button(self):
+        """Refreshes the Skill Steps section's Disable/Enable Step button to
+        reflect whichever step is currently in scope -- labeled for the
+        action it will perform, and disabled entirely when there's no
+        single step to toggle (nothing selected, a condition group's own
+        row, or a multi-selection)."""
+        location = self._current_toggle_target()
+        if location is None:
+            self.toggle_step_enabled_btn.config(text="Disable Step", state="disabled")
+            return
+        group_idx, step_idx = location
+        step = self._steps_list_for(group_idx)[step_idx]
+        self.toggle_step_enabled_btn.config(
+            text="Enable Step" if not step.enabled else "Disable Step", state="normal")
+
+    def _on_toggle_step_enabled_clicked(self):
+        location = self._current_toggle_target()
+        if location is None:
+            return  # the button is disabled in this state -- shouldn't be reachable
+        group_idx, step_idx = location
+        step = self._steps_list_for(group_idx)[step_idx]
+        step.enabled = not step.enabled
+        self._update_step_row((group_idx, step_idx))
+        self._update_toggle_step_enabled_button()
+        self._autosave()
+
     # ---- step editing ----------------------------------------------------
 
     def _refresh_steps_tree(self):
@@ -261,10 +309,17 @@ class StepEditorMixin:
         self.tree.insert(parent_iid, tk.END, iid=step_iid, text=label,
                           values=(key_col, step.delay_ms, step.jitter_ms, step.hold_ms,
                                   step.hold_jitter_ms, step.repeat_count),
-                          open=open_state(step, bool(step.conditions)))
+                          open=open_state(step, bool(step.conditions)), tags=self._step_row_tags(step))
         for j, condition in enumerate(step.conditions):
             self.tree.insert(step_iid, tk.END, iid=f"{step_iid}-cond-{j}",
                               text=self._condition_summary(condition), values=("", "", "", "", "", ""))
+
+    @staticmethod
+    def _step_row_tags(step) -> tuple:
+        """The Treeview tags for one step's own row -- just "step_disabled"
+        (grays out the whole row, see app.py's tag_configure) while the
+        step is disabled, otherwise none."""
+        return () if step.enabled else ("step_disabled",)
 
     @staticmethod
     def _step_row_text_and_key(step) -> tuple:
@@ -294,8 +349,37 @@ class StepEditorMixin:
         if not self.tree.exists(iid):
             return
         label, key_col = self._step_row_text_and_key(step)
+        # Merges "step_disabled" in/out of whatever tags this row already has
+        # (rather than replacing them outright) so an in-flight drag's
+        # "drop_target" tag -- set directly via tree.item(iid, tags=...), see
+        # DragDropMixin -- can never be silently wiped out by an autosave-
+        # triggered field edit landing at the same moment.
+        tags = (set(self.tree.item(iid, "tags")) - {"step_disabled"}) | set(self._step_row_tags(step))
         self.tree.item(iid, text=label, values=(
-            key_col, step.delay_ms, step.jitter_ms, step.hold_ms, step.hold_jitter_ms, step.repeat_count))
+            key_col, step.delay_ms, step.jitter_ms, step.hold_ms, step.hold_jitter_ms, step.repeat_count),
+            tags=tuple(tags))
+
+    def _update_condition_row(self, group_idx, step_idx, cond_idx):
+        """Patches one condition's row label in place -- same
+        preserve-the-tree-selection rationale as _update_step_row, used by
+        ConditionsMixin._apply_pending_condition_edits (called on every
+        keystroke via AutosaveMixin._autosave, so a full _refresh_steps_tree
+        rebuild here would drop the current selection after the very first
+        keystroke)."""
+        iid = self._location_iid(group_idx, step_idx, cond_idx)
+        if not self.tree.exists(iid):
+            return
+        condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
+        self.tree.item(iid, text=self._condition_summary(condition))
+
+    def _update_group_row(self, group_idx):
+        """Patches a condition group's own header row label in place -- same
+        rationale as _update_condition_row, used by
+        ConditionGroupsMixin._apply_pending_group_edits."""
+        iid = f"group-{group_idx}"
+        if not self.tree.exists(iid):
+            return
+        self.tree.item(iid, text=self._condition_summary(self.editing_steps[group_idx].condition))
 
     _ACTION_SUMMARY_LABELS = {"fire": "Execute", "block": "Skip", "hold": "Override"}
 
@@ -335,51 +419,59 @@ class StepEditorMixin:
     def _on_select_step(self, _event):
         if not self._suppress_commit_on_select:
             self._commit_previous_step_edits_if_changed()
-        selection = self.tree.selection()
-        if not selection:
-            self._selected_step_ref = None
+        # Everything below is the code populating the form from whatever's
+        # newly selected, not the user typing/clicking -- suppressed so it
+        # can never misfire an autosave onto the PREVIOUSLY selected step/
+        # condition/group mid-populate (see AutosaveMixin, poe2bot/gui/autosave.py).
+        with self._autosave_suppressed():
+            selection = self.tree.selection()
+            if not selection:
+                self._selected_step_ref = None
+                self._selected_group_ref = None
+                self._populate_condition_form(None)
+                self._set_step_panels_visible(True)
+                self._populate_group_condition_form(None)
+                self._update_toggle_step_enabled_button()
+                return
+            parsed = self._parse_tree_iid(selection[0])
+            if parsed is None:
+                return
+            group_idx, step_idx, cond_idx = parsed
+            if step_idx is None:
+                # A condition group's own header row is selected -- it has no Key/
+                # Delay/Hold/Repeat of its own, just the one condition gating it.
+                group = self.editing_steps[group_idx]
+                self._selected_step_ref = None
+                self._selected_group_ref = group
+                self._set_step_panels_visible(False)
+                self._populate_group_condition_form(group)
+                self._update_toggle_step_enabled_button()
+                return
             self._selected_group_ref = None
-            self._populate_condition_form(None)
             self._set_step_panels_visible(True)
             self._populate_group_condition_form(None)
-            return
-        parsed = self._parse_tree_iid(selection[0])
-        if parsed is None:
-            return
-        group_idx, step_idx, cond_idx = parsed
-        if step_idx is None:
-            # A condition group's own header row is selected -- it has no Key/
-            # Delay/Hold/Repeat of its own, just the one condition gating it.
-            group = self.editing_steps[group_idx]
-            self._selected_step_ref = None
-            self._selected_group_ref = group
-            self._set_step_panels_visible(False)
-            self._populate_group_condition_form(group)
-            return
-        self._selected_group_ref = None
-        self._set_step_panels_visible(True)
-        self._populate_group_condition_form(None)
-        step = self._steps_list_for(group_idx)[step_idx]
-        self._clear_form_errors()
-        self._populate_condition_form(step.conditions[cond_idx] if cond_idx is not None else None)
-        self.step_name_var.set(step.name)
-        self.step_key_var.set(step.key or "")
-        self.step_delay_var.set(str(step.delay_ms))
-        self.step_jitter_var.set(str(step.jitter_ms))
-        self.step_hold_var.set(str(step.hold_ms))
-        self.step_hold_jitter_var.set(str(step.hold_jitter_ms))
-        self.step_repeat_var.set(str(step.repeat_count))
-        self.step_repeat_combine_hold_var.set(step.repeat_combine_hold)
-        if cond_idx is not None:
-            # A condition row is selected -- always show its editor, regardless of
-            # this step's smart per-step default/override below, since the user is
-            # clearly here to look at (or update) that specific condition.
-            self.conditions_section.set_collapsed(False)
-        else:
-            self.conditions_section.set_collapsed(
-                self._section_collapse_state(step, "conditions", not step.conditions))
-        self._selected_step_ref = step
-        self._selected_step_core_snapshot = self._core_step_form_snapshot()
+            step = self._steps_list_for(group_idx)[step_idx]
+            self._clear_form_errors()
+            self._populate_condition_form(step.conditions[cond_idx] if cond_idx is not None else None)
+            self.step_name_var.set(step.name)
+            self.step_key_var.set(step.key or "")
+            self.step_delay_var.set(str(step.delay_ms))
+            self.step_jitter_var.set(str(step.jitter_ms))
+            self.step_hold_var.set(str(step.hold_ms))
+            self.step_hold_jitter_var.set(str(step.hold_jitter_ms))
+            self.step_repeat_var.set(str(step.repeat_count))
+            self.step_repeat_combine_hold_var.set(step.repeat_combine_hold)
+            if cond_idx is not None:
+                # A condition row is selected -- always show its editor, regardless of
+                # this step's smart per-step default/override below, since the user is
+                # clearly here to look at (or update) that specific condition.
+                self.conditions_section.set_collapsed(False)
+            else:
+                self.conditions_section.set_collapsed(
+                    self._section_collapse_state(step, "conditions", not step.conditions))
+            self._selected_step_ref = step
+            self._selected_step_core_snapshot = self._core_step_form_snapshot()
+            self._update_toggle_step_enabled_button()
 
     def _section_collapse_state(self, step, key: str, default_collapsed: bool) -> bool:
         return self._section_collapse_overrides.get(id(step), {}).get(key, default_collapsed)
@@ -418,7 +510,7 @@ class StepEditorMixin:
         if self._core_step_form_snapshot() == self._selected_step_core_snapshot:
             return
         parsed = self._read_step_form(conditions=step.conditions, is_new_step=False,
-                                       original_key=step.key, alt_key=step.alt_key)
+                                       original_key=step.key, alt_key=step.alt_key, enabled=step.enabled)
         if parsed is None:
             self.status_var.set(f"Discarded an unsaved, invalid edit to '{step.name or step.key or 'a step'}'.")
             return
@@ -437,13 +529,19 @@ class StepEditorMixin:
             self.step_repeat_var.get(), self.step_repeat_combine_hold_var.get(),
         )
 
-    def _read_step_form(self, conditions=None, is_new_step=True, original_key=None, alt_key=None):
+    def _read_step_form(self, conditions=None, is_new_step=True, original_key=None, alt_key=None, enabled=True):
         """Builds a Step from the form's current contents, or None if any
         numeric field fails to parse. Each field is validated independently
         (rather than one try/except around all of them), so a bad field gets
         its own red border via ttk's native "invalid" Entry state, and the
         shared error label names exactly which field(s) are wrong instead of
         a single generic message covering every possible field.
+
+        `enabled` (like `conditions`/`alt_key`) has no field of its own on
+        this form -- it's toggled separately via the Disable/Enable Step
+        button -- so an existing step's current value must be passed through
+        explicitly by the caller, or it would silently reset to the default
+        (True) on every autosave-triggered rebuild of this step.
 
         `original_key` (the key the step being *replaced* already had;
         ignored when is_new_step) resolves what a blank Key field means,
@@ -495,6 +593,7 @@ class StepEditorMixin:
             hold_jitter_ms=values["hold_jitter_ms"],
             repeat_count=values["repeat_count"],
             repeat_combine_hold=self.step_repeat_combine_hold_var.get(),
+            enabled=enabled,
         )
         if conditions is not None:
             # The form has no fields of its own for conditions -- an existing
@@ -543,6 +642,7 @@ class StepEditorMixin:
             return
         self._steps_list_for(scope).append(step)
         self._refresh_steps_tree()
+        self._autosave()
 
     def _add_sleep_step(self):
         """A sleep step has no key -- it's just a pause of delay_ms (+/- jitter_ms)
@@ -556,6 +656,7 @@ class StepEditorMixin:
         step.key = ""
         self._steps_list_for(scope).append(step)
         self._refresh_steps_tree()
+        self._autosave()
 
     def _on_copy_clicked(self):
         """Copies every currently-selected step (group header and
@@ -566,10 +667,10 @@ class StepEditorMixin:
         copied from work. A selection spanning multiple groups (or a mix of
         top-level and nested steps) is copied in top-to-bottom tree order,
         not selection order."""
-        # Captured before _apply_pending_step_edits, which -- if it actually applies
-        # an edit -- calls _refresh_steps_tree and clears the tree's selection (see
-        # _on_paste_clicked below for the same reason); editing_steps' order/indices
-        # are unaffected by the apply, so reading them now and using them after is safe.
+        # editing_steps' order/indices are unaffected by _apply_pending_step_edits
+        # below (it patches one row's tree label in place, see _update_step_row --
+        # it doesn't touch editing_steps' structure or the tree's selection), so
+        # reading the selection now and using it after is safe either way.
         selection = self.tree.selection()
         selected_locations = {(g, s) for g, s, c in (self._parse_tree_iid(iid) for iid in selection)
                                if s is not None and c is None} if selection else set()
@@ -577,7 +678,7 @@ class StepEditorMixin:
         if not selected_locations:
             messagebox.showinfo("No step selected", "Select at least one step to copy.")
             return
-        # Applied here (like Paste/Move/Save/drag-drop already do) so Copy can't
+        # Applied here (like Paste/Move/drag-drop already do) so Copy can't
         # silently copy stale, pre-edit data if the form has an untouched change.
         if not self._apply_pending_step_edits():
             return
@@ -588,10 +689,6 @@ class StepEditorMixin:
         if not self._step_clipboard:
             messagebox.showinfo("Clipboard is empty", "Copy a step first.")
             return
-        # Captured before _apply_pending_step_edits, which -- if it actually applies
-        # an edit -- calls _refresh_steps_tree and clears the tree's selection, so
-        # re-reading it afterward would silently paste at the end instead of after
-        # whatever was selected.
         selection = self.tree.selection()
         parsed = self._parse_tree_iid(selection[0]) if selection else None
         if not self._apply_pending_step_edits():
@@ -606,6 +703,7 @@ class StepEditorMixin:
         target_list[insert_at:insert_at] = pasted
         self._refresh_steps_tree()
         self.tree.selection_set(*(self._location_iid(group_idx, insert_at + offset) for offset in range(len(pasted))))
+        self._autosave()
 
     def _remove_selected_step(self):
         selection = self.tree.selection()
@@ -654,6 +752,7 @@ class StepEditorMixin:
         for i in sorted(top_level_removals, reverse=True):
             del self.editing_steps[i]
         self._refresh_steps_tree()
+        self._autosave()
 
     def _move_step_up(self):
         self._move_selected(-1)
@@ -673,9 +772,9 @@ class StepEditorMixin:
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return
-        # Apply whatever's pending in the step form first (e.g. an edit the user
-        # was about to have auto-committed) so moving the step doesn't silently
-        # discard it -- same protection Save Rotation already has.
+        # Apply whatever's pending in the step form first so moving the step
+        # doesn't silently discard an edit the autosave trace hasn't caught yet
+        # (e.g. a field whose value is currently invalid mid-edit).
         if not self._apply_pending_step_edits():
             return
         group_idx, step_idx, cond_idx = parsed
@@ -694,3 +793,4 @@ class StepEditorMixin:
         items[idx], items[new_idx] = items[new_idx], items[idx]
         self._refresh_steps_tree()
         self.tree.selection_set(new_iid(new_idx))
+        self._autosave()

@@ -404,7 +404,8 @@ class RotationRunner:
 
     def _run(self):
         if self.rotation.mode == "loop" and (
-                not self.rotation.steps or all(step.key is None for step in iter_steps(self.rotation.steps))):
+                not self.rotation.steps
+                or all(step.key is None or not step.enabled for step in iter_steps(self.rotation.steps))):
             # Same condition validate_rotation now rejects at save time -- kept
             # here too since a rotation can reach the runtime without ever
             # passing through it (a pre-existing file saved before that check
@@ -560,6 +561,12 @@ class RotationRunner:
         _fire_repeats' own contract, so _run_once can bail out immediately."""
         if not self._wait_for_focus_or_stop():
             return False
+        if not step.enabled:
+            # Disabled via the GUI's Disable Step toggle -- always skipped, no fire,
+            # no delay, conditions never even checked, regardless of key/repeat/etc.
+            log.info(f"[{self.rotation.name}] {label} is disabled; skipping")
+            self._notify_activity(f"{label}: disabled, skipping")
+            return True
         if step.key is None:
             # No keybind assigned yet -- skip this step entirely, the same as a
             # not-ready/conditions-not-met skip below: no fire, no delay, straight

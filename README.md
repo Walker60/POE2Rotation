@@ -303,12 +303,6 @@ list on the left) and drag-and-drop, on top of the buttons described above:
   interfere with normal copy/paste/delete while typing in the Name/Key/etc.
   fields — they only fire while the list itself is focused, not the whole
   window.
-- **Revert to Saved** discards every unsaved edit to whichever rotation is
-  currently open in the form (steps, hotkeys, name, folder — everything),
-  reloading it exactly as it was last saved (or resetting to blank for a
-  rotation you haven't saved yet), after a confirmation prompt. A safety net
-  now that drag-and-drop and multi-select make it easier to mess up a
-  rotation by accident.
 
 ## Organizing rotations into folders
 
@@ -351,9 +345,20 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    as any other step) with nothing pressed, for spacing out a rotation without
    tying the wait to any particular skill. It shows up in the list as "Sleep"
    unless you give it its own Name. You can also turn any existing step into a
-   sleep by clearing its Key field and selecting a different step (or clicking
-   Save Rotation) to commit the change, or turn a sleep back into a real step
-   by typing a key into it.
+   sleep by clearing its Key field and selecting a different step (or letting
+   it autosave, see below) to commit the change, or turn a sleep back into a
+   real step by typing a key into it.
+
+   **Disable Step**/**Enable Step** (in Skill Steps, next to Remove Selected)
+   toggles whether the currently-selected step ever runs at all — a disabled
+   step always shows grayed out in the list and is unconditionally skipped
+   when the rotation runs (no fire, no delay, its own Conditions aren't even
+   checked), regardless of its Key or anything else about it. Handy for
+   temporarily pulling a step out of a rotation without deleting it and
+   losing its calibrated conditions. The button is only enabled while
+   exactly one step (or one of its conditions) is selected — nothing to
+   toggle with a condition group's own row selected, or with nothing/several
+   things selected.
 
    **Add Step** with an empty Key field is different from a sleep step: it
    creates a step with no keybind *assigned yet*, shown as "(no key)" in the
@@ -365,15 +370,16 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    **Add Step**; **Add Sleep** always creates a real, deliberate pause
    regardless of what's in the Key field.
 
-   Editing a step's fields applies automatically as soon as you select a
-   different step (or a condition, or click Save Rotation) — there's no
-   separate "apply" step. An edit that doesn't parse (e.g. a non-numeric
-   Delay) is discarded rather than blocking navigation, with a status-bar
-   note saying so; the field itself gets a red border and the exact problem
-   is named right there in the form.
+   There's no Save button anywhere in this app — every edit (a field, adding/
+   removing/reordering a step, a condition, a hotkey binding, renaming the
+   rotation, all of it) is written to disk the instant you make it. A field
+   that doesn't currently parse (e.g. a non-numeric Delay, or a blank one)
+   just isn't saved yet — the field gets a red border and the exact problem
+   is named right there in the form — and resumes saving normally the moment
+   it's valid again; nothing invalid ever reaches disk.
 2. Click **Bind Hotkey...** and either press a keyboard key or click a mouse button
-   to trigger this rotation, then **Save Rotation**. Left/middle/right click and the
-   two extra side buttons (mouse 4/5) are all supported.
+   to trigger this rotation — it saves the instant you press/click it. Left/
+   middle/right click and the two extra side buttons (mouse 4/5) are all supported.
 
    **Caution:** binding left or right click makes that button trigger the rotation
    *everywhere*, not just in-game — every left-click in Windows Explorer, every
@@ -421,11 +427,12 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    cancel/reset keys, and the same restriction: it can't be the same as this
    rotation's own trigger hotkey, cancel key, or reset key.
 6. Selecting a rotation in the list and clicking **Copy** duplicates it (steps,
-   mode, and all) as a new unsaved rotation named "*name* (copy)" — the hotkey is
-   left unbound since it can't share the original's, the cancel/reset/pause keys
-   (if any) are carried over as-is since sharing those is fine, and
-   template-based conditions are carried over by reference (no recalibration
-   needed). Rename it, assign a hotkey, and **Save Rotation** when ready.
+   mode, and all) as a new rotation named "*name* (copy)", saved to disk
+   immediately — the hotkey is left unbound since it can't share the
+   original's, the cancel/reset/pause keys (if any) are carried over as-is
+   since sharing those is fine, and template-based conditions are carried
+   over by reference (no recalibration needed). Rename it and assign a
+   hotkey whenever you're ready.
 7. Rotations only fire keystrokes while the configured game process has OS focus —
    switching away pauses a running rotation; switching back resumes it automatically.
 8. **Stop Bot** stops any running rotation and disables all hotkeys (including the

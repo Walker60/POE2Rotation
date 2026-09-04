@@ -8,7 +8,7 @@ from poe2bot.models import Condition, iter_conditions
 log = get_logger()
 
 # Human labels for Condition.action, and back -- shared by the Action combobox
-# (app.py), _populate_condition_form, and _on_update_condition_clicked below.
+# (app.py), _populate_condition_form, and _apply_pending_condition_edits below.
 CONDITION_ACTION_LABELS = {
     "fire": "Execute Step",
     "block": "Skip Step",
@@ -71,6 +71,7 @@ class ConditionsMixin:
         conditions.append(condition)
         self._refresh_steps_tree()
         self.tree.selection_set(self._location_iid(group_idx, step_idx, len(conditions) - 1))
+        self._autosave()
 
     # ---- the per-condition editor (Name/Action/Negate/Timeout/Hold/Delay) ----
 
@@ -79,22 +80,26 @@ class ConditionsMixin:
         it to defaults if None (a step row, not a condition row, is
         selected, or nothing is). Shared by StepEditorMixin._on_select_step
         and this mixin's own add/update handlers, so the form always
-        reflects exactly what's selected."""
-        if condition is None:
-            self.condition_name_var.set("")
-            self.condition_action_var.set(CONDITION_ACTION_LABELS["fire"])
-            self.condition_negate_var.set(False)
-            self.condition_timeout_var.set("0")
-            self.condition_hold_var.set("")
-            self.condition_delay_var.set("")
-        else:
-            self.condition_name_var.set(condition.name)
-            self.condition_action_var.set(CONDITION_ACTION_LABELS.get(condition.action, CONDITION_ACTION_LABELS["fire"]))
-            self.condition_negate_var.set(condition.negate)
-            self.condition_timeout_var.set(str(condition.timeout_ms))
-            self.condition_hold_var.set("" if condition.hold_ms is None else str(condition.hold_ms))
-            self.condition_delay_var.set("" if condition.delay_ms is None else str(condition.delay_ms))
-        self._refresh_condition_extra_visibility()
+        reflects exactly what's selected. Wrapped in _autosave_suppressed()
+        -- this is code populating the form, not the user editing it, so it
+        must never misfire an autosave onto whatever condition was
+        previously loaded (see AutosaveMixin, poe2bot/gui/autosave.py)."""
+        with self._autosave_suppressed():
+            if condition is None:
+                self.condition_name_var.set("")
+                self.condition_action_var.set(CONDITION_ACTION_LABELS["fire"])
+                self.condition_negate_var.set(False)
+                self.condition_timeout_var.set("0")
+                self.condition_hold_var.set("")
+                self.condition_delay_var.set("")
+            else:
+                self.condition_name_var.set(condition.name)
+                self.condition_action_var.set(CONDITION_ACTION_LABELS.get(condition.action, CONDITION_ACTION_LABELS["fire"]))
+                self.condition_negate_var.set(condition.negate)
+                self.condition_timeout_var.set(str(condition.timeout_ms))
+                self.condition_hold_var.set("" if condition.hold_ms is None else str(condition.hold_ms))
+                self.condition_delay_var.set("" if condition.delay_ms is None else str(condition.delay_ms))
+            self._refresh_condition_extra_visibility()
 
     def _refresh_condition_extra_visibility(self):
         """Shows only the field group relevant to the currently-selected
@@ -113,22 +118,24 @@ class ConditionsMixin:
     def _on_condition_action_changed(self, _event=None):
         self._refresh_condition_extra_visibility()
 
-    def _on_update_condition_clicked(self):
+    def _apply_pending_condition_edits(self) -> bool:
         """Applies the editor's Name/Action/Negate/Timeout/Hold/Delay fields
-        onto whichever single condition is selected -- everything about a
-        condition except its match itself (recalibrate via double-click for
-        that, see _on_tree_double_click)."""
+        onto whichever single condition is currently selected -- everything
+        about a condition except its match itself (recalibrate via double-
+        click for that, see _on_tree_double_click). The non-interactive core
+        of what used to be the "Update Selected Condition" button, called on
+        every field change by AutosaveMixin._autosave -- so unlike that
+        button, nothing/the wrong thing being selected is just "nothing
+        pending to apply" (return True), not something to interrupt anyone
+        about, and a parse/range failure shows inline via
+        condition_form_error_label instead of a popup, since this can now
+        run mid-keystroke."""
         selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo("No condition selected", "Select a condition in the list first.")
-            return
-        if len(selection) > 1:
-            messagebox.showinfo("Select one condition", "Select exactly one condition to update.")
-            return
+        if len(selection) != 1:
+            return True
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None or parsed[2] is None:
-            messagebox.showinfo("Select a condition", "Select a condition (not a step) to update.")
-            return
+            return True
         group_idx, step_idx, cond_idx = parsed
         action = _CONDITION_ACTION_BY_LABEL.get(self.condition_action_var.get(), "fire")
         try:
@@ -138,13 +145,17 @@ class ConditionsMixin:
             hold_ms = int(hold_text) if hold_text else None
             delay_ms = int(delay_text) if delay_text else None
         except ValueError:
-            messagebox.showerror(
-                "Invalid condition", "Wait timeout, Hold override, and Delay override must be whole "
-                "numbers (Hold/Delay may be left blank).")
-            return
+            self.condition_form_error_var.set(
+                "Wait timeout, Hold override, and Delay override must be whole numbers "
+                "(Hold/Delay may be left blank).")
+            self.condition_form_error_label.pack(anchor="w", pady=(4, 0))
+            return False
         if timeout_ms < 0 or (hold_ms is not None and hold_ms < 0) or (delay_ms is not None and delay_ms < 0):
-            messagebox.showerror("Invalid condition", "Wait timeout, Hold override, and Delay override cannot be negative.")
-            return
+            self.condition_form_error_var.set("Wait timeout, Hold override, and Delay override cannot be negative.")
+            self.condition_form_error_label.pack(anchor="w", pady=(4, 0))
+            return False
+        self.condition_form_error_var.set("")
+        self.condition_form_error_label.pack_forget()
         condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
         condition.name = self.condition_name_var.get().strip()
         condition.negate = self.condition_negate_var.get()
@@ -152,8 +163,8 @@ class ConditionsMixin:
         condition.timeout_ms = timeout_ms
         condition.hold_ms = hold_ms
         condition.delay_ms = delay_ms
-        self._refresh_steps_tree()
-        self.tree.selection_set(self._location_iid(group_idx, step_idx, cond_idx))
+        self._update_condition_row(group_idx, step_idx, cond_idx)
+        return True
 
     def _on_tree_double_click(self, _event):
         """Double-clicking a condition row recalibrates its match in place
@@ -191,6 +202,7 @@ class ConditionsMixin:
             self._steps_list_for(group_idx)[step_idx].conditions[cond_idx] = new_condition
             self._refresh_steps_tree()
             self._populate_condition_form(new_condition)
+            self._autosave()
 
         if condition.match_type == "timer":
             seconds = messagebox.askfloat(
@@ -249,6 +261,7 @@ class ConditionsMixin:
         for group_idx, step_idx in step_locations:
             self._steps_list_for(group_idx)[step_idx].conditions.extend(copy.deepcopy(self._condition_clipboard))
         self._refresh_steps_tree()
+        self._autosave()
 
     # ---- template lifecycle ---------------------------------------------------
 

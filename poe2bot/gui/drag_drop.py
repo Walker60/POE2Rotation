@@ -94,6 +94,20 @@ class DragDropMixin:
         parsed = self._parse_tree_iid(row)
         self._drag_candidate = [parsed] if parsed is not None else None
 
+    def _set_drop_target_tag(self, iid, present: bool):
+        """Adds/removes just the "drop_target" tag on `iid`, preserving any
+        other tag it already has (e.g. "step_disabled", see
+        StepEditorMixin._step_row_tags) -- setting `tags=` outright would
+        otherwise silently wipe those out for the duration of a drag (and,
+        via the `tags=()` clear, permanently once the drag moves past that
+        row)."""
+        tags = set(self.tree.item(iid, "tags"))
+        if present:
+            tags.add("drop_target")
+        else:
+            tags.discard("drop_target")
+        self.tree.item(iid, tags=tuple(tags))
+
     def _on_tree_motion(self, event):
         if not self._drag_candidate:
             return
@@ -105,14 +119,14 @@ class DragDropMixin:
         new_target_iid = target[0] if target is not None else None
         if new_target_iid != self._drop_target_iid:
             if self._drop_target_iid is not None:
-                self.tree.item(self._drop_target_iid, tags=())
+                self._set_drop_target_tag(self._drop_target_iid, False)
             if new_target_iid is not None:
-                self.tree.item(new_target_iid, tags=("drop_target",))
+                self._set_drop_target_tag(new_target_iid, True)
             self._drop_target_iid = new_target_iid
 
     def _on_tree_release(self, event):
         if self._drop_target_iid is not None:
-            self.tree.item(self._drop_target_iid, tags=())
+            self._set_drop_target_tag(self._drop_target_iid, False)
             self._drop_target_iid = None
         candidate = self._drag_candidate
         self._drag_candidate = None
@@ -165,6 +179,7 @@ class DragDropMixin:
             self._refresh_steps_tree()
             self.tree.selection_set(*(self._location_iid(dest_group_idx, start + k)
                                        for k in range(len(dragged_indices))))
+        self._autosave()
 
     def _resolve_drop_target(self, event, candidate):
         """Returns (highlight_iid, dest_group_idx, target_index, after) for

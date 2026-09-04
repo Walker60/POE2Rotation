@@ -1,4 +1,3 @@
-from poe2bot.gui import dialogs as messagebox
 from poe2bot.models import Condition, ConditionGroup
 
 # Human labels for a ConditionGroup's own condition.action, and back -- a
@@ -39,20 +38,24 @@ class ConditionGroupsMixin:
         self.editing_steps.append(ConditionGroup(condition=condition))
         self._refresh_steps_tree()
         self.tree.selection_set(f"group-{group_idx}")
+        self._autosave()
 
     # ---- the Rotation Conditions section's Name/Action/Negate fields --------
 
     def _set_step_panels_visible(self, visible: bool):
-        """Shows "Selected Step" + Skill Conditions when a step (or
-        nothing) is selected; hides them when a condition group's own row
-        is selected instead, since a group has no Key/Delay/Hold/Repeat/
-        per-step Conditions of its own. Unlike those two, the Rotation
-        Conditions section (built in app.py) is always visible regardless
-        of what's selected -- its Add Condition Group buttons don't depend
-        on any particular selection -- so it's re-packed here too every
-        time, last, to guarantee it always ends up positioned after
-        whichever of the other two are currently showing rather than
-        drifting out of place after repeated toggles."""
+        """Shows "Selected Step" (nested inside the Skill Steps section's
+        own body, alongside its button row) + Skill Conditions when a step
+        (or nothing) is selected; hides them when a condition group's own
+        row is selected instead, since a group has no Key/Delay/Hold/
+        Repeat/per-step Conditions of its own. Unlike Skill Conditions, the
+        Rotation Conditions section (built in app.py) is always visible
+        regardless of what's selected -- its Add Condition Group buttons
+        don't depend on any particular selection -- so it's re-packed here
+        too every time, last, to guarantee it always ends up positioned
+        after Skill Conditions rather than drifting out of place after
+        repeated toggles (Selected Step's own position is unaffected by
+        that ordering -- it lives in a different parent, Skill Steps' body,
+        alongside only its own button row)."""
         self.step_fields_group.pack_forget()
         self.conditions_section.pack_forget()
         self.rotation_conditions_section.pack_forget()
@@ -65,46 +68,51 @@ class ConditionGroupsMixin:
         """Fills the Rotation Conditions section's Name/Action/Negate/match-
         summary fields from `group`, or blanks them to defaults if None (a
         step row, not a group row, is selected, or nothing is) -- mirrors
-        ConditionsMixin._populate_condition_form's None-handling."""
-        if group is None:
-            self.group_name_var.set("")
-            self.group_action_var.set(GROUP_CONDITION_ACTION_LABELS["fire"])
-            self.group_negate_var.set(False)
-            self.group_match_summary_var.set("(no condition group selected)")
-            return
-        condition = group.condition
-        self.group_name_var.set(condition.name)
-        self.group_action_var.set(
-            GROUP_CONDITION_ACTION_LABELS.get(condition.action, GROUP_CONDITION_ACTION_LABELS["fire"]))
-        self.group_negate_var.set(condition.negate)
-        # Reuses the same [Execute]/[Skip] + match-description formatting the
-        # tree row itself uses -- a live preview of exactly what's calibrated,
-        # not a separate description to keep in sync.
-        self.group_match_summary_var.set(self._condition_summary(condition))
+        ConditionsMixin._populate_condition_form's None-handling. Wrapped in
+        _autosave_suppressed() for the same reason that one is -- this is
+        code populating the form, not the user editing it."""
+        with self._autosave_suppressed():
+            if group is None:
+                self.group_name_var.set("")
+                self.group_action_var.set(GROUP_CONDITION_ACTION_LABELS["fire"])
+                self.group_negate_var.set(False)
+                self.group_match_summary_var.set("(no condition group selected)")
+                return
+            condition = group.condition
+            self.group_name_var.set(condition.name)
+            self.group_action_var.set(
+                GROUP_CONDITION_ACTION_LABELS.get(condition.action, GROUP_CONDITION_ACTION_LABELS["fire"]))
+            self.group_negate_var.set(condition.negate)
+            # Reuses the same [Execute]/[Skip] + match-description formatting the
+            # tree row itself uses -- a live preview of exactly what's calibrated,
+            # not a separate description to keep in sync.
+            self.group_match_summary_var.set(self._condition_summary(condition))
 
-    def _on_update_condition_group_clicked(self):
+    def _apply_pending_group_edits(self) -> bool:
         """Applies the panel's Name/Action/Negate fields onto whichever
         group is currently selected -- everything about its condition
         except its match itself (recalibrate by double-clicking the
-        group's own row, see _on_group_row_double_click)."""
+        group's own row, see _on_group_row_double_click). The non-
+        interactive core of what used to be the "Update Selected Condition
+        Group" button, called on every field change by
+        AutosaveMixin._autosave -- nothing/the wrong thing being selected is
+        just "nothing pending to apply" (return True), not something to
+        interrupt anyone about. Unlike ConditionsMixin's equivalent, there's
+        no numeric field here that could fail to parse -- Name/Action/
+        Negate can't be invalid -- so this never returns False."""
         selection = self.tree.selection()
-        if not selection:
-            messagebox.showinfo("No condition group selected", "Select a condition group in the list first.")
-            return
-        if len(selection) > 1:
-            messagebox.showinfo("Select one condition group", "Select exactly one condition group to update.")
-            return
+        if len(selection) != 1:
+            return True
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None or parsed[1] is not None:
-            messagebox.showinfo("Select a condition group", "Select a condition group's own row (not a step) to update.")
-            return
+            return True
         group_idx = parsed[0]
         condition = self.editing_steps[group_idx].condition
         condition.name = self.group_name_var.get().strip()
         condition.negate = self.group_negate_var.get()
         condition.action = _GROUP_CONDITION_ACTION_BY_LABEL.get(self.group_action_var.get(), "fire")
-        self._refresh_steps_tree()
-        self.tree.selection_set(f"group-{group_idx}")
+        self._update_group_row(group_idx)
+        return True
 
     # ---- recalibrating a group's match (double-click its row) ---------------
 
@@ -126,6 +134,7 @@ class ConditionGroupsMixin:
             group.condition = new_condition
             self._refresh_steps_tree()
             self._populate_group_condition_form(group)
+            self._autosave()
 
         if condition.match_type == "pixel":
             self._start_pixel_capture(
