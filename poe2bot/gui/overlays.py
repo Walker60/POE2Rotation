@@ -1,25 +1,41 @@
 import tkinter as tk
 
+from poe2bot.gui import geometry
 
-class RegionCaptureOverlay(tk.Toplevel):
-    """Fullscreen, borderless, semi-transparent click-drag-release rectangle picker.
 
-    Calls on_done(region) where region is (left, top, width, height) in absolute
-    screen pixels, or on_done(None) if cancelled (Escape, or a release without a
-    meaningfully-sized drag). Primary monitor only -- geometry is sized/positioned
-    from winfo_screenwidth()/winfo_screenheight() at +0+0, so multi-monitor setups
-    where the primary isn't at the origin, or where a skill icon sits on a secondary
-    monitor, aren't supported by this overlay (known limitation).
+class _FullscreenPickerOverlay(tk.Toplevel):
+    """Shared fullscreen, borderless, semi-transparent picker chrome behind
+    RegionCaptureOverlay (click-drag-release rectangle) and
+    PointCaptureOverlay (single-click point): window/canvas setup, the
+    optional persistent hint-text banner, Escape-to-cancel, and the
+    destroy-then-callback finish sequence. Subclasses only add their own
+    canvas bindings and `_finish(...)` payload.
+
+    Spans the full virtual desktop (every connected monitor's combined
+    bounds -- see geometry.virtual_screen_bounds), not just the primary
+    monitor's own resolution at +0+0, so a skill icon on a secondary
+    monitor (including one positioned above/left of the primary, at
+    negative virtual coordinates) can be calibrated too. Falls back to
+    primary-monitor-only geometry if that Win32 query ever fails.
     """
+
+    _HINT_FONT = ("Segoe UI", 12, "bold")
+    _HINT_PAD = 8
 
     def __init__(self, master, on_done, hint_text=None):
         super().__init__(master)
         self.on_done = on_done
-        self._start = None
-        self._rect_id = None
+
+        bounds = geometry.virtual_screen_bounds()
+        if bounds:
+            left, top, width, height = bounds
+        else:
+            left, top = 0, 0
+            width, height = self.winfo_screenwidth(), self.winfo_screenheight()
+        self._overlay_width = width
 
         self.overrideredirect(True)
-        self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
+        self.geometry(f"{width}x{height}+{left}+{top}")
         self.attributes("-alpha", 0.25)
         self.attributes("-topmost", True)
         self.configure(bg="gray")
@@ -27,29 +43,56 @@ class RegionCaptureOverlay(tk.Toplevel):
         self.canvas = tk.Canvas(self, cursor="cross", bg="gray", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         if hint_text:
-            # A persistent on-canvas reminder of what to do, so the one-time
-            # instructional popup (shown at most once per app session -- see
-            # CalibrationMixin) doesn't need repeating before every capture.
-            # A dark backing rectangle keeps light text legible over whatever
-            # is actually behind this semi-transparent overlay.
-            cx = self.winfo_screenwidth() // 2
-            text_id = self.canvas.create_text(
-                cx, 24, text=hint_text, fill="white", font=("Segoe UI", 12, "bold"))
-            bbox = self.canvas.bbox(text_id)
-            if bbox:
-                pad = 8
-                self.canvas.create_rectangle(
-                    bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
-                    fill="black", outline="", stipple="gray50")
-                self.canvas.tag_raise(text_id)
+            self._draw_hint(hint_text)
 
+        self.bind("<Escape>", self._on_cancel)
+        self.grab_set()
+        self.focus_force()
+
+    def _draw_hint(self, hint_text):
+        """A persistent on-canvas reminder of what to do, so the one-time
+        instructional popup (shown at most once per app session -- see
+        CalibrationMixin) doesn't need repeating before every capture. A
+        dark backing rectangle keeps light text legible over whatever is
+        actually behind this semi-transparent overlay. Centered on this
+        overlay's OWN width (the full virtual desktop), not
+        winfo_screenwidth() (always just the primary monitor's), so the
+        hint lands in the middle of whichever monitor setup this is."""
+        cx = self._overlay_width // 2
+        text_id = self.canvas.create_text(cx, 24, text=hint_text, fill="white", font=self._HINT_FONT)
+        bbox = self.canvas.bbox(text_id)
+        if bbox:
+            pad = self._HINT_PAD
+            self.canvas.create_rectangle(
+                bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
+                fill="black", outline="", stipple="gray50")
+            self.canvas.tag_raise(text_id)
+
+    def _on_cancel(self, _event):
+        self._finish(None)
+
+    def _finish(self, value):
+        callback = self.on_done
+        self.destroy()
+        callback(value)
+
+
+class RegionCaptureOverlay(_FullscreenPickerOverlay):
+    """Fullscreen click-drag-release rectangle picker (see
+    _FullscreenPickerOverlay for the shared chrome/limitations).
+
+    Calls on_done(region) where region is (left, top, width, height) in
+    absolute screen pixels, or on_done(None) if cancelled (Escape, or a
+    release without a meaningfully-sized drag).
+    """
+
+    def __init__(self, master, on_done, hint_text=None):
+        super().__init__(master, on_done, hint_text)
+        self._start = None
+        self._rect_id = None
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.bind("<Escape>", self._on_cancel)
-
-        self.grab_set()
-        self.focus_force()
 
     def _on_press(self, event):
         self._start = (event.x_root, event.y_root)
@@ -81,61 +124,18 @@ class RegionCaptureOverlay(tk.Toplevel):
             return
         self._finish((left, top, width, height))
 
-    def _on_cancel(self, _event):
-        self._finish(None)
 
-    def _finish(self, region):
-        callback = self.on_done
-        self.destroy()
-        callback(region)
-
-
-class PointCaptureOverlay(tk.Toplevel):
-    """Fullscreen, borderless, semi-transparent single-click point picker.
+class PointCaptureOverlay(_FullscreenPickerOverlay):
+    """Fullscreen single-click point picker (see _FullscreenPickerOverlay
+    for the shared chrome/limitations).
 
     Calls on_done(point) where point is (x, y) in absolute screen pixels, or
-    on_done(None) if cancelled (Escape). Primary monitor only, same limitation
-    as RegionCaptureOverlay.
+    on_done(None) if cancelled (Escape).
     """
 
     def __init__(self, master, on_done, hint_text=None):
-        super().__init__(master)
-        self.on_done = on_done
-
-        self.overrideredirect(True)
-        self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
-        self.attributes("-alpha", 0.25)
-        self.attributes("-topmost", True)
-        self.configure(bg="gray")
-
-        self.canvas = tk.Canvas(self, cursor="cross", bg="gray", highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-        if hint_text:
-            # Same persistent on-canvas reminder as RegionCaptureOverlay -- see there.
-            cx = self.winfo_screenwidth() // 2
-            text_id = self.canvas.create_text(
-                cx, 24, text=hint_text, fill="white", font=("Segoe UI", 12, "bold"))
-            bbox = self.canvas.bbox(text_id)
-            if bbox:
-                pad = 8
-                self.canvas.create_rectangle(
-                    bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
-                    fill="black", outline="", stipple="gray50")
-                self.canvas.tag_raise(text_id)
-
+        super().__init__(master, on_done, hint_text)
         self.canvas.bind("<ButtonRelease-1>", self._on_click)
-        self.bind("<Escape>", self._on_cancel)
-
-        self.grab_set()
-        self.focus_force()
 
     def _on_click(self, event):
         self._finish((event.x_root, event.y_root))
-
-    def _on_cancel(self, _event):
-        self._finish(None)
-
-    def _finish(self, point):
-        callback = self.on_done
-        self.destroy()
-        callback(point)

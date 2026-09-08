@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field, asdict, fields
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, TypeVar, Union
 
 import keyboard
 
@@ -14,18 +14,24 @@ VALID_SEARCH_MODES = ("exact", "area")
 MAX_REPEAT_COUNT = 50
 
 
-def _int_or(data: dict, key: str, default: int) -> int:
+_T = TypeVar("_T")
+
+
+def _int_or(data: dict, key: str, default: _T) -> Union[int, _T]:
     """int(data.get(key, default)), but also falls back to `default` when the
     key is present with an explicit JSON null -- dict.get's own default only
     kicks in when the key is absent entirely, so a hand-edited/stale rotation
     file with e.g. "delay_ms": null would otherwise raise int(None) -> TypeError,
     a type storage.py's loaders don't catch, crashing the whole app on launch
-    instead of just skipping that one bad file."""
+    instead of just skipping that one bad file. `default` may itself be None
+    (e.g. Condition.hold_ms/delay_ms, where "not set" is a meaningful value) --
+    generic over `default`'s type so callers passing a concrete int default
+    still get a plain `int` back, not `int | None`."""
     value = data.get(key)
     return default if value is None else int(value)
 
 
-def _float_or(data: dict, key: str, default: float) -> float:
+def _float_or(data: dict, key: str, default: _T) -> Union[float, _T]:
     """Same null-safety as _int_or, for float fields (e.g. confidence)."""
     value = data.get(key)
     return default if value is None else float(value)
@@ -111,8 +117,8 @@ class Condition:
             timer_seconds=_float_or(data, "timer_seconds", None),
             negate=bool(data.get("negate", False)),
             timeout_ms=_int_or(data, "timeout_ms", 0),
-            hold_ms=int(data["hold_ms"]) if data.get("hold_ms") is not None else None,
-            delay_ms=int(data["delay_ms"]) if data.get("delay_ms") is not None else None,
+            hold_ms=_int_or(data, "hold_ms", None),
+            delay_ms=_int_or(data, "delay_ms", None),
         )
 
 
@@ -243,6 +249,10 @@ def replace_step_fields(target: Step, source: Step) -> None:
 class Rotation:
     name: str
     mode: str = "once"
+    enabled: bool = True   # False = this rotation's hotkeys (trigger/cancel/reset/pause) are never
+                            # bound, freeing them up for another rotation to use, the same as being
+                            # outside the Active Folder's scope -- but toggled per-rotation regardless
+                            # of folder. Doesn't affect the saved rotation itself in any other way.
     hotkey: Optional[str] = None
     alt_hotkey: Optional[str] = None       # the OTHER device's hotkey -- swapped with `hotkey` by the Active
                                             # Device toggle; never edited directly through its own UI
@@ -264,6 +274,7 @@ class Rotation:
         return {
             "name": self.name,
             "mode": self.mode,
+            "enabled": self.enabled,
             "hotkey": self.hotkey,
             "alt_hotkey": self.alt_hotkey,
             "cancel_key": self.cancel_key,
@@ -283,6 +294,7 @@ class Rotation:
         return Rotation(
             name=data["name"],
             mode=data.get("mode", "once"),
+            enabled=bool(data.get("enabled", True)),
             hotkey=data.get("hotkey"),
             alt_hotkey=data.get("alt_hotkey"),
             cancel_key=data.get("cancel_key"),
@@ -433,10 +445,11 @@ def _step_problems(label: str, step: Step) -> List[str]:
     # same None/""/string semantics, swapped in by the Active Device toggle.
     for key, key_label in ((step.key, label), (step.alt_key, f"{label} (alt key)")):
         if key and key.strip():
-            if controller.is_controller_key(key):
+            key_kind = hotkeys.classify(key)
+            if key_kind == "controller":
                 if controller.controller_button_of(key) not in controller.VALID_BUTTON_NAMES:
                     problems.append(f"{key_label}: '{key}' is not a recognized controller button.")
-            elif hotkeys.is_mouse_hotkey(key):
+            elif key_kind == "mouse":
                 if hotkeys.mouse_button_of(key) not in hotkeys.MOUSE_DISPLAY_NAMES:
                     problems.append(f"{key_label}: '{key}' is not a recognized mouse button.")
             else:

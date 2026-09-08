@@ -26,6 +26,16 @@ _cached_pid = None
 _warned_no_process = False
 
 
+def reset_process_cache():
+    """Forces the next is_game_focused() call to re-search for the
+    configured game process by name, instead of trusting a cached pid --
+    call this after changing config.GAME_PROCESS_NAME at runtime (e.g. from
+    Settings), since the cache otherwise only invalidates once the
+    previously-found pid stops existing."""
+    global _cached_pid
+    _cached_pid = None
+
+
 def _game_pid():
     global _cached_pid
     if _cached_pid is None or not psutil.pid_exists(_cached_pid):

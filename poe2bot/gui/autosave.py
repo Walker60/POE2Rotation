@@ -1,6 +1,7 @@
 import copy
 import os
 from contextlib import contextmanager
+from typing import Optional
 
 from poe2bot import storage
 from poe2bot.hotkeys import display_name
@@ -37,7 +38,7 @@ class AutosaveMixin:
                 self._autosave()
         var.trace_add("write", on_write)
 
-    def _autosave(self):
+    def _autosave(self) -> bool:
         """The single entry point every tracked field's trace calls, and
         every structural mutation (Add/Remove/Move/drag/paste/recalibrate)
         calls directly. Always attempts all three "apply the form onto
@@ -48,11 +49,14 @@ class AutosaveMixin:
         edit) leaves editing_steps holding the last *valid* state of that
         object -- exactly what still gets persisted below, so the invalid
         text stays visible in its own widget with an inline error, but
-        nothing invalid ever reaches disk."""
+        nothing invalid ever reaches disk. Returns whether the save
+        actually succeeded -- most callers (a var trace) ignore it, but a
+        few (e.g. App._on_test_run_clicked) need to know before acting on
+        the just-saved rotation."""
         self._apply_pending_step_edits()
         self._apply_pending_condition_edits()
         self._apply_pending_group_edits()
-        self._persist_rotation_to_disk()
+        return self._persist_rotation_to_disk()
 
     def _persist_rotation_to_disk(self) -> bool:
         """Validates the rotation currently on screen and writes it to disk
@@ -68,20 +72,62 @@ class AutosaveMixin:
         moment a hotkey is actually bound, not re-asked here on every
         unrelated field change."""
         name = self.name_var.get().strip()
+        # Looked up early (not just later for the rename/move check) so the
+        # alt_* fields the form has no editing UI for -- only ever touched by
+        # the Active Device toggle -- get preserved by _build_rotation_from_form
+        # rather than silently reset to None.
+        old_rotation = self.rotations.get(self.editing_original_name) if self.editing_original_name else None
+        rotation = self._build_rotation_from_form(name, old_rotation)
+        if rotation is None:
+            return False
+
+        problems = self._rotation_save_problems(rotation)
+        if problems:
+            self._show_rotation_form_error(" ".join(problems))
+            return False
+
+        hotkeys_should_be_live = self._rotation_hotkeys_should_be_live(rotation)
+        # Rebind hotkey first (release whatever this rotation held before, bind the new
+        # choice) -- before any destructive rename/move step, so a conflict here (shouldn't
+        # happen -- sharing was already confirmed at bind time, see
+        # HotkeysMixin._confirm_hotkey_share_if_needed -- but kept as a defensive guard)
+        # can't leave the old file deleted with nothing saved in its place. Skipped
+        # entirely when this rotation isn't currently supposed to have live hotkeys
+        # (out of the Active Folder's scope, or disabled) -- it has nothing live to
+        # conflict with.
+        if hotkeys_should_be_live and not self._rebind_hotkey_for_save(rotation):
+            return False
+        self._clear_rotation_form_error()
+
+        self._write_rotation_to_disk(rotation, old_rotation)
+        self._sync_rotation_hotkeys(rotation, hotkeys_should_be_live)
+
+        # No _load_rotation_into_form(rotation) here -- rotation was just built FROM
+        # the live form/editing_steps, so there's nothing to reload; doing so would
+        # also wipe the current tree selection and any mid-edit state on every single
+        # keystroke (this runs that often now). Just keep the bookkeeping current.
+        self.editing_original_name = rotation.name
+        self._update_title()
+        self._refresh_rotation_tree()
+        return True
+
+    def _build_rotation_from_form(self, name: str, old_rotation: Optional[Rotation]) -> Optional[Rotation]:
+        """Builds a Rotation from the form's current contents, or None
+        (having already shown the inline error) if the numeric fields
+        aren't valid whole numbers. `old_rotation`'s alt_* fields are
+        preserved -- they have no editing UI of their own, only ever
+        touched by the Active Device toggle, and would otherwise be
+        silently reset to None by this fresh Rotation(...) call."""
         try:
             pause_duration_ms = int(self.pause_duration_var.get())
             reset_delay_ms = int(self.reset_delay_var.get())
         except ValueError:
             self._show_rotation_form_error("Pause duration and reset delay must be whole numbers.")
-            return False
-        # Looked up early (not just later for the rename/move check) so the
-        # alt_* fields below -- which have no editing UI of their own, only
-        # ever touched by the Active Device toggle -- get preserved rather
-        # than silently reset to None by this fresh Rotation(...) call.
-        old_rotation = self.rotations.get(self.editing_original_name) if self.editing_original_name else None
-        rotation = Rotation(
+            return None
+        return Rotation(
             name=name,
             mode=self.mode_var.get(),
+            enabled=self.rotation_enabled_var.get(),
             hotkey=self.pending_hotkey,
             alt_hotkey=old_rotation.alt_hotkey if old_rotation else None,
             cancel_key=self.pending_cancel_key,
@@ -96,16 +142,22 @@ class AutosaveMixin:
             folder=self.folder_var.get().strip(),
             steps=copy.deepcopy(self.editing_steps),
         )
+
+    def _rotation_save_problems(self, rotation: Rotation) -> list:
+        """Every reason `rotation` can't be saved as-is: validate_rotation()'s
+        own field-level problems, a name collision with another in-memory
+        rotation, a filename collision after sanitizing, and either hotkey
+        being the reserved panic key."""
         problems = validate_rotation(rotation)
-        if name != self.editing_original_name and name in self.rotations:
-            problems.append(f"A rotation named '{name}' already exists.")
+        if rotation.name != self.editing_original_name and rotation.name in self.rotations:
+            problems.append(f"A rotation named '{rotation.name}' already exists.")
         else:
             # Two different display names can still sanitize to the same filename
             # (storage._slugify folds case/punctuation, e.g. "Fire Ball" and
             # "Fire-Ball" both become fire_ball.json) -- saving would silently
             # overwrite whichever rotation got there first, with no warning, so
             # this is checked by comparing actual on-disk paths, not just names.
-            new_path = os.path.normcase(os.path.normpath(storage.path_for(name, rotation.folder)))
+            new_path = os.path.normcase(os.path.normpath(storage.path_for(rotation.name, rotation.folder)))
             for other_name, other_rotation in self.rotations.items():
                 if other_name == self.editing_original_name:
                     continue
@@ -113,45 +165,43 @@ class AutosaveMixin:
                     storage.path_for(other_name, other_rotation.folder)))
                 if other_path == new_path:
                     problems.append(
-                        f"'{name}' would save to the same file as existing rotation '{other_name}' "
+                        f"'{rotation.name}' would save to the same file as existing rotation '{other_name}' "
                         f"(both simplify to the same filename) -- choose a more distinct name.")
                     break
         if rotation.hotkey and rotation.hotkey == self.hotkey_manager.panic_key:
             problems.append(f"'{display_name(rotation.hotkey)}' is reserved as the panic/stop-all key.")
         if rotation.alt_hotkey and rotation.alt_hotkey == self.hotkey_manager.panic_key:
             problems.append(f"'{display_name(rotation.alt_hotkey)}' (alt) is reserved as the panic/stop-all key.")
-        if problems:
-            self._show_rotation_form_error(" ".join(problems))
+        return problems
+
+    def _rebind_hotkey_for_save(self, rotation: Rotation) -> bool:
+        """Applies rotation.hotkey to the live HotkeyManager. True on
+        success; False (having already shown the inline error) if the
+        hotkey turned out to be the reserved panic key -- shouldn't happen,
+        since sharing was already confirmed at bind time (see
+        HotkeysMixin._confirm_hotkey_share_if_needed), but kept as a
+        defensive guard."""
+        try:
+            self.hotkey_manager.rebind(rotation.hotkey, rotation.name)
+            return True
+        except ValueError as e:
+            self._show_rotation_form_error(str(e))
             return False
 
-        new_in_scope = self._folder_in_scope(rotation.folder)
-
-        # Rebind hotkey first (release whatever this rotation held before, bind the new
-        # choice) -- before any destructive rename/move step, so a conflict here (shouldn't
-        # happen -- sharing was already confirmed at bind time, see
-        # HotkeysMixin._confirm_hotkey_share_if_needed -- but kept as a defensive guard)
-        # can't leave the old file deleted with nothing saved in its place. Skipped
-        # entirely when this rotation isn't in the Active Folder's scope -- it has
-        # nothing live to conflict with.
-        if new_in_scope:
-            try:
-                self.hotkey_manager.rebind(rotation.hotkey, rotation.name)
-            except ValueError as e:
-                self._show_rotation_form_error(str(e))
-                return False
-
-        self._clear_rotation_form_error()
-
-        # A rotation's file path depends on both its name and its folder, so either
-        # changing means the old file needs to go, not just a plain rename.
+    def _write_rotation_to_disk(self, rotation: Rotation, old_rotation: Optional[Rotation]):
+        """Saves `rotation` to disk, handling the rename/move case -- a
+        rotation's file path depends on both its name and its folder, so
+        either changing means the old file needs to go, not just a plain
+        rename -- and keeps self.rotations/self.rotation_manager in sync
+        either way."""
         renamed = old_rotation is not None and old_rotation.name != rotation.name
         moved = old_rotation is not None and (renamed or old_rotation.folder != rotation.folder)
         if renamed:
             # Only a genuine rename needs the OLD name's live bindings released -- a
             # folder-only move keeps the same name, and the (possibly skipped) rebind
-            # above already replaced whatever was live under it; clearing here too in
-            # that case would immediately undo it, since old_rotation.name ==
-            # rotation.name then.
+            # in _rebind_hotkey_for_save already replaced whatever was live under it;
+            # clearing here too in that case would immediately undo it, since
+            # old_rotation.name == rotation.name then.
             self._clear_rotation_hotkeys(old_rotation.name)
         if moved:
             # move_rotation writes the new file before removing the old one, so a
@@ -162,26 +212,21 @@ class AutosaveMixin:
             del self.rotations[old_rotation.name]
         else:
             storage.save_rotation(rotation)
-
         self.rotation_manager.load(rotation)
         self.rotations[rotation.name] = rotation
-        if new_in_scope:
+
+    def _sync_rotation_hotkeys(self, rotation: Rotation, hotkeys_should_be_live: bool):
+        """Applies rotation's cancel/reset/pause keys live if it's currently
+        supposed to have them (in the Active Folder's scope AND enabled), or
+        releases them if it just stopped being so (covers the case where it
+        had live bindings from before this edit -- e.g. it used to be
+        in-scope, or was just disabled)."""
+        if hotkeys_should_be_live:
             self.hotkey_manager.set_cancel_key(rotation.name, rotation.cancel_key)
             self.hotkey_manager.set_reset_key(rotation.name, rotation.reset_key)
             self.hotkey_manager.set_pause_key(rotation.name, rotation.pause_key)
         else:
-            # Covers the case where this rotation had live bindings from before this
-            # edit (e.g. it used to be in-scope) and is only now moving out of scope.
             self._clear_rotation_hotkeys(rotation.name)
-
-        # No _load_rotation_into_form(rotation) here -- rotation was just built FROM
-        # the live form/editing_steps, so there's nothing to reload; doing so would
-        # also wipe the current tree selection and any mid-edit state on every single
-        # keystroke (this runs that often now). Just keep the bookkeeping current.
-        self.editing_original_name = rotation.name
-        self._update_title()
-        self._refresh_rotation_tree()
-        return True
 
     def _show_rotation_form_error(self, message: str):
         self.rotation_form_error_var.set(message)

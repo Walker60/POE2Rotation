@@ -1,3 +1,4 @@
+import os
 import queue
 import time
 import tkinter as tk
@@ -5,15 +6,18 @@ from tkinter import ttk
 
 import keyboard
 
-from poe2bot import app_state, controller, storage
+from poe2bot import app_state, config, controller, storage
+from poe2bot.controller_input import peek_controller_reader
 from poe2bot.executor import RotationManager, STATUS_RUNNING
-from poe2bot.hotkeys import HotkeyManager
+from poe2bot.focus import reset_process_cache
+from poe2bot.hotkeys import HotkeyManager, display_name
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Rotation, replace_step_fields, folder_in_scope, iter_steps
 
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
 from poe2bot.gui.activity_window import ActivityWindow
+from poe2bot.gui.hotkey_map_window import HotkeyMapWindow
 from poe2bot.gui.settings_window import SettingsWindow
 from poe2bot.gui.rotation_list import RotationListMixin
 from poe2bot.gui.step_editor import StepEditorMixin
@@ -40,13 +44,34 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         theme.apply_theme(self._theme, root=self)
         self._sync_root_background()
 
+        # Any of these four saved (non-None) overrides config.py's own env-var-or-
+        # builtin default -- applied to the shared config module itself (not just
+        # kept as an App attribute) so every other module that reads config.XXX
+        # fresh (focus.py, executor.py, controller_input.py) picks it up too,
+        # without needing its own copy of this same load-time fallback logic.
+        self.game_process_name = state["game_process_name"] or config.GAME_PROCESS_NAME
+        self.panic_key = state["panic_key"] or config.PANIC_KEY
+        self.controller_min_tap_ms = (
+            config.CONTROLLER_MIN_TAP_MS if state["controller_min_tap_ms"] is None
+            else state["controller_min_tap_ms"])
+        self.controller_index = (
+            config.CONTROLLER_INDEX if state["controller_index"] is None else state["controller_index"])
+        config.GAME_PROCESS_NAME = self.game_process_name
+        config.PANIC_KEY = self.panic_key
+        config.CONTROLLER_MIN_TAP_MS = self.controller_min_tap_ms
+        config.CONTROLLER_INDEX = self.controller_index
+
         self.status_queue = queue.Queue()
         self.activity_queue = queue.Queue()
         self.activity_window = None  # ActivityWindow, created lazily on first STATUS_RUNNING
         self.settings_window = None  # SettingsWindow, created lazily on first "Settings..." click
+        self.hotkey_map_window = None  # HotkeyMapWindow, created lazily on first "Show Hotkey Map..." click
         self.rotation_manager = RotationManager(
             on_status_change=self._queue_status, on_activity=self._queue_activity)
-        self.hotkey_manager = HotkeyManager(self.rotation_manager)
+        # panic_key passed explicitly (not left to HotkeyManager's own default arg)
+        # since that default was captured at hotkeys.py's import time -- before
+        # the override above ever had a chance to apply.
+        self.hotkey_manager = HotkeyManager(self.rotation_manager, panic_key=self.panic_key)
         self.bot_enabled = True
 
         self.active_folder = state["active_folder"]  # None = "(All Folders)" -- no scoping restriction
@@ -107,17 +132,37 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
 
     # ---- startup -----------------------------------------------------
 
+    def _persist_app_state(self):
+        """Writes every currently-in-effect app-wide preference to
+        app_state.json in one call -- the single place that lists all of
+        them, so adding a new one only means updating this method and
+        app_state.py, not hunting down every save_state(...) call site."""
+        app_state.save_state(
+            self.active_folder, self.active_device, self._theme,
+            self.game_process_name, self.panic_key,
+            self.controller_min_tap_ms, self.controller_index)
+
     def _load_rotations_from_disk(self):
         for name, rotation in storage.load_all_rotations().items():
             self.rotations[name] = rotation
             self.rotation_manager.load(rotation)
-            if self._folder_in_scope(rotation.folder):
+            if self._rotation_hotkeys_should_be_live(rotation):
                 self._bind_rotation_hotkeys(rotation)
 
     # ---- Active Folder / Active Device scoping --------------------------------
 
     def _folder_in_scope(self, folder: str) -> bool:
         return folder_in_scope(folder, self.active_folder)
+
+    def _rotation_hotkeys_should_be_live(self, rotation: Rotation) -> bool:
+        """True if `rotation`'s hotkeys should currently be bound: its folder
+        is in the Active Folder's scope AND it hasn't been disabled via its
+        own Enabled checkbox. Everywhere hotkey binding used to be gated on
+        _folder_in_scope(rotation.folder) alone now also checks
+        rotation.enabled, so disabling a rotation frees its keys up for
+        another rotation to use exactly the way an out-of-scope one already
+        does."""
+        return self._folder_in_scope(rotation.folder) and rotation.enabled
 
     def _known_folder_prefixes(self) -> list:
         """Every folder path AND all of its ancestor prefixes, across every
@@ -163,17 +208,20 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.hotkey_manager.set_reset_key(name, None)
         self.hotkey_manager.set_pause_key(name, None)
 
-    def _reconcile_hotkey_scope(self, rotation: Rotation, was_in_scope: bool):
-        """Call after rotation.folder changes, or after self.active_folder
-        changes, to bring HotkeyManager's live registrations in line with
-        the new scope. Newly out-of-scope rotations get stopped (if
-        running) and unbound; newly in-scope rotations get (re-)bound from
-        their own already-saved fields -- no retyping needed either way."""
-        now_in_scope = self._folder_in_scope(rotation.folder)
-        if was_in_scope and not now_in_scope:
+    def _reconcile_hotkey_scope(self, rotation: Rotation, was_active: bool):
+        """Call after rotation.folder or rotation.enabled changes, or after
+        self.active_folder changes, to bring HotkeyManager's live
+        registrations in line with whichever of those currently determines
+        whether `rotation`'s hotkeys should be live (see
+        _rotation_hotkeys_should_be_live). Newly-inactive rotations get
+        stopped (if running) and unbound; newly-active rotations get
+        (re-)bound from their own already-saved fields -- no retyping
+        needed either way."""
+        now_active = self._rotation_hotkeys_should_be_live(rotation)
+        if was_active and not now_active:
             self.rotation_manager.cancel(rotation.name)
             self._clear_rotation_hotkeys(rotation.name)
-        elif now_in_scope and not was_in_scope:
+        elif now_active and not was_active:
             self._bind_rotation_hotkeys(rotation)
 
     def _on_active_folder_changed(self, _event=None):
@@ -184,8 +232,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         old_active = self.active_folder
         self.active_folder = new_active
         for rotation in self.rotations.values():
-            self._reconcile_hotkey_scope(rotation, folder_in_scope(rotation.folder, old_active))
-        app_state.save_state(self.active_folder, self.active_device, self._theme)
+            self._reconcile_hotkey_scope(
+                rotation, folder_in_scope(rotation.folder, old_active) and rotation.enabled)
+        self._persist_app_state()
         self._refresh_rotation_tree()
 
     def _on_active_device_changed(self):
@@ -204,18 +253,88 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             rotation.pause_key, rotation.alt_pause_key = rotation.alt_pause_key, rotation.pause_key
             for step in iter_steps(rotation.steps):
                 step.key, step.alt_key = step.alt_key, step.key
-            storage.save_rotation(rotation)
-            if self._folder_in_scope(rotation.folder):
+            try:
+                storage.save_rotation(rotation)
+            except OSError as e:
+                # A partial swap here can't be rolled back cleanly -- some rotations'
+                # files may already be written with the new device's keys -- so this
+                # surfaces the failure immediately and stops touching further
+                # rotations, rather than silently continuing to swap ones that won't
+                # get saved either.
+                messagebox.showerror(
+                    "Active Device switch failed",
+                    f"Could not save '{rotation.name}' after swapping its keys: {e}\n\n"
+                    "Some rotations may now have their Keyboard/Controller keys swapped "
+                    "in memory but not saved to disk -- check the affected rotation(s) "
+                    "before continuing.")
+                break
+            if self._rotation_hotkeys_should_be_live(rotation):
                 self._clear_rotation_hotkeys(rotation.name)
                 self._bind_rotation_hotkeys(rotation)
         if self.editing_original_name in self.rotations:
             self._load_rotation_into_form(self.rotations[self.editing_original_name])
-        app_state.save_state(self.active_folder, self.active_device, self._theme)
+        self._persist_app_state()
         self._refresh_rotation_tree()
+
+    def _on_advanced_settings_changed(self, game_process_name: str, panic_key: str,
+                                       controller_min_tap_ms: int, controller_index: int):
+        """Applies and persists a new Target Process Name/Panic Key/
+        Controller Min Tap/Controller Index -- called from SettingsWindow
+        only after it's already validated all four parse correctly. Every
+        one of these takes effect immediately, live, without restarting the
+        app; see poe2bot/config.py for what each one actually controls."""
+        if panic_key != self.panic_key:
+            conflicts = self.hotkey_manager.bound_to(panic_key)
+            if conflicts:
+                messagebox.showwarning(
+                    "Panic key already in use",
+                    f"'{display_name(panic_key)}' is currently bound as the trigger hotkey for "
+                    f"{', '.join(conflicts)}. It'll still become the new panic key, but pressing "
+                    "it will now only stop every rotation instead of also triggering "
+                    f"{'that one' if len(conflicts) == 1 else 'those'} -- rebind "
+                    f"{'it' if len(conflicts) == 1 else 'them'} to a different key.")
+            self.hotkey_manager.set_panic_key(panic_key)
+            self.panic_key = panic_key
+            config.PANIC_KEY = panic_key
+
+        if game_process_name != self.game_process_name:
+            self.game_process_name = game_process_name
+            config.GAME_PROCESS_NAME = game_process_name
+            reset_process_cache()
+
+        if controller_min_tap_ms != self.controller_min_tap_ms:
+            self.controller_min_tap_ms = controller_min_tap_ms
+            config.CONTROLLER_MIN_TAP_MS = controller_min_tap_ms
+
+        if controller_index != self.controller_index:
+            self.controller_index = controller_index
+            config.CONTROLLER_INDEX = controller_index
+            existing_reader = peek_controller_reader()
+            if existing_reader is not None:
+                existing_reader.set_index(controller_index)
+
+        self._persist_app_state()
 
     # ---- widget layout -------------------------------------------------
 
     def _build_widgets(self):
+        # Each _build_*_section below packs into the window/scroll_body left to
+        # right / top to bottom as it's called -- split out of one originally
+        # ~420-line method purely for readability, not because any section is
+        # reusable on its own; see each one's own docstring for what it owns.
+        self._build_bottom_bar()
+        self._build_rotation_list_panel()
+        right = self._build_rotation_form_header()
+        scroll_body = self._build_editor_scroll_area(right)
+        self._build_hotkeys_section(scroll_body)
+        self._build_steps_tree(scroll_body)
+        self._build_step_fields_section(scroll_body)
+        self._build_conditions_section(scroll_body)
+        self._build_rotation_conditions_section(scroll_body)
+
+    def _build_bottom_bar(self):
+        """The Stop/Start Bot button, its status label, and the Settings...
+        button -- the full-width strip along the bottom of the window."""
         # Packed first (before left/right below) and side="bottom", so it claims a
         # full-width strip at the bottom of the window while the cavity still has
         # its full width -- packing it last (as originally written) let the
@@ -235,6 +354,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.active_device_var = tk.StringVar(value=self.active_device)
         ttk.Button(bottom, text="Settings...", command=self._on_show_settings_clicked).pack(side="right")
 
+    def _build_rotation_list_panel(self):
+        """The left-hand column: Active Folder scope combo, the name filter,
+        the rotation/folder tree itself, and the New/Copy/Delete buttons."""
         left = ttk.Frame(self, padding=8)
         left.pack(side="left", fill="y")
 
@@ -267,6 +389,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         for status, color in STATUS_COLORS.items():
             if color:
                 self.rotation_tree.tag_configure(status, foreground=color)
+        self.rotation_tree.tag_configure("rotation_disabled", foreground="gray")
         self._folder_nodes = {}   # folder path -> tree item id, rebuilt each _refresh_rotation_tree()
 
         btns = ttk.Frame(left)
@@ -278,6 +401,17 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Button(btns, text="Delete", style=theme.DANGER_BUTTON_STYLE,
                    command=self._delete_rotation).pack(side="left", expand=True, fill="x")
 
+        import_export_btns = ttk.Frame(left)
+        import_export_btns.pack(fill="x")
+        ttk.Button(import_export_btns, text="Export...", command=self._on_export_rotation_clicked).pack(
+            side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(import_export_btns, text="Import...", command=self._on_import_rotation_clicked).pack(
+            side="left", expand=True, fill="x")
+
+    def _build_rotation_form_header(self) -> ttk.Frame:
+        """The right-hand panel's always-visible header: Name/Folder/Mode
+        fields and the rotation-level inline error label. Returns `right`,
+        the panel every later _build_*_section call packs into."""
         right = ttk.Frame(self, padding=8)
         right.pack(side="left", fill="both", expand=True)
 
@@ -304,13 +438,28 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Radiobutton(mode_row, text="Once", variable=self.mode_var, value="once").pack(side="left", padx=(0, 12))
         ttk.Radiobutton(mode_row, text="Loop", variable=self.mode_var, value="loop").pack(side="left")
         self._autosave_on_change(self.mode_var)
+        self.rotation_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            mode_row, text="Enabled", variable=self.rotation_enabled_var).pack(side="left", padx=(20, 0))
+        self._autosave_on_change(self.rotation_enabled_var)
+        ttk.Button(mode_row, text="Test Run", command=self._on_test_run_clicked).pack(side="right")
 
         self.rotation_form_error_var = tk.StringVar(value="")
         self.rotation_form_error_label = ttk.Label(
             right, textvariable=self.rotation_form_error_var, foreground=theme.DANGER_COLOR)
         # Not packed here -- only shown while there's an actual problem preventing
         # a save, see AutosaveMixin._show_rotation_form_error/_clear_rotation_form_error.
+        return right
 
+    def _build_editor_scroll_area(self, right: ttk.Frame) -> ttk.Frame:
+        """The scrollable body every section below (hotkeys, the steps list,
+        step fields, conditions) packs into -- together they can add up to
+        more vertical space than the window has, and a Canvas + Scrollbar is
+        the standard Tk way to make an arbitrary stack of widgets scrollable
+        (ttk has no native scrollable frame). Name/Folder/Mode stay outside
+        this canvas (built by _build_rotation_form_header) so they're always
+        visible. Returns scroll_body, the frame every later section packs
+        into."""
         # Everything below (hotkeys, the steps list, step actions/fields, and
         # conditions) can add up to more vertical space than the window has --
         # a Canvas + Scrollbar is the standard Tk way to make an arbitrary
@@ -349,7 +498,11 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # over the rotation list or the steps tree's own scrollbar isn't hijacked.
         editor_canvas.bind("<Enter>", lambda _e: editor_canvas.bind_all("<MouseWheel>", _on_editor_mousewheel))
         editor_canvas.bind("<Leave>", lambda _e: editor_canvas.unbind_all("<MouseWheel>"))
+        return scroll_body
 
+    def _build_hotkeys_section(self, scroll_body: ttk.Frame):
+        """The collapsible "Hotkeys" section: the trigger/cancel/reset/pause
+        bind grid, reset delay, and pause behavior fields."""
         # ---- key bindings: one compact grid instead of 4 near-duplicate rows ----
         self.hotkey_label_var = tk.StringVar(value="(unbound)")
         self.cancel_key_label_var = tk.StringVar(value="(unbound)")
@@ -405,6 +558,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Label(pause_mode_row, text="freezes this rotation in place, resuming the same step",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
+    def _build_steps_tree(self, scroll_body: ttk.Frame):
+        """The Skill Steps tree itself (steps/groups/conditions rows), its
+        column headers, scrollbar, and drag/selection/copy-paste bindings."""
         tree_frame = ttk.Frame(scroll_body)
         tree_frame.pack(fill="both", expand=True, pady=(8, 4))
         self.tree = ttk.Treeview(
@@ -443,6 +599,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
 
         ttk.Separator(scroll_body, orient="horizontal").pack(fill="x", pady=(0, 8))
 
+    def _build_step_fields_section(self, scroll_body: ttk.Frame):
+        """The collapsible "Skill Steps" section: Add/Copy/Paste/Remove/
+        Move/Disable buttons, and the Selected Step form's Name/Key/timing/
+        repeat fields."""
         self.skill_steps_section = CollapsibleSection(scroll_body, title="Skill Steps", padding=6)
         self.skill_steps_section.pack(fill="x", pady=(0, 6))
         step_btns = ttk.Frame(self.skill_steps_section.body)
@@ -522,6 +682,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             step_fields_group, textvariable=self.step_form_error_var, foreground=theme.DANGER_COLOR)
         # Not packed here -- only shown while there's an actual error, see _read_step_form.
 
+    def _build_conditions_section(self, scroll_body: ttk.Frame):
+        """The collapsible "Skill Conditions" section: Add Image/Pixel/
+        Timer Condition buttons, Copy/Paste Conditions, and the selected
+        condition's Name/Action/Negate/timeout/hold-override fields."""
         self.conditions_section = CollapsibleSection(
             scroll_body, title="Skill Conditions", padding=6, start_collapsed=True,
             on_toggle=lambda collapsed: self._on_section_toggled("conditions", collapsed))
@@ -538,6 +702,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                    command=self._on_copy_conditions_clicked).pack(side="left", padx=(8, 4))
         ttk.Button(condition_btns, text="Paste Conditions",
                    command=self._on_paste_conditions_clicked).pack(side="left", padx=(0, 4))
+        ttk.Button(condition_btns, text="Test Match",
+                   command=self._on_test_match_clicked).pack(side="left", padx=(8, 4))
         ttk.Label(condition_btns,
                   text="(with a condition selected, Add Image/Pixel/Timer Condition recalibrates it"
                        " instead of adding a new one -- same as double-clicking it;"
@@ -590,14 +756,19 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # Not packed here -- only shown while _apply_pending_condition_edits (see
         # poe2bot/gui/conditions.py) finds Wait timeout/Hold/Delay override invalid.
 
-        # Unlike step_fields_group/conditions_section (hidden whenever a
-        # condition group's own row is selected, since a group has no Key/
-        # Delay/Hold/Repeat/per-step Conditions of its own -- see
-        # ConditionGroupsMixin._set_step_panels_visible), this section is
-        # always visible: its Add Condition Group buttons don't depend on
-        # any particular selection, only the Name/Action/Negate fields below
-        # them do (blanked via _populate_group_condition_form(None) when
-        # nothing/a step is selected).
+    def _build_rotation_conditions_section(self, scroll_body: ttk.Frame):
+        """The collapsible "Rotation Conditions" section: Add Condition
+        Group buttons, and the selected group's Name/Action/Negate fields
+        and match summary.
+
+        Unlike step_fields_group/conditions_section (hidden whenever a
+        condition group's own row is selected, since a group has no Key/
+        Delay/Hold/Repeat/per-step Conditions of its own -- see
+        ConditionGroupsMixin._set_step_panels_visible), this section is
+        always visible: its Add Condition Group buttons don't depend on
+        any particular selection, only the Name/Action/Negate fields below
+        them do (blanked via _populate_group_condition_form(None) when
+        nothing/a step is selected)."""
         self.rotation_conditions_section = CollapsibleSection(
             scroll_body, title="Rotation Conditions", padding=6, start_collapsed=True)
         self.rotation_conditions_section.pack(fill="x", pady=(0, 6))
@@ -607,6 +778,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                    command=self._on_add_image_condition_group_clicked).pack(side="left", padx=(0, 4))
         ttk.Button(group_action_btns, text="Add Condition Group (Pixel)...",
                    command=self._on_add_pixel_condition_group_clicked).pack(side="left", padx=(0, 4))
+        ttk.Button(group_action_btns, text="Test Match",
+                   command=self._on_test_match_group_clicked).pack(side="left", padx=(8, 4))
         ttk.Label(group_action_btns,
                   text="(gates a whole block of steps at once -- select it, then Add Step/Add Sleep in"
                        " Skill Steps, or drag an existing step onto it, to nest steps under it; with a"
@@ -655,7 +828,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         theme.apply_theme(self._theme, root=self)
         self._sync_root_background()
         self.tree.tag_configure("drop_target", background=self._drop_target_color())
-        app_state.save_state(self.active_folder, self.active_device, self._theme)
+        self._persist_app_state()
         if self.settings_window is not None and self.settings_window.winfo_exists():
             self.settings_window.refresh_theme_label()
         if self.activity_window is not None and self.activity_window.winfo_exists():
@@ -726,6 +899,23 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             self.toggle_btn.config(text="Stop Bot", style="TButton")
             self.status_var.set("Bot running. Hotkeys are live.")
 
+    def _on_test_run_clicked(self):
+        """Fires the currently-open rotation directly through the same
+        RotationManager.trigger() every real hotkey press goes through --
+        without needing a hotkey bound first, and regardless of Active
+        Folder scope or this rotation's own Enabled checkbox (a deliberate
+        bypass -- this is a test, not a real trigger). Autosaves first so
+        what's on screen right now is what actually runs; if that fails
+        (e.g. a currently-invalid field), the usual inline
+        rotation_form_error_label is already showing why, so this just
+        stops rather than firing something stale or nonexistent."""
+        if not self._autosave():
+            return
+        self._ensure_activity_window()
+        self.activity_window.deiconify()
+        self.activity_window.lift()
+        self.rotation_manager.trigger(self.editing_original_name)
+
     # ---- status queue / thread bridge ----------------------------------------
 
     def _queue_status(self, name: str, status: str):
@@ -765,28 +955,50 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.activity_window.lift()
         self.activity_window.focus_force()
 
+    def _ensure_hotkey_map_window(self):
+        if self.hotkey_map_window is None or not self.hotkey_map_window.winfo_exists():
+            self.hotkey_map_window = HotkeyMapWindow(self)
+        else:
+            self.hotkey_map_window.refresh()
+
+    def _on_show_hotkey_map_clicked(self):
+        # Recreated if closed, or refreshed-and-raised if merely hidden behind
+        # another window -- refreshed either way, since it's a snapshot (see
+        # HotkeyMapWindow), not a live view like the Activity window.
+        self._ensure_hotkey_map_window()
+        self.hotkey_map_window.deiconify()
+        self.hotkey_map_window.lift()
+        self.hotkey_map_window.focus_force()
+
+    def _on_view_logs_clicked(self):
+        try:
+            os.startfile(config.LOGS_DIR)
+        except OSError as e:
+            messagebox.showerror("Could not open logs folder", str(e))
+
+    # The "__*_capture__" sentinels are pushed by HotkeysMixin's/StepEditorMixin's
+    # _capture_*_worker methods (poe2bot/gui/hotkeys_ui.py, poe2bot/gui/
+    # step_editor.py) from a background thread -- _poll_status_queue below is
+    # where that hop back to the Tk thread actually gets consumed and dispatched
+    # to the matching _on_*_captured method name (looked up via getattr, not
+    # called directly, since this dict is built before those bound methods --
+    # defined on mixins applied to this very class -- exist as plain values).
+    _CAPTURE_SENTINEL_HANDLERS = {
+        "__capture__": "_on_hotkey_captured",
+        "__cancel_capture__": "_on_cancel_key_captured",
+        "__reset_capture__": "_on_reset_key_captured",
+        "__pause_capture__": "_on_pause_key_captured",
+        "__step_key_capture__": "_on_step_key_captured",
+        "__step_mouse_capture__": "_on_step_mouse_captured",
+    }
+
     def _poll_status_queue(self):
         try:
             while True:
                 name, payload = self.status_queue.get_nowait()
-                # The "__*_capture__" sentinels are pushed by HotkeysMixin's/
-                # StepEditorMixin's _capture_*_worker methods (poe2bot/gui/
-                # hotkeys_ui.py, poe2bot/gui/step_editor.py) from a
-                # background thread -- this is where that hop back to the Tk
-                # thread actually gets consumed and dispatched to the matching
-                # _on_*_captured method.
-                if name == "__capture__":
-                    self._on_hotkey_captured(payload)
-                elif name == "__cancel_capture__":
-                    self._on_cancel_key_captured(payload)
-                elif name == "__reset_capture__":
-                    self._on_reset_key_captured(payload)
-                elif name == "__pause_capture__":
-                    self._on_pause_key_captured(payload)
-                elif name == "__step_key_capture__":
-                    self._on_step_key_captured(payload)
-                elif name == "__step_mouse_capture__":
-                    self._on_step_mouse_captured(payload)
+                handler_name = self._CAPTURE_SENTINEL_HANDLERS.get(name)
+                if handler_name is not None:
+                    getattr(self, handler_name)(payload)
                 else:
                     status = payload
                     self._refresh_rotation_tree()

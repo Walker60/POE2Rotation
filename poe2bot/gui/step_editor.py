@@ -4,6 +4,7 @@ import threading
 import tkinter as tk
 
 from poe2bot.gui import dialogs as messagebox
+from poe2bot.gui.action_labels import ACTION_LABELS
 from poe2bot.models import ConditionGroup, Step, replace_step_fields
 
 # (StringVar attr, Entry attr, parser, allow_blank, Step field name, display label) for
@@ -282,8 +283,17 @@ class StepEditorMixin:
         previously_closed = set()
         for i, entry in enumerate(getattr(self, "_steps_tree_render_order", [])):
             iid = f"group-{i}" if isinstance(entry, ConditionGroup) else f"step-{i}"
-            if self.tree.exists(iid):
-                (previously_open if self.tree.item(iid, "open") else previously_closed).add(id(entry))
+            if not self.tree.exists(iid):
+                continue
+            if not self.tree.get_children(iid):
+                # No children -> no expand arrow was ever shown for this row, so its
+                # "open" flag reflects nothing the user actually did. Leaving it
+                # untracked (neither previously_open nor previously_closed) means
+                # open_state() below falls through to default_open once this entry
+                # gains its first child, instead of being stuck "closed" forever
+                # just because it briefly rendered with none.
+                continue
+            (previously_open if self.tree.item(iid, "open") else previously_closed).add(id(entry))
 
         def open_state(entry, default_open: bool) -> bool:
             if id(entry) in previously_closed:
@@ -381,11 +391,9 @@ class StepEditorMixin:
             return
         self.tree.item(iid, text=self._condition_summary(self.editing_steps[group_idx].condition))
 
-    _ACTION_SUMMARY_LABELS = {"fire": "Execute", "block": "Skip", "hold": "Override"}
-
     @classmethod
     def _condition_summary(cls, condition) -> str:
-        action_label = cls._ACTION_SUMMARY_LABELS.get(condition.action, condition.action)
+        action_label = ACTION_LABELS.get(condition.action, condition.action)
         not_marker = "NOT " if condition.negate else ""
         if condition.name:
             base = condition.name
@@ -711,17 +719,37 @@ class StepEditorMixin:
             return
         parsed_list = [p for p in (self._parse_tree_iid(iid) for iid in selection) if p is not None]
         group_removals = {g for g, s, c in parsed_list if s is None}
-        if group_removals:
-            total_nested_steps = sum(len(self.editing_steps[g].steps) for g in group_removals)
-            if total_nested_steps and not messagebox.askyesno(
-                    "Remove Condition Group",
-                    f"Remove {len(group_removals)} condition group(s) and the {total_nested_steps} "
-                    f"step(s) nested inside them?", danger=True):
-                return
+        if not self._confirm_group_removal(group_removals):
+            return
+
         # Conditions/steps whose owner is itself also being fully removed are
         # skipped -- removing the group (or the step, for a condition) already
         # takes care of them, same idea one level deeper than before.
         step_deletions = {(g, s) for g, s, c in parsed_list if s is not None and c is None and g not in group_removals}
+        self._remove_conditions(parsed_list, step_deletions, group_removals)
+        top_level_step_removals = self._remove_nested_steps(step_deletions)
+        self._remove_top_level_entries(group_removals, top_level_step_removals)
+
+        self._refresh_steps_tree()
+        self._autosave()
+
+    def _confirm_group_removal(self, group_removals) -> bool:
+        """True if it's fine to proceed removing `group_removals` -- either
+        there are none, none of them have any nested steps, or the user
+        just confirmed taking those steps down along with their group."""
+        if not group_removals:
+            return True
+        total_nested_steps = sum(len(self.editing_steps[g].steps) for g in group_removals)
+        if not total_nested_steps:
+            return True
+        return messagebox.askyesno(
+            "Remove Condition Group",
+            f"Remove {len(group_removals)} condition group(s) and the {total_nested_steps} "
+            f"step(s) nested inside them?", danger=True)
+
+    def _remove_conditions(self, parsed_list, step_deletions, group_removals):
+        """Deletes every selected condition whose owning step/group isn't
+        itself also being fully removed (that already takes care of it)."""
         condition_deletions = [(g, s, c) for g, s, c in parsed_list
                                 if c is not None and (g, s) not in step_deletions and g not in group_removals]
         conditions_by_owner = {}
@@ -731,28 +759,34 @@ class StepEditorMixin:
             owning_conditions = self._steps_list_for(g)[s].conditions
             for c in sorted(cond_indices, reverse=True):
                 del owning_conditions[c]
-        # Nested-step deletions (from a group that's surviving) mutate that
-        # group's own .steps list directly, which never shifts anything in
-        # self.editing_steps itself -- safe to do in any order relative to the
-        # combined top-level pass below.
+
+    def _remove_nested_steps(self, step_deletions) -> list:
+        """Deletes every selected step nested inside a group that's
+        surviving (mutating that group's own .steps list directly, which
+        never shifts anything in self.editing_steps itself -- safe to do in
+        any order relative to _remove_top_level_entries). Returns the
+        top-level (group=None) step indices, left for the caller to combine
+        with group removals into one descending-index pass over
+        self.editing_steps."""
         steps_by_owner = {}
         for g, s in step_deletions:
             steps_by_owner.setdefault(g, []).append(s)
         for g, indices in steps_by_owner.items():
             if g is None:
-                continue  # top-level step removals are handled below, together with group removals
+                continue  # top-level step removals are handled by the caller, together with group removals
             owning_list = self._steps_list_for(g)
             for s in sorted(indices, reverse=True):
                 del owning_list[s]
-        # Top-level group removals and top-level step removals both index into
-        # the SAME self.editing_steps list, so they must be combined into one
-        # descending-index pass -- deleting them separately would shift indices
-        # out from under whichever pass ran second.
-        top_level_removals = group_removals | set(steps_by_owner.get(None, []))
+        return steps_by_owner.get(None, [])
+
+    def _remove_top_level_entries(self, group_removals, top_level_step_removals):
+        """Top-level group removals and top-level step removals both index
+        into the SAME self.editing_steps list, so they must be combined
+        into one descending-index pass -- deleting them separately would
+        shift indices out from under whichever pass ran second."""
+        top_level_removals = group_removals | set(top_level_step_removals)
         for i in sorted(top_level_removals, reverse=True):
             del self.editing_steps[i]
-        self._refresh_steps_tree()
-        self._autosave()
 
     def _move_step_up(self):
         self._move_selected(-1)
@@ -780,17 +814,20 @@ class StepEditorMixin:
         group_idx, step_idx, cond_idx = parsed
         if cond_idx is not None:
             items, idx = self._steps_list_for(group_idx)[step_idx].conditions, cond_idx
-            new_iid = lambda new_idx: self._location_iid(group_idx, step_idx, new_idx)  # noqa: E731
         elif step_idx is not None:
             items, idx = self._steps_list_for(group_idx), step_idx
-            new_iid = lambda new_idx: self._location_iid(group_idx, new_idx)  # noqa: E731
         else:
             items, idx = self.editing_steps, group_idx
-            new_iid = lambda new_idx: self._location_iid(new_idx, None)  # noqa: E731
         new_idx = idx + direction
         if not (0 <= new_idx < len(items)):
             return
         items[idx], items[new_idx] = items[new_idx], items[idx]
         self._refresh_steps_tree()
-        self.tree.selection_set(new_iid(new_idx))
+        if cond_idx is not None:
+            new_iid = self._location_iid(group_idx, step_idx, new_idx)
+        elif step_idx is not None:
+            new_iid = self._location_iid(group_idx, new_idx)
+        else:
+            new_iid = self._location_iid(new_idx, None)
+        self.tree.selection_set(new_iid)
         self._autosave()

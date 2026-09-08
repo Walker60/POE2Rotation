@@ -47,6 +47,11 @@ online, note the upstream project renamed in 2023; functionally unaffected eithe
 
 ## Configuration
 
+Every setting below can also be viewed and changed from **Settings... > Advanced**
+without restarting the bot — the environment variable only supplies the very first
+default, before you've ever changed it in Settings. Once you click Save there, the
+new value is remembered in `app_state.json` and takes effect immediately.
+
 - `POE2BOT_TARGET_PROCESS` — the game executable name the focus guard checks for
   (default `PathOfExileSteam.exe`). Verify the exact name via Task Manager > Details
   while POE2 is running — it may differ by storefront (Steam/EGS/standalone). Set
@@ -57,6 +62,17 @@ online, note the upstream project renamed in 2023; functionally unaffected eithe
   step with no Hold configured (default `40`). A virtual controller has no input queue
   the way a keyboard tap does, so an instant press+release risks the game's next input
   poll never seeing it; raise this if a controller step still doesn't reliably register.
+- `POE2BOT_CONTROLLER_INDEX` — which XInput slot (0-3) is your real, physically-held
+  controller (default `0`). Change this if a real controller plugged in alongside the
+  bot's own virtual one ends up enumerated on a different slot.
+
+**Settings... > Windows** also has **Show Hotkey Map...** (a snapshot table of every
+rotation's Hotkey/Cancel/Reset/Pause keys across every folder, flagging any key used
+more than once anywhere — same-folder sharing is already flagged when you bind a new
+hotkey, but this catches a conflict introduced by editing a Folder field, or two
+rotations in different folders independently choosing the same key) and **Open Logs
+Folder** (the rotating `poe2bot.log`/`poe2bot.log.1`/etc. files, for reviewing a past
+session after closing the app).
 
 ## Skill Conditions (optional, per step)
 
@@ -177,7 +193,10 @@ calibrations don't need any of this — their values are just numbers stored
 directly in the rotation's JSON, so they're already portable with no matching
 file to copy.
 
-Known limitation: calibration only supports the primary monitor.
+Calibration spans every connected monitor, not just the primary one -- the
+capture overlay covers the full virtual desktop, so an icon on a secondary
+display (including one positioned above/left of the primary) can be captured
+the same way as one on the primary monitor.
 
 The step list shows conditions as indented rows nested under their step, with
 an expand/collapse arrow — a step with any conditions starts expanded so
@@ -201,6 +220,16 @@ persist across further edits to the step list.
   same way regardless of order); with more than one "Override Hold Time"
   condition on the same step, the first one (in list order) that currently
   matches is the one whose override applies.
+- Select a condition and click **Test Match** to check, right now, whether it
+  currently matches — a small popup shows the saved template (image conditions)
+  or a saved-vs-live color swatch pair (pixel conditions) next to a MATCH/NO MATCH
+  verdict (already reflecting Negate, if it's on). Useful for confirming a
+  calibration is still good without running the whole rotation — e.g. after the
+  game window moves/resizes or the UI scale changes, which is exactly when a
+  match can silently start failing (see the exact/area-mode notes above). Not
+  meaningful for a Timer condition (there's no "since this step's last fire" to
+  measure without a rotation actually running) — Test Match tells you so instead
+  of guessing.
 
 Copying a step (Copy/Paste, or copying a whole rotation) carries its
 conditions along with it. Conditions with an image-match template participate
@@ -246,6 +275,9 @@ its own), Rotation Conditions stays visible no matter what's selected — its
 Name/Action/Negate fields just blank out until a group is actually
 selected. Double-clicking a group's row also recalibrates it, the same as
 double-clicking a step's condition, always keeping its current match type.
+**Test Match** (next to the Add Condition Group buttons) checks a selected group's
+condition the same way it does for a step's own condition — see Skill Conditions
+above.
 
 Steps end up nested under a group two ways: select the group (or one of its
 own nested steps/conditions) and click **Add Step**/**Add Sleep**, which
@@ -334,6 +366,28 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
   of them to a destination folder at once. Ctrl/Shift-click to select several
   rotations first.
 
+## Exporting, importing, and recovering rotations
+
+**Export...**/**Import...** (below New/Copy/Delete) share a rotation as a single
+`.zip` file, without you having to separately hunt down and copy its matching
+image-match template PNGs by hand — Export bundles the rotation's JSON together
+with every template it actually references (nothing to do for a rotation with only
+pixel/timer conditions, or none at all); Import reads that bundle back, writing each
+template under a brand-new filename so it can never collide with (or silently
+overwrite) anything already in your `templates/` folder. An imported rotation always
+lands ungrouped, with a unique name (`" 2"`, `" 3"`, ... appended if there's already
+one with that name) and its Hotkey/Cancel/Reset/Pause keys all cleared — another
+person's keybinds mean nothing on your machine, and reusing them by accident risks
+silently colliding with one of your own rotations. Bind its keys the same way as any
+new rotation once it's imported.
+
+**Right-click anywhere in the rotation list → Restore Last Deleted...** undoes the
+most recent **Delete** — there's no Save button anywhere in this app (see below), so
+this is the one safety net against a fat-fingered delete. It only remembers a single
+step back: deleting a second rotation permanently discards whatever was in that slot
+before it, so restore it before you delete anything else if you want it back. The
+menu item is disabled whenever there's nothing to restore.
+
 ## Usage
 
 1. Click **New**, give the rotation a name and, optionally, a Folder to group it
@@ -341,7 +395,9 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    key, delay in ms, optional jitter, optional hold duration, optional hold
    jitter, optional repeat count — see "Repeat and Combine Hold" below), and
    choose **Once** (single pass) or **Loop** (repeats until
-   re-triggered or the panic key is pressed). Jitter randomizes the delay ± that
+   re-triggered or the panic key is pressed) — a Loop rotation logs a "Lap N complete
+   (X.Xs)" line to the Activity window at the end of every full pass, so its actual
+   cycle time is visible without timing it by hand. Jitter randomizes the delay ± that
    many ms each time; Hold Jitter does the same for how long the key is held
    down — both make timing look less like a perfectly repeating macro. Leave
    either at 0 for exact, fixed timing. The step's Name (e.g. "Fireball") is just
@@ -371,6 +427,20 @@ Two dedicated actions for reorganizing without editing rotations one at a time:
    exactly one step (or one of its conditions) is selected — nothing to
    toggle with a condition group's own row selected, or with nothing/several
    things selected.
+
+   The **Enabled** checkbox (next to Mode) is the same idea one level up: unchecking
+   it releases this whole rotation's Hotkey/Cancel/Reset/Pause keys (freeing them up
+   for another rotation to use) without unbinding them — check it again and they all
+   come back exactly as they were, no retyping. Unlike Active Folder scoping, this is
+   per-rotation and has nothing to do with which folder is active.
+
+   **Test Run** (top-right of the form) fires this rotation immediately, the same way
+   pressing its real trigger hotkey would — including toggling a running Loop
+   rotation off again on a second click — without needing to bind a hotkey first, and
+   regardless of Active Folder scope or the Enabled checkbox above. It autosaves
+   first, so what's on screen right now is exactly what runs; if the form doesn't
+   currently save cleanly, the usual inline error explains why instead of firing
+   something stale. Opens the Activity window automatically so you can watch it go.
 
    **Add Step** with an empty Key field is different from a sleep step: it
    creates a step with no keybind *assigned yet*, shown as "(no key)" in the

@@ -62,6 +62,25 @@ DRACULA = {
 _heading_font = None
 _dracula_built = False
 
+_FALLBACK_BG = "#1c1c1c"
+_FALLBACK_FG = "#fafafa"
+_FALLBACK_SELECT_BG = "#2f60d8"
+_FALLBACK_SELECT_FG = "#ffffff"
+
+
+def colors():
+    """(bg, fg, select_bg, select_fg), read live from the active ttk theme
+    with a fallback for anything not yet themed. Shared by any plain-tk
+    widget (tk.Toplevel/tk.Text/tk.PanedWindow) that sv_ttk/dracula never
+    restyle on their own -- e.g. poe2bot/gui/dialogs.py's themed message/
+    input dialogs and poe2bot/gui/activity_window.py's tk.Text panes."""
+    style = ttk.Style()
+    bg = style.lookup("TFrame", "background") or _FALLBACK_BG
+    fg = style.lookup("TLabel", "foreground") or _FALLBACK_FG
+    select_bg = style.lookup("Treeview", "background", ("selected",)) or _FALLBACK_SELECT_BG
+    select_fg = _FALLBACK_SELECT_FG
+    return bg, fg, select_bg, select_fg
+
 
 def heading_font(root):
     """A bold, +1pt variant of the platform default font, lazily created

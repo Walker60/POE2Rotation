@@ -46,6 +46,38 @@ def monitor_work_area(hwnd):
         return None
 
 
+def virtual_screen_bounds():
+    """(left, top, width, height) of the FULL virtual desktop -- the union
+    of every connected monitor's bounds, not just the primary one's own
+    resolution the way winfo_screenwidth()/winfo_screenheight() report.
+    `left`/`top` can be negative (a monitor positioned above/left of the
+    primary one) -- verified empirically that Tk's geometry() on Windows
+    honors a negative offset as a literal virtual-screen coordinate, not
+    X11's traditional "distance from the opposite edge" meaning. Used by
+    poe2bot/gui/overlays.py's capture overlays so calibration isn't limited
+    to the primary monitor. Returns None on non-Windows, or if anything
+    about the Win32 call fails, so callers can fall back to a primary-
+    monitor-only geometry (winfo_screenwidth()/winfo_screenheight() at
+    +0+0)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetSystemMetrics.restype = ctypes.c_int
+        user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+        sm_xvirtualscreen, sm_yvirtualscreen = 76, 77
+        sm_cxvirtualscreen, sm_cyvirtualscreen = 78, 79
+        left = user32.GetSystemMetrics(sm_xvirtualscreen)
+        top = user32.GetSystemMetrics(sm_yvirtualscreen)
+        width = user32.GetSystemMetrics(sm_cxvirtualscreen)
+        height = user32.GetSystemMetrics(sm_cyvirtualscreen)
+        if width <= 0 or height <= 0:
+            return None
+        return left, top, width, height
+    except (OSError, AttributeError, ValueError, TypeError, ctypes.ArgumentError):
+        return None
+
+
 def size_window_to_contents(window, *, min_width: int = 0, min_height: int = 0) -> None:
     """Open `window` large enough to show its current contents without the
     user having to resize on every launch, clamped to its monitor's usable

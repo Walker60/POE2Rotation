@@ -2,6 +2,7 @@ import copy
 
 from poe2bot import storage, templates
 from poe2bot.gui import dialogs as messagebox
+from poe2bot.gui.action_labels import STEP_CONDITION_ACTION_LABELS as CONDITION_ACTION_LABELS
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Condition, iter_conditions
 
@@ -9,11 +10,6 @@ log = get_logger()
 
 # Human labels for Condition.action, and back -- shared by the Action combobox
 # (app.py), _populate_condition_form, and _apply_pending_condition_edits below.
-CONDITION_ACTION_LABELS = {
-    "fire": "Execute Step",
-    "block": "Skip Step",
-    "hold": "Override Hold Time",
-}
 _CONDITION_ACTION_BY_LABEL = {label: action for action, label in CONDITION_ACTION_LABELS.items()}
 
 
@@ -43,6 +39,27 @@ class ConditionsMixin:
         if parsed is None or parsed[2] is None:
             return None
         return parsed
+
+    def _on_test_match_clicked(self):
+        """Live "does it match right now" preview for whichever condition is
+        currently selected -- see CalibrationMixin._show_test_match_result.
+        Meaningless for a timer condition (there's no "since this step's
+        last fire" to measure outside a running rotation), so that case
+        gets a plain explanatory message instead."""
+        location = self._selected_condition_location()
+        if location is None:
+            messagebox.showinfo("No condition selected", "Select a condition in the Skill Steps list first.")
+            return
+        group_idx, step_idx, cond_idx = location
+        condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
+        if condition.match_type == "timer":
+            messagebox.showinfo(
+                "Can't test a Timer condition",
+                "A Timer condition matches based on seconds since this step's own last fire -- "
+                "there's no rotation running right now to measure that against. Use Test Run "
+                "and watch the Activity window instead.")
+            return
+        self._show_test_match_result(condition)
 
     def _on_add_image_condition_clicked(self):
         self._add_or_recalibrate_condition("image")
@@ -335,6 +352,11 @@ class ConditionsMixin:
         for rotation in self.rotations.values():
             keep.update(c.template for c in iter_conditions(rotation.steps) if c.template)
         keep.update(c.template for c in iter_conditions(self.editing_steps) if c.template)
+        # Whatever "Restore Last Deleted" could still bring back also counts as
+        # referenced -- otherwise trashing a rotation, then merely opening the
+        # app again (or editing an unrelated rotation) before restoring it,
+        # would sweep away the templates it needs and leave it uncalibrated.
+        keep.update(storage.trashed_rotation_templates())
         return keep
 
     def _sweep_templates(self):

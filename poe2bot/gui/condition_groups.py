@@ -1,10 +1,11 @@
+from poe2bot.gui import dialogs as messagebox
+from poe2bot.gui.action_labels import GROUP_CONDITION_ACTION_LABELS
 from poe2bot.models import Condition, ConditionGroup
 
 # Human labels for a ConditionGroup's own condition.action, and back -- a
 # narrower set than a Step's own CONDITION_ACTION_LABELS (poe2bot/gui/
 # conditions.py): a group never uses "hold" (there's no single step's
 # hold_ms/delay_ms to override) or "timer" (see validate_rotation).
-GROUP_CONDITION_ACTION_LABELS = {"fire": "Execute Group", "block": "Skip Group"}
 _GROUP_CONDITION_ACTION_BY_LABEL = {label: action for action, label in GROUP_CONDITION_ACTION_LABELS.items()}
 
 
@@ -33,6 +34,19 @@ class ConditionGroupsMixin:
         if parsed is None or parsed[1] is not None:
             return None
         return parsed[0]
+
+    def _on_test_match_group_clicked(self):
+        """Live "does it match right now" preview for whichever condition
+        group's own row is currently selected -- see
+        CalibrationMixin._show_test_match_result. A group's condition is
+        never match_type "timer" (see validate_rotation), so unlike
+        ConditionsMixin's equivalent this never needs to reject that case."""
+        group_idx = self._selected_group_location()
+        if group_idx is None:
+            messagebox.showinfo(
+                "No condition group selected", "Select a condition group's own row in the Skill Steps list first.")
+            return
+        self._show_test_match_result(self.editing_steps[group_idx].condition)
 
     def _on_add_image_condition_group_clicked(self):
         group_idx = self._selected_group_location()

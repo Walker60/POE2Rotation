@@ -12,15 +12,7 @@ from tkinter import ttk
 
 from poe2bot.gui import theme
 
-_FALLBACK_BG = "#1c1c1c"
-_FALLBACK_FG = "#fafafa"
-
-
-def _theme_colors():
-    style = ttk.Style()
-    bg = style.lookup("TFrame", "background") or _FALLBACK_BG
-    fg = style.lookup("TLabel", "foreground") or _FALLBACK_FG
-    return bg, fg
+_WRAPLENGTH = 360   # message/prompt label wrap width, shared by every dialog below
 
 
 def _build_dialog(title, parent):
@@ -29,7 +21,7 @@ def _build_dialog(title, parent):
     dialog.title(title)
     dialog.transient(parent)
     dialog.resizable(False, False)
-    bg, _ = _theme_colors()
+    bg, _fg, _select_bg, _select_fg = theme.colors()
     dialog.configure(bg=bg)
     return dialog, parent
 
@@ -55,14 +47,30 @@ def _run_modal(dialog, parent):
     dialog.wait_window(dialog)
 
 
+def _build_prompt_label(dialog, text, pady_bottom=8, anchor=None):
+    """The wrapped message/prompt label every dialog below starts with --
+    only `pady_bottom` (tighter above an input widget than above a button
+    row) and `anchor` (askstring/askfloat left-align rather than center)
+    vary per caller."""
+    label = ttk.Label(dialog, text=text, wraplength=_WRAPLENGTH, justify="left",
+                       padding=(16, 16, 16, pady_bottom))
+    label.pack(anchor=anchor) if anchor else label.pack()
+
+
+def _build_ok_cancel_buttons(dialog, container, submit):
+    """OK (accent-styled, wired to `submit`) + Cancel (wired to
+    dialog.destroy) button pair -- shared by askstring()/askfloat()."""
+    ttk.Button(container, text="OK", style=theme.ACCENT_BUTTON_STYLE, command=submit).pack(side="left", padx=(0, 6))
+    ttk.Button(container, text="Cancel", command=dialog.destroy).pack(side="left")
+
+
 def _message_dialog(title, message, parent, button_style):
     dialog, parent = _build_dialog(title, parent)
     dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
     dialog.bind("<Escape>", lambda _e: dialog.destroy())
     dialog.bind("<Return>", lambda _e: dialog.destroy())
 
-    ttk.Label(dialog, text=message, wraplength=360, justify="left",
-              padding=(16, 16, 16, 8)).pack()
+    _build_prompt_label(dialog, message)
     btns = ttk.Frame(dialog, padding=(0, 0, 16, 16))
     btns.pack()
     ok_btn = ttk.Button(btns, text="OK", style=button_style, command=dialog.destroy)
@@ -77,7 +85,7 @@ def showinfo(title, message, parent=None) -> None:
 
 
 def showerror(title, message, parent=None) -> None:
-    _message_dialog(title, message, parent, theme.ACCENT_BUTTON_STYLE)
+    _message_dialog(title, message, parent, theme.DANGER_BUTTON_STYLE)
 
 
 def showwarning(title, message, parent=None) -> None:
@@ -95,8 +103,7 @@ def askyesno(title, message, parent=None, danger: bool = False) -> bool:
     dialog.protocol("WM_DELETE_WINDOW", lambda: respond(False))
     dialog.bind("<Escape>", lambda _e: respond(False))
 
-    ttk.Label(dialog, text=message, wraplength=360, justify="left",
-              padding=(16, 16, 16, 8)).pack()
+    _build_prompt_label(dialog, message)
     btns = ttk.Frame(dialog, padding=(0, 0, 16, 16))
     btns.pack()
     yes_style = theme.DANGER_BUTTON_STYLE if danger else theme.ACCENT_BUTTON_STYLE
@@ -117,8 +124,7 @@ def askstring(title, prompt, initialvalue=None, parent=None):
     dialog, parent = _build_dialog(title, parent)
     result = {"value": None}
 
-    ttk.Label(dialog, text=prompt, wraplength=360, justify="left",
-              padding=(16, 16, 16, 4)).pack(anchor="w")
+    _build_prompt_label(dialog, prompt, pady_bottom=4, anchor="w")
     var = tk.StringVar(value=initialvalue or "")
     entry = ttk.Entry(dialog, textvariable=var, width=32)
     entry.pack(padx=16, pady=(0, 8), fill="x")
@@ -135,8 +141,7 @@ def askstring(title, prompt, initialvalue=None, parent=None):
 
     btns = ttk.Frame(dialog, padding=(0, 0, 0, 16))
     btns.pack()
-    ttk.Button(btns, text="OK", style=theme.ACCENT_BUTTON_STYLE, command=submit).pack(side="left", padx=(0, 6))
-    ttk.Button(btns, text="Cancel", command=dialog.destroy).pack(side="left")
+    _build_ok_cancel_buttons(dialog, btns, submit)
 
     _run_modal(dialog, parent)
     return result["value"]
@@ -146,8 +151,7 @@ def askfloat(title, prompt, initialvalue=None, minvalue=None, maxvalue=None, par
     dialog, parent = _build_dialog(title, parent)
     result = {"value": None}
 
-    ttk.Label(dialog, text=prompt, wraplength=360, justify="left",
-              padding=(16, 16, 16, 4)).pack(anchor="w")
+    _build_prompt_label(dialog, prompt, pady_bottom=4, anchor="w")
     var = tk.StringVar(value="" if initialvalue is None else f"{initialvalue:g}")
     entry = ttk.Entry(dialog, textvariable=var, width=12)
     entry.pack(padx=16, anchor="w")
@@ -179,8 +183,7 @@ def askfloat(title, prompt, initialvalue=None, minvalue=None, maxvalue=None, par
 
     btns = ttk.Frame(dialog, padding=16)
     btns.pack()
-    ttk.Button(btns, text="OK", style=theme.ACCENT_BUTTON_STYLE, command=submit).pack(side="left", padx=(0, 6))
-    ttk.Button(btns, text="Cancel", command=dialog.destroy).pack(side="left")
+    _build_ok_cancel_buttons(dialog, btns, submit)
 
     _run_modal(dialog, parent)
     return result["value"]

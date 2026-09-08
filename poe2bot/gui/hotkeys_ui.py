@@ -6,16 +6,16 @@ from poe2bot.hotkeys import display_name
 
 class HotkeysMixin:
     """Binding UI for a rotation's trigger hotkey, cancel key, reset key, and
-    pause key -- four near-identical blocks. Mixed into App (see
-    poe2bot/gui/app.py).
+    pause key -- four near-identical bindings, parameterized by
+    _KEY_BIND_SPECS below. Mixed into App (see poe2bot/gui/app.py).
 
-    Each "Bind ... " button starts a background thread (_capture_*_worker)
+    Each "Bind ... " button starts a background thread (_capture_key_worker)
     that makes a *blocking* call to self.hotkey_manager.capture_next_key(),
     then hops back to the Tk thread by pushing a sentinel tuple onto
     self.status_queue -- the same queue RotationManager's status callback
-    uses. App's _poll_status_queue (in app.py) special-cases the sentinel
-    names "__capture__"/"__cancel_capture__"/"__reset_capture__"/
-    "__pause_capture__" and dispatches to the corresponding
+    uses. App's _poll_status_queue (in app.py) special-cases each spec's
+    sentinel ("__capture__"/"__cancel_capture__"/"__reset_capture__"/
+    "__pause_capture__") and dispatches to the corresponding
     _on_*_captured method below. That dispatch table lives in app.py, not
     here, so a change to these sentinel names must be kept in sync there.
     """
@@ -28,23 +28,18 @@ class HotkeysMixin:
         (HotkeyManager._capture_lock) and only one can meaningfully be in
         flight at a time -- disabling all six buttons, not just the one
         clicked, makes that exclusivity visible rather than letting a second
-        click silently queue up behind the first with no feedback."""
+        click silently queue up behind the first with no feedback. The four
+        _KEY_BIND_SPECS buttons are looped rather than named individually so
+        adding a new bindable key only means adding a spec entry, not also
+        remembering to list its button here."""
         state = "normal" if enabled else "disabled"
-        self.bind_hotkey_btn.config(state=state)
-        self.bind_cancel_btn.config(state=state)
-        self.bind_reset_btn.config(state=state)
-        self.bind_pause_btn.config(state=state)
+        for spec in self._KEY_BIND_SPECS.values():
+            getattr(self, spec["button_attr"]).config(state=state)
         self.capture_step_key_btn.config(state=state)
         self.capture_step_mouse_btn.config(state=state)
 
     def _on_bind_hotkey_clicked(self):
-        self.bind_hotkey_btn.config(text="Press a key or click...")
-        self._set_bind_buttons_enabled(False)
-        threading.Thread(target=self._capture_hotkey_worker, daemon=True).start()
-
-    def _capture_hotkey_worker(self):
-        key = self.hotkey_manager.capture_next_key()
-        self.status_queue.put(("__capture__", key))
+        self._on_bind_key_clicked("hotkey")
 
     def _confirm_hotkey_share_if_needed(self, hotkey) -> bool:
         """True if it's fine to proceed with `hotkey` as this rotation's
@@ -77,7 +72,8 @@ class HotkeysMixin:
             "Also bind it to this rotation?")
 
     def _on_hotkey_captured(self, key: str):
-        self.bind_hotkey_btn.config(text="Bind Hotkey...")
+        spec = self._KEY_BIND_SPECS["hotkey"]
+        getattr(self, spec["button_attr"]).config(text=spec["bound_label"])
         self._set_bind_buttons_enabled(True)
         if not self._confirm_hotkey_share_if_needed(key):
             return  # declined -- leave the old hotkey in place, nothing to save
@@ -92,75 +88,77 @@ class HotkeysMixin:
     def _on_unbind_clicked(self):
         # Clears and immediately saves, so freeing this hotkey up for another
         # rotation is a single click instead of unbind-then-remember-to-save.
-        self.pending_hotkey = None
-        self.hotkey_label_var.set(display_name(None))
+        self._on_clear_key("hotkey")
+
+    # ---- cancel/reset/pause keys --------------------------------------------
+    # These three are otherwise identical -- shared machinery lives in
+    # _on_bind_key_clicked/_capture_key_worker/_on_key_captured/_on_clear_key
+    # below, parameterized by _KEY_BIND_SPECS. The hotkey binding above reuses
+    # the bind/capture half too, but keeps its own _on_hotkey_captured/
+    # _on_unbind_clicked since binding a trigger hotkey also needs the
+    # sharing-confirmation dialog above.
+
+    _KEY_BIND_SPECS = {
+        "hotkey": dict(button_attr="bind_hotkey_btn", label_var_attr="hotkey_label_var",
+                       pending_attr="pending_hotkey", sentinel="__capture__",
+                       bound_label="Bind Hotkey..."),
+        "cancel": dict(button_attr="bind_cancel_btn", label_var_attr="cancel_key_label_var",
+                       pending_attr="pending_cancel_key", sentinel="__cancel_capture__",
+                       bound_label="Bind Cancel Key..."),
+        "reset": dict(button_attr="bind_reset_btn", label_var_attr="reset_key_label_var",
+                      pending_attr="pending_reset_key", sentinel="__reset_capture__",
+                      bound_label="Bind Reset Key..."),
+        "pause": dict(button_attr="bind_pause_btn", label_var_attr="pause_key_label_var",
+                      pending_attr="pending_pause_key", sentinel="__pause_capture__",
+                      bound_label="Bind Pause Key..."),
+    }
+
+    def _on_bind_key_clicked(self, kind: str):
+        getattr(self, self._KEY_BIND_SPECS[kind]["button_attr"]).config(text="Press a key or click...")
+        self._set_bind_buttons_enabled(False)
+        threading.Thread(target=self._capture_key_worker, args=(kind,), daemon=True).start()
+
+    def _capture_key_worker(self, kind: str):
+        key = self.hotkey_manager.capture_next_key()
+        self.status_queue.put((self._KEY_BIND_SPECS[kind]["sentinel"], key))
+
+    def _on_key_captured(self, kind: str, key: str):
+        spec = self._KEY_BIND_SPECS[kind]
+        setattr(self, spec["pending_attr"], key)
+        getattr(self, spec["label_var_attr"]).set(display_name(key))
+        getattr(self, spec["button_attr"]).config(text=spec["bound_label"])
+        self._set_bind_buttons_enabled(True)
         self._autosave()
 
-    # ---- cancel key -----------------------------------------------------------
+    def _on_clear_key(self, kind: str):
+        spec = self._KEY_BIND_SPECS[kind]
+        setattr(self, spec["pending_attr"], None)
+        getattr(self, spec["label_var_attr"]).set(display_name(None))
+        self._autosave()
 
     def _on_bind_cancel_clicked(self):
-        self.bind_cancel_btn.config(text="Press a key or click...")
-        self._set_bind_buttons_enabled(False)
-        threading.Thread(target=self._capture_cancel_key_worker, daemon=True).start()
-
-    def _capture_cancel_key_worker(self):
-        key = self.hotkey_manager.capture_next_key()
-        self.status_queue.put(("__cancel_capture__", key))
+        self._on_bind_key_clicked("cancel")
 
     def _on_cancel_key_captured(self, key: str):
-        self.pending_cancel_key = key
-        self.cancel_key_label_var.set(display_name(key))
-        self.bind_cancel_btn.config(text="Bind Cancel Key...")
-        self._set_bind_buttons_enabled(True)
-        self._autosave()
+        self._on_key_captured("cancel", key)
 
     def _on_clear_cancel_key(self):
-        self.pending_cancel_key = None
-        self.cancel_key_label_var.set(display_name(None))
-        self._autosave()
-
-    # ---- reset key ------------------------------------------------------------
+        self._on_clear_key("cancel")
 
     def _on_bind_reset_clicked(self):
-        self.bind_reset_btn.config(text="Press a key or click...")
-        self._set_bind_buttons_enabled(False)
-        threading.Thread(target=self._capture_reset_key_worker, daemon=True).start()
-
-    def _capture_reset_key_worker(self):
-        key = self.hotkey_manager.capture_next_key()
-        self.status_queue.put(("__reset_capture__", key))
+        self._on_bind_key_clicked("reset")
 
     def _on_reset_key_captured(self, key: str):
-        self.pending_reset_key = key
-        self.reset_key_label_var.set(display_name(key))
-        self.bind_reset_btn.config(text="Bind Reset Key...")
-        self._set_bind_buttons_enabled(True)
-        self._autosave()
+        self._on_key_captured("reset", key)
 
     def _on_clear_reset_key(self):
-        self.pending_reset_key = None
-        self.reset_key_label_var.set(display_name(None))
-        self._autosave()
-
-    # ---- pause key ------------------------------------------------------------
+        self._on_clear_key("reset")
 
     def _on_bind_pause_clicked(self):
-        self.bind_pause_btn.config(text="Press a key or click...")
-        self._set_bind_buttons_enabled(False)
-        threading.Thread(target=self._capture_pause_key_worker, daemon=True).start()
-
-    def _capture_pause_key_worker(self):
-        key = self.hotkey_manager.capture_next_key()
-        self.status_queue.put(("__pause_capture__", key))
+        self._on_bind_key_clicked("pause")
 
     def _on_pause_key_captured(self, key: str):
-        self.pending_pause_key = key
-        self.pause_key_label_var.set(display_name(key))
-        self.bind_pause_btn.config(text="Bind Pause Key...")
-        self._set_bind_buttons_enabled(True)
-        self._autosave()
+        self._on_key_captured("pause", key)
 
     def _on_clear_pause_key(self):
-        self.pending_pause_key = None
-        self.pause_key_label_var.set(display_name(None))
-        self._autosave()
+        self._on_clear_key("pause")

@@ -77,8 +77,23 @@ class ControllerReader:
         self._prev_mask = 0
         self._prev_trigger = {"lt": False, "rt": False}
         self._warned_disconnected = False
+        # Starts polling immediately, for the lifetime of the process -- there's
+        # exactly one ControllerReader (see get_controller_reader() below) and
+        # nothing ever needs to stop it early, so it has no corresponding stop()/
+        # join(); daemon=True is what lets the process exit without joining it.
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
+
+    def set_index(self, new_index: int):
+        """Switches which XInput slot this reader polls, live -- e.g. from
+        Settings. Resets the previous button/trigger snapshot so the first
+        poll against the new slot doesn't misread its actual current state
+        as a fresh "just pressed" edge (or silently inherit a stale "held"
+        state left over from the old slot)."""
+        with self._lock:
+            self._index = new_index
+            self._prev_mask = 0
+            self._prev_trigger = {"lt": False, "rt": False}
 
     def on_button_down(self, button_name: str, callback):
         with self._lock:
@@ -156,4 +171,14 @@ def get_controller_reader() -> ControllerReader:
     with _singleton_lock:
         if _singleton is None:
             _singleton = ControllerReader()
+    return _singleton
+
+
+def peek_controller_reader():
+    """The current ControllerReader singleton, or None if nothing has
+    triggered its lazy creation yet. For callers that want to update it
+    live ONLY if it already exists -- e.g. applying a changed
+    CONTROLLER_INDEX from Settings -- without themselves accidentally
+    starting its polling thread as a side effect for a keyboard-only user
+    who's never touched anything controller-related."""
     return _singleton

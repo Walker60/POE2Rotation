@@ -2,28 +2,11 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from poe2bot.gui import geometry
+from poe2bot.gui import geometry, theme
 from poe2bot.gui.constants import STATUS_COLORS, STATUS_LABELS
 
 MAX_LINES_PER_PANE = 3000
 PANE_MIN_WIDTH = 260
-_FALLBACK_BG = "#1c1c1c"
-_FALLBACK_FG = "#fafafa"
-_FALLBACK_SELECT_BG = "#2f60d8"
-_FALLBACK_SELECT_FG = "#ffffff"
-
-
-def _theme_colors():
-    """(bg, fg, select_bg, select_fg), read live from the active ttk theme
-    with a fallback for anything not yet themed -- same lookup-with-fallback
-    idiom as drag_drop.py's _drop_target_color, needed here because
-    tk.PanedWindow/tk.Text are plain tk widgets sv_ttk never restyles."""
-    style = ttk.Style()
-    bg = style.lookup("TFrame", "background") or _FALLBACK_BG
-    fg = style.lookup("TLabel", "foreground") or _FALLBACK_FG
-    select_bg = style.lookup("Treeview", "background", ("selected",)) or _FALLBACK_SELECT_BG
-    select_fg = _FALLBACK_SELECT_FG
-    return bg, fg, select_bg, select_fg
 
 
 class ActivityWindow(tk.Toplevel):
@@ -60,7 +43,7 @@ class ActivityWindow(tk.Toplevel):
         window owns -- called once at construction and again from
         App._toggle_theme(), since sv_ttk never restyles tk.PanedWindow/
         tk.Text on its own."""
-        bg, fg, select_bg, select_fg = _theme_colors()
+        bg, fg, select_bg, select_fg = theme.colors()
         self._paned.configure(bg=bg)
         for _frame, text, _dot, _name_label in self._panes.values():
             text.configure(bg=bg, fg=fg, insertbackground=fg,
@@ -83,7 +66,7 @@ class ActivityWindow(tk.Toplevel):
         text.pack(side="left", fill="both", expand=True)
         self._paned.add(frame, minsize=PANE_MIN_WIDTH)
         self._panes[name] = (frame, text, dot_label, name_label)
-        bg, fg, select_bg, select_fg = _theme_colors()
+        bg, fg, select_bg, select_fg = theme.colors()
         text.configure(bg=bg, fg=fg, insertbackground=fg,
                         selectbackground=select_bg, selectforeground=select_fg)
         if not self._sized_once:

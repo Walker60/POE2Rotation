@@ -2,6 +2,7 @@ import copy
 import os
 
 import tkinter as tk
+from tkinter import filedialog
 
 from poe2bot import app_state, storage
 from poe2bot.hotkeys import display_name
@@ -63,9 +64,10 @@ class RotationListMixin:
                 shared_suffix = f" (shared {display_name(rotation.hotkey)})"
             status = self.rotation_manager.status(name)
             status_text = STATUS_LABELS.get(status, "").strip(" ()").capitalize()
+            tags = (status, "rotation_disabled") if not rotation.enabled else (status,)
             self.rotation_tree.insert(
                 parent_id, tk.END, iid=f"rotation:{name}", text=f"{name}{shared_suffix}",
-                values=(status_text,), tags=(status,))
+                values=(status_text,), tags=tags)
 
         # Keeps the Active Folder combobox's options current with whatever folders
         # actually exist -- called after every rotation-set mutation (add/delete/
@@ -105,20 +107,27 @@ class RotationListMixin:
 
     def _on_rotation_tree_right_click(self, event):
         item_id = self.rotation_tree.identify_row(event.y)
-        if not item_id:
-            return
+        menu = tk.Menu(self, tearoff=0)
+        item_specific = True
         if item_id.startswith("folder:"):
             self.rotation_tree.selection_set(item_id)
             folder_path = item_id[len("folder:"):]
-            menu = tk.Menu(self, tearoff=0)
             menu.add_command(label="Rename Folder...", command=lambda: self._rename_folder(folder_path))
-            menu.tk_popup(event.x_root, event.y_root)
         elif item_id.startswith("rotation:"):
             if item_id not in self.rotation_tree.selection():
                 self.rotation_tree.selection_set(item_id)
-            menu = tk.Menu(self, tearoff=0)
             menu.add_command(label="Move to Folder...", command=self._move_selected_to_folder)
-            menu.tk_popup(event.x_root, event.y_root)
+        else:
+            item_specific = False  # empty space -- still worth a menu, for Restore Last Deleted below
+        if item_specific:
+            menu.add_separator()
+        # Always present (though disabled with nothing to restore), not just on a
+        # rotation/folder row -- it's a global recovery action, not scoped to
+        # whatever happens to be under the cursor.
+        menu.add_command(
+            label="Restore Last Deleted...", command=self._on_restore_last_deleted_clicked,
+            state=("normal" if storage.peek_trashed_rotation() is not None else "disabled"))
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _folder_move_collisions(self, planned_folders: dict) -> list:
         """planned_folders: rotation name -> new folder, for a batch of
@@ -178,14 +187,14 @@ class RotationListMixin:
             self.active_folder_var.set(self.active_folder or "(All Folders)")
         for rotation in affected:
             old_folder = rotation.folder
-            was_in_scope = folder_in_scope(old_folder, old_active_folder)
+            was_active = folder_in_scope(old_folder, old_active_folder) and rotation.enabled
             new_folder = planned[rotation.name]
             rotation.folder = new_folder
             storage.move_rotation(rotation, rotation.name, old_folder)
             if rotation.name == self.editing_original_name:
                 self.folder_var.set(new_folder)
-            self._reconcile_hotkey_scope(rotation, was_in_scope)
-        app_state.save_state(self.active_folder, self.active_device, self._theme)
+            self._reconcile_hotkey_scope(rotation, was_active)
+        self._persist_app_state()
         self._refresh_rotation_tree()
 
     def _move_selected_to_folder(self):
@@ -220,12 +229,12 @@ class RotationListMixin:
             if rotation.folder == new_path:
                 continue
             old_folder = rotation.folder
-            was_in_scope = self._folder_in_scope(old_folder)
+            was_active = self._folder_in_scope(old_folder) and rotation.enabled
             rotation.folder = new_path
             storage.move_rotation(rotation, name, old_folder)
             if name == self.editing_original_name:
                 self.folder_var.set(new_path)
-            self._reconcile_hotkey_scope(rotation, was_in_scope)
+            self._reconcile_hotkey_scope(rotation, was_active)
         self._refresh_rotation_tree()
 
     def _load_rotation_into_form(self, rotation: Rotation):
@@ -243,6 +252,7 @@ class RotationListMixin:
             self.name_var.set(rotation.name)
             self.folder_var.set(rotation.folder)
             self.mode_var.set(rotation.mode)
+            self.rotation_enabled_var.set(rotation.enabled)
             self.hotkey_label_var.set(display_name(rotation.hotkey))
             self.cancel_key_label_var.set(display_name(rotation.cancel_key))
             self.reset_key_label_var.set(display_name(rotation.reset_key))
@@ -255,27 +265,19 @@ class RotationListMixin:
         self._update_title()
 
     def _new_rotation(self):
+        # Delegates field-population to _load_rotation_into_form via a fresh,
+        # never-saved Rotation() (its dataclass defaults are exactly this
+        # form's blank state), then restores editing_original_name to None --
+        # "new/unsaved", not the literal string "New Rotation" -- since that
+        # distinction is what autosave/rename/hotkey-sharing logic elsewhere
+        # actually keys off (see self.editing_original_name's docstring in
+        # App.__init__). Safe to fix up afterward: nothing between
+        # _load_rotation_into_form returning and the reassignment below runs
+        # any Tk callback that could observe the transient wrong value.
+        self._load_rotation_into_form(Rotation(name="New Rotation"))
+        self.editing_original_name = None
         with self._autosave_suppressed():
-            self.editing_original_name = None
-            self.pending_hotkey = None
-            self.pending_cancel_key = None
-            self.pending_reset_key = None
-            self.pending_pause_key = None
-            self.editing_steps = []
-            self.name_var.set("New Rotation")
-            self.folder_var.set("")
-            self.mode_var.set("once")
-            self.hotkey_label_var.set("(unbound)")
-            self.cancel_key_label_var.set("(unbound)")
-            self.reset_key_label_var.set("(unbound)")
-            self.reset_delay_var.set("0")
-            self.pause_key_label_var.set("(unbound)")
-            self.pause_mode_var.set("duration")
-            self.pause_duration_var.set("1000")
-            self._reset_step_core_fields()
-            self._refresh_steps_tree()
             self.rotation_tree.selection_remove(*self.rotation_tree.selection())
-        self._update_title()
 
     def _copy_rotation(self):
         name = self._selected_rotation_name()
@@ -318,12 +320,90 @@ class RotationListMixin:
         name = self._selected_rotation_name()
         if name is None:
             return
-        if not messagebox.askyesno("Delete rotation", f"Delete '{name}'?", danger=True):
+        if not messagebox.askyesno(
+                "Delete rotation",
+                f"Delete '{name}'? Right-click > Restore Last Deleted can bring it back, but only until "
+                "you delete something else.", danger=True):
             return
         rotation = self.rotations.pop(name)
         self._clear_rotation_hotkeys(name)
         self.rotation_manager.unload(name)
-        storage.delete_rotation(name, rotation.folder)
+        storage.trash_rotation(name, rotation.folder)
         self._refresh_rotation_tree()
         self._new_rotation()
         self._sweep_templates()
+
+    def _on_restore_last_deleted_clicked(self):
+        pending = storage.peek_trashed_rotation()
+        if pending is None:
+            return  # the menu item is disabled in this state -- shouldn't be reachable
+        if pending.name in self.rotations and self.rotations[pending.name].folder == pending.folder:
+            messagebox.showerror(
+                "Cannot restore",
+                f"A rotation named '{pending.name}' already exists in "
+                f"'{pending.folder or '(ungrouped)'}' -- rename or move it out of the way first.")
+            return
+        restored = storage.restore_last_trashed()
+        self.rotations[restored.name] = restored
+        self.rotation_manager.load(restored)
+        if self._rotation_hotkeys_should_be_live(restored):
+            self._bind_rotation_hotkeys(restored)
+        self._refresh_rotation_tree()
+        messagebox.showinfo("Restored", f"'{restored.name}' restored to '{restored.folder or '(ungrouped)'}'.")
+
+    def _on_export_rotation_clicked(self):
+        """Bundles the selected rotation's JSON plus every image-match
+        template it references into one zip file the user picks a
+        destination for -- see storage.export_rotation_bundle. Native
+        (unthemed) file-save dialog: platform file pickers are expected to
+        look like the OS, not the app."""
+        name = self._selected_rotation_name()
+        if name is None:
+            messagebox.showinfo("No rotation selected", "Select a rotation in the list first.")
+            return
+        dest_path = filedialog.asksaveasfilename(
+            parent=self, title="Export Rotation", initialfile=f"{name}.zip",
+            defaultextension=".zip", filetypes=[("Rotation bundle", "*.zip")])
+        if not dest_path:
+            return
+        try:
+            storage.export_rotation_bundle(self.rotations[name], dest_path)
+        except OSError as e:
+            messagebox.showerror("Export failed", f"Could not write '{dest_path}':\n{e}")
+            return
+        messagebox.showinfo("Export complete", f"'{name}' exported to:\n{dest_path}")
+
+    def _on_import_rotation_clicked(self):
+        """Imports a bundle written by Export -- see
+        storage.import_rotation_bundle. Hotkey/cancel/reset/pause keys are
+        cleared regardless of what the bundle carried: another person's
+        keybinds mean nothing on this machine, and silently reusing them
+        risks colliding with (or shadowing) whatever those same keys
+        already do for one of this user's OWN rotations."""
+        src_path = filedialog.askopenfilename(
+            parent=self, title="Import Rotation", filetypes=[("Rotation bundle", "*.zip"), ("All files", "*.*")])
+        if not src_path:
+            return
+        try:
+            rotation = storage.import_rotation_bundle(src_path)
+        except Exception as e:
+            # Deliberately broad -- this accepts an arbitrary externally-sourced
+            # file, which can fail in any of zipfile's/json's/Rotation.from_dict's
+            # own exception types for something that isn't actually a bundle at
+            # all, not just the couple storage.py's own loaders normally guard
+            # against.
+            messagebox.showerror("Import failed", f"Could not import '{src_path}':\n{e}")
+            return
+        rotation.name = self._unique_rotation_name(rotation.name)
+        rotation.hotkey = rotation.alt_hotkey = None
+        rotation.cancel_key = rotation.alt_cancel_key = None
+        rotation.reset_key = rotation.alt_reset_key = None
+        rotation.pause_key = rotation.alt_pause_key = None
+        self._load_rotation_into_form(rotation)
+        self.rotation_tree.selection_remove(*self.rotation_tree.selection())
+        self._autosave()
+        self._sweep_templates()
+        messagebox.showinfo(
+            "Import complete",
+            f"Imported as '{rotation.name}'. Bind its Hotkey (and Cancel/Reset/Pause, if you want them) before "
+            "using it -- none carried over from the export.")

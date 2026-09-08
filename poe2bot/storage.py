@@ -1,9 +1,11 @@
 import json
 import os
 import re
+import zipfile
+from typing import Optional
 
-from poe2bot import config
-from poe2bot.models import Rotation
+from poe2bot import config, templates
+from poe2bot.models import Rotation, iter_conditions
 
 _ILLEGAL_FOLDER_CHARS = re.compile(r'[<>:"|?*\\\x00-\x1f]')
 
@@ -51,20 +53,33 @@ def _iter_rotation_files():
                 yield os.path.join(dirpath, filename), folder
 
 
-def list_rotations() -> list:
-    names = []
+def _try_load_rotation(path: str) -> Optional[Rotation]:
+    """load_rotation_from_file(path), or None if it fails to parse -- shared
+    failure handling for list_rotations()/load_all_rotations()/
+    has_unparseable_rotations(), all of which must tolerate one bad rotation
+    file without crashing or silently corrupting output for the rest.
+    TypeError included alongside the obvious parse-failure types because
+    dict.get(key, default) only substitutes `default` when `key` is *absent*
+    -- an explicit JSON null (e.g. a hand-edited "delay_ms": null) makes
+    int(None)/tuple(None-ish) raise TypeError instead."""
+    try:
+        return load_rotation_from_file(path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _iter_loaded_rotations():
+    """Yield (rotation, folder) for every rotation file under ROTATIONS_DIR
+    that parses successfully, silently skipping any that don't -- shared by
+    list_rotations() and load_all_rotations()."""
     for path, folder in _iter_rotation_files():
-        try:
-            rotation = load_rotation_from_file(path)
-        except (OSError, ValueError, KeyError, TypeError):
-            # TypeError included alongside the obvious parse-failure types because
-            # dict.get(key, default) only substitutes `default` when `key` is
-            # *absent* -- an explicit JSON null (e.g. a hand-edited "delay_ms":
-            # null) makes int(None)/tuple(None-ish) raise TypeError instead, and
-            # one bad file must not take down every other valid rotation with it.
-            continue
-        names.append(rotation.name)
-    return names
+        rotation = _try_load_rotation(path)
+        if rotation is not None:
+            yield rotation, folder
+
+
+def list_rotations() -> list:
+    return [rotation.name for rotation, _folder in _iter_loaded_rotations()]
 
 
 def load_rotation_from_file(path: str) -> Rotation:
@@ -80,16 +95,7 @@ def load_rotation(name: str, folder: str = "") -> Rotation:
 
 def load_all_rotations() -> dict:
     rotations = {}
-    for path, folder in _iter_rotation_files():
-        try:
-            rotation = load_rotation_from_file(path)
-        except (OSError, ValueError, KeyError, TypeError):
-            # TypeError included alongside the obvious parse-failure types because
-            # dict.get(key, default) only substitutes `default` when `key` is
-            # *absent* -- an explicit JSON null (e.g. a hand-edited "delay_ms":
-            # null) makes int(None)/tuple(None-ish) raise TypeError instead, and
-            # one bad file must not take down every other valid rotation with it.
-            continue
+    for rotation, folder in _iter_loaded_rotations():
         rotation.folder = folder
         rotations[rotation.name] = rotation
     return rotations
@@ -111,6 +117,80 @@ def delete_rotation(name: str, folder: str = "") -> None:
     _prune_empty_dirs(folder)
 
 
+_TRASH_PATH = os.path.join(config.TRASH_DIR, "last_deleted.json")
+
+
+def trash_rotation(name: str, folder: str) -> None:
+    """Moves name/folder's rotation file into a single-slot trash instead
+    of deleting it outright -- a lightweight "undo my last delete" safety
+    net for RotationListMixin._delete_rotation, since there's no undo
+    anywhere else in this app and autosave means every edit already
+    reaches disk instantly. Only the MOST RECENT deletion is recoverable --
+    trashing a second rotation permanently discards whatever was in the
+    slot before it; this is a quick "did I mean to click that?" undo, not a
+    full recycle bin. The rotation's original folder (never itself part of
+    the normal JSON shape -- see Rotation.folder's own docstring) is
+    stashed under an extra "_trashed_from_folder" key that Rotation.from_dict
+    simply ignores, so restore_last_trashed() can put it back exactly where
+    it came from."""
+    src_path = path_for(name, folder)
+    with open(src_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["_trashed_from_folder"] = folder
+    os.makedirs(config.TRASH_DIR, exist_ok=True)
+    tmp_path = _TRASH_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, _TRASH_PATH)
+    os.remove(src_path)
+    _prune_empty_dirs(folder)
+
+
+def peek_trashed_rotation() -> Optional[Rotation]:
+    """The rotation currently sitting in the trash slot, with .folder
+    restored to wherever it was trashed from -- or None if the slot is
+    empty or its file fails to parse. Used both to populate "Restore Last
+    Deleted" and, via trashed_rotation_templates() below, to keep the
+    template GC from deleting anything it still references."""
+    if not os.path.isfile(_TRASH_PATH):
+        return None
+    try:
+        with open(_TRASH_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        rotation = Rotation.from_dict(data)
+        rotation.folder = data.get("_trashed_from_folder", "")
+        return rotation
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def restore_last_trashed() -> Optional[Rotation]:
+    """Moves whatever's in the trash slot back into ROTATIONS_DIR at its
+    original folder, and clears the slot. None (no-op) if the slot is
+    empty or its file fails to parse -- callers should check
+    peek_trashed_rotation() first (and warn about a name/folder collision
+    with something the user kept in the meantime) rather than assuming this
+    always succeeds."""
+    rotation = peek_trashed_rotation()
+    if rotation is None:
+        return None
+    save_rotation(rotation)
+    os.remove(_TRASH_PATH)
+    return rotation
+
+
+def trashed_rotation_templates() -> set:
+    """Every image-match template filename referenced by whatever's
+    currently in the trash slot, or an empty set if it's empty/unreadable
+    -- folded into ConditionsMixin._referenced_templates() so the periodic
+    sweep never deletes a template "Restore Last Deleted" would still
+    need."""
+    rotation = peek_trashed_rotation()
+    if rotation is None:
+        return set()
+    return {c.template for c in iter_conditions(rotation.steps) if c.template}
+
+
 def move_rotation(rotation: Rotation, old_name: str, old_folder: str) -> None:
     """Rename/move a rotation from (old_name, old_folder) to rotation's
     current name/folder. Writes the new file *before* removing the old one --
@@ -127,6 +207,51 @@ def move_rotation(rotation: Rotation, old_name: str, old_folder: str) -> None:
         delete_rotation(old_name, old_folder)
 
 
+def export_rotation_bundle(rotation: Rotation, dest_path: str) -> None:
+    """Writes `rotation` (as the exact same JSON shape as its own on-disk
+    file) plus every image-match template it references into one zip file
+    at dest_path -- for sharing a rotation with someone else without also
+    needing to separately locate and copy its matching templates/*.png
+    files by hand (a pixel/timer condition needs no such file, so this is
+    a no-op for those). See import_rotation_bundle for the other half."""
+    template_filenames = {c.template for c in iter_conditions(rotation.steps) if c.template}
+    with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("rotation.json", json.dumps(rotation.to_dict(), indent=2))
+        for filename in template_filenames:
+            path = templates.template_path(filename)
+            if os.path.isfile(path):
+                zf.write(path, arcname=f"templates/{filename}")
+
+
+def import_rotation_bundle(src_path: str) -> Rotation:
+    """Reads a bundle written by export_rotation_bundle(): copies every
+    template PNG it contains into the real templates/ directory under a
+    FRESH random filename (never reusing the one it had in the zip -- see
+    templates.import_template_bytes), rewriting the returned Rotation's own
+    condition.template references to match. The rotation's hotkey/cancel/
+    reset/pause keys and folder are the caller's decision, not this
+    function's -- see RotationListMixin._on_import_rotation_clicked, which
+    clears the former (another person's keybinds mean nothing on this
+    machine) and leaves the latter at Rotation's own default (ungrouped).
+
+    Raises the same exceptions a corrupt rotation JSON file already would
+    (BadZipFile/KeyError/ValueError/etc. from json.loads()/Rotation.from_dict())
+    for a file that isn't actually one of these bundles -- callers should
+    catch broadly, same as any other "load something a user handed us" path."""
+    with zipfile.ZipFile(src_path, "r") as zf:
+        data = json.loads(zf.read("rotation.json").decode("utf-8"))
+        rotation = Rotation.from_dict(data)
+        rename_map = {}
+        for name in zf.namelist():
+            if name.startswith("templates/") and not name.endswith("/"):
+                old_filename = name[len("templates/"):]
+                rename_map[old_filename] = templates.import_template_bytes(zf.read(name))
+    for condition in iter_conditions(rotation.steps):
+        if condition.template in rename_map:
+            condition.template = rename_map[condition.template]
+    return rotation
+
+
 def has_unparseable_rotations() -> bool:
     """True if any rotation JSON file under ROTATIONS_DIR currently fails to
     load. Used to make the template GC abstain rather than risk deleting a
@@ -134,12 +259,7 @@ def has_unparseable_rotations() -> bool:
     rotation still references -- a broken file's own template references
     never make it into the "still referenced" set the sweep uses, since
     list_rotations()/load_all_rotations() silently skip it."""
-    for path, _folder in _iter_rotation_files():
-        try:
-            load_rotation_from_file(path)
-        except (OSError, ValueError, KeyError, TypeError):
-            return True
-    return False
+    return any(_try_load_rotation(path) is None for path, _folder in _iter_rotation_files())
 
 
 def _prune_empty_dirs(folder: str) -> None:

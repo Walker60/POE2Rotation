@@ -5,6 +5,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROTATIONS_DIR = os.path.join(BASE_DIR, "rotations")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+TRASH_DIR = os.path.join(BASE_DIR, "trash")   # single-slot "undo last delete" -- see storage.trash_rotation
 
 # Verify the exact executable name via Task Manager > Details while POE2 is running --
 # it may be PathOfExileSteam.exe / PathOfExile_x64.exe / PathOfExile_KG.exe depending on

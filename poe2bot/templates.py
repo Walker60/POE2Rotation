@@ -20,6 +20,21 @@ def template_path(filename: str) -> str:
     return os.path.join(config.TEMPLATES_DIR, filename)
 
 
+def import_template_bytes(data: bytes) -> str:
+    """Writes `data` (raw PNG bytes read from an imported rotation bundle --
+    see storage.import_rotation_bundle) into TEMPLATES_DIR under a FRESH
+    random filename, never whatever name it arrived with -- so importing
+    the same bundle twice, or importing on a machine that happens to
+    already have an unrelated template with the same random-looking name,
+    can never collide with or silently overwrite an existing file. Returns
+    the new filename."""
+    ensure_dir()
+    new_filename = new_template_filename()
+    with open(template_path(new_filename), "wb") as f:
+        f.write(data)
+    return new_filename
+
+
 def delete_template(filename) -> None:
     """No-op if filename is falsy or the file is already gone."""
     if not filename:
