@@ -539,7 +539,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Button(condition_btns, text="Paste Conditions",
                    command=self._on_paste_conditions_clicked).pack(side="left", padx=(0, 4))
         ttk.Label(condition_btns,
-                  text="(double-click a condition in the list to recalibrate its match;"
+                  text="(with a condition selected, Add Image/Pixel/Timer Condition recalibrates it"
+                       " instead of adding a new one -- same as double-clicking it;"
                        " use Move Up/Move Down in Skill Steps to reorder it)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
@@ -608,7 +609,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                    command=self._on_add_pixel_condition_group_clicked).pack(side="left", padx=(0, 4))
         ttk.Label(group_action_btns,
                   text="(gates a whole block of steps at once -- select it, then Add Step/Add Sleep in"
-                       " Skill Steps, or drag an existing step onto it, to nest steps under it)",
+                       " Skill Steps, or drag an existing step onto it, to nest steps under it; with a"
+                       " group selected, these buttons recalibrate it instead of adding a new one)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         group_name_row = ttk.Frame(self.rotation_conditions_section.body)

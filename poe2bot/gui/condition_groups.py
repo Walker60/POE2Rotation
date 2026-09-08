@@ -19,12 +19,35 @@ class ConditionGroupsMixin:
     _start_image_capture/_start_pixel_capture via the on_use callback,
     exactly like ConditionsMixin does for a step's own conditions."""
 
+    def _selected_group_location(self):
+        """The top-level index of the condition group whose own header row
+        is currently selected, or None (a step/condition row, nothing, or a
+        multi-selection). Used by the Add Condition Group (Image)/(Pixel)
+        buttons to decide whether they're adding a brand new group or
+        recalibrating the one that's already selected -- see
+        _on_add_image_condition_group_clicked below."""
+        selection = self.tree.selection()
+        if len(selection) != 1:
+            return None
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None or parsed[1] is not None:
+            return None
+        return parsed[0]
+
     def _on_add_image_condition_group_clicked(self):
+        group_idx = self._selected_group_location()
+        if group_idx is not None:
+            self._recalibrate_group(group_idx, "image")
+            return
         self._start_image_capture(on_use=lambda filename, region, confidence, search_mode, search_region: self._append_condition_group(
             Condition(match_type="image", template=filename, region=region, confidence=confidence,
                       search_mode=search_mode, search_region=search_region)))
 
     def _on_add_pixel_condition_group_clicked(self):
+        group_idx = self._selected_group_location()
+        if group_idx is not None:
+            self._recalibrate_group(group_idx, "pixel")
+            return
         self._start_pixel_capture(on_use=lambda point, color, confidence: self._append_condition_group(
             Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)))
 
@@ -114,16 +137,29 @@ class ConditionGroupsMixin:
         self._update_group_row(group_idx)
         return True
 
-    # ---- recalibrating a group's match (double-click its row) ---------------
+    # ---- recalibrating a group's match (double-click its row, or the Add ----
+    # ---- Condition Group buttons while that group is already selected) ------
 
     def _on_group_row_double_click(self, group_idx: int):
         """Double-clicking a condition group's own row recalibrates its
-        match in place -- same capture flow as creating one, but replacing
-        rather than appending -- exactly like recalibrating a step's
-        condition does (see ConditionsMixin._on_tree_double_click, which
-        dispatches here for a group row). Name/Action/Negate carry over
-        unchanged; a group's condition is never match_type "timer", so
-        there's no timer branch to handle here."""
+        match in place, always using whichever match_type it already has --
+        exactly like recalibrating a step's condition does (see
+        ConditionsMixin._on_tree_double_click, which dispatches here for a
+        group row). The Add Condition Group (Image)/(Pixel) buttons share
+        the same underlying recalibrate (_recalibrate_group) when a group
+        is already selected, but let the clicked button's type override
+        this, which is how an existing group gets converted from one match
+        type to the other."""
+        group = self.editing_steps[group_idx]
+        self._recalibrate_group(group_idx, group.condition.match_type)
+
+    def _recalibrate_group(self, group_idx: int, match_type: str):
+        """Recalibrates group_idx's condition as `match_type` -- switching
+        type first if that's not what it already had -- carrying over its
+        Name/Action/Negate unchanged, since recalibrating (like a step's
+        own condition) is only ever meant to fix *what's being matched*,
+        not *what happens when it matches*. A group's condition is never
+        match_type "timer", so there's no timer branch to handle here."""
         group = self.editing_steps[group_idx]
         condition = group.condition
 
@@ -133,10 +169,11 @@ class ConditionGroupsMixin:
             new_condition.action = condition.action
             group.condition = new_condition
             self._refresh_steps_tree()
+            self.tree.selection_set(f"group-{group_idx}")
             self._populate_group_condition_form(group)
             self._autosave()
 
-        if condition.match_type == "pixel":
+        if match_type == "pixel":
             self._start_pixel_capture(
                 on_use=lambda point, color, confidence: replace(
                     Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)),

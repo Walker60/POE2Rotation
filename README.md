@@ -100,10 +100,19 @@ Three ways to calibrate what a condition actually matches against:
   seconds since this step's own last actual fire. Useful for a plain cooldown
   gate that has no reliable on-screen indicator to check instead.
 
+With no condition selected (or a step's own row selected instead), all three
+add a brand new condition. **With an existing condition selected, these same
+three buttons instead recalibrate *that* condition's match** — exactly like
+double-clicking it — rather than adding another one; clicking a different one
+of the three (e.g. Add Image Condition on a currently pixel-based condition)
+converts it to that type. Either way, Name/Action/Negate/Wait/Hold/Delay
+carry over unchanged, since recalibrating (by button or double-click) only
+ever changes *what's being matched*, never what happens when it matches.
+
 A newly added condition defaults to **Execute Step** with no wait — exactly
 an always-instant gate. Select it (it's auto-selected right after adding) to
-change its Action, Name, Negate, or the fields below, then click **Update
-Selected Condition** to apply.
+change its Action, Name, Negate, or the fields below — there's no separate
+apply step, every change saves as you make it.
 
 **An "Execute Step" condition can optionally wait instead of failing
 instantly.** Set **Wait up to (ms)** above 0 and, if the condition doesn't
@@ -223,17 +232,20 @@ condition is always a single, instant check. Groups never nest inside each
 other; a group holds steps directly.
 
 **Add Condition Group (Image)...**/**Add Condition Group (Pixel)...** (in
-the **Rotation Conditions** section) calibrate the group's condition
-exactly like adding a step's own Image/Pixel Condition does, then add a
-new, empty group to the end of the step list — select it afterward to set
-its Name/Action/Negate right there in Rotation Conditions and click
-**Update Selected Condition Group** to apply. Unlike Selected Step/Skill
-Conditions (which hide while a group's own row is selected, since a group
-has no Key/Delay/Hold/Repeat/per-step Conditions of its own), Rotation
-Conditions stays visible no matter what's selected — its Name/Action/Negate
-fields just blank out until a group is actually selected. Double-click a
-group's row to recalibrate its match, the same as double-clicking a step's
-condition.
+the **Rotation Conditions** section), with no group selected, calibrate a
+new condition exactly like adding a step's own Image/Pixel Condition does
+and add a new, empty group to the end of the step list — select it
+afterward to set its Name/Action/Negate right there in Rotation Conditions,
+which saves as you type, no separate apply step. **With an existing group's
+own row already selected, these same two buttons instead recalibrate that
+group's match** — converting it to Image or Pixel as needed — rather than
+adding another group; Name/Action/Negate carry over unchanged. Unlike
+Selected Step/Skill Conditions (which hide while a group's own row is
+selected, since a group has no Key/Delay/Hold/Repeat/per-step Conditions of
+its own), Rotation Conditions stays visible no matter what's selected — its
+Name/Action/Negate fields just blank out until a group is actually
+selected. Double-clicking a group's row also recalibrates it, the same as
+double-clicking a step's condition, always keeping its current match type.
 
 Steps end up nested under a group two ways: select the group (or one of its
 own nested steps/conditions) and click **Add Step**/**Add Sleep**, which

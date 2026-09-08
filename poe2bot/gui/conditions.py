@@ -29,37 +29,113 @@ class ConditionsMixin:
     rotation-level Condition Group concept (one condition gating a whole
     block of steps rather than one step's own conditions)."""
 
+    def _selected_condition_location(self):
+        """(group_idx, step_idx, cond_idx) if exactly one condition row is
+        currently selected, else None (a step's own row, a condition
+        group's own row, nothing, or a multi-selection). Used by the Add
+        Image/Pixel/Timer Condition buttons to decide whether they're
+        adding a brand new condition or recalibrating/replacing the one
+        that's already selected -- see _add_or_recalibrate_condition."""
+        selection = self.tree.selection()
+        if len(selection) != 1:
+            return None
+        parsed = self._parse_tree_iid(selection[0])
+        if parsed is None or parsed[2] is None:
+            return None
+        return parsed
+
     def _on_add_image_condition_clicked(self):
-        location = self._selected_owning_step_location()
-        if location is None:
-            return
-        group_idx, step_idx = location
-        self._start_image_capture(on_use=lambda filename, region, confidence, search_mode, search_region: self._add_condition(
-            group_idx, step_idx, Condition(match_type="image", template=filename, region=region, confidence=confidence,
-                                            search_mode=search_mode, search_region=search_region)))
+        self._add_or_recalibrate_condition("image")
 
     def _on_add_pixel_condition_clicked(self):
-        location = self._selected_owning_step_location()
-        if location is None:
-            return
-        group_idx, step_idx = location
-        self._start_pixel_capture(on_use=lambda point, color, confidence: self._add_condition(
-            group_idx, step_idx, Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)))
+        self._add_or_recalibrate_condition("pixel")
+
+    def _add_or_recalibrate_condition(self, match_type: str):
+        """Shared by "Add Image Condition..."/"Add Pixel Condition...": with
+        a condition already selected, this recalibrates it in place as
+        `match_type` -- switching type if that's not what it already was --
+        carrying over its Name/Action/Negate/Timeout/Hold/Delay unchanged,
+        exactly like double-clicking a condition row (_on_tree_double_click)
+        except the new match type comes from whichever button was clicked
+        rather than always matching what the condition already had, so this
+        also doubles as how an existing condition gets converted from one
+        match type to the other. With nothing (or a step's own row, or a
+        condition group's row) selected, this instead adds a brand new
+        condition to whichever step is in scope, exactly as before."""
+        selected = self._selected_condition_location()
+        if selected is not None:
+            group_idx, step_idx, cond_idx = selected
+            old_condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
+            apply = self._replacing_condition_applier(group_idx, step_idx, cond_idx, old_condition)
+            default_confidence = old_condition.confidence
+        else:
+            location = self._selected_owning_step_location()
+            if location is None:
+                return
+            group_idx, step_idx = location
+            apply = lambda new_condition: self._add_condition(group_idx, step_idx, new_condition)  # noqa: E731
+            default_confidence = 0.9
+
+        if match_type == "pixel":
+            self._start_pixel_capture(
+                on_use=lambda point, color, confidence: apply(
+                    Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)),
+                default_confidence=default_confidence)
+        else:
+            self._start_image_capture(
+                on_use=lambda filename, region, confidence, search_mode, search_region: apply(
+                    Condition(match_type="image", template=filename, region=region, confidence=confidence,
+                              search_mode=search_mode, search_region=search_region)),
+                default_confidence=default_confidence)
 
     def _on_add_timer_condition_clicked(self):
         # No screen capture needed -- unlike image/pixel, the value is just
         # typed in directly, so this skips CalibrationMixin's overlay flow
         # entirely.
-        location = self._selected_owning_step_location()
-        if location is None:
-            return
-        group_idx, step_idx = location
+        selected = self._selected_condition_location()
+        if selected is not None:
+            group_idx, step_idx, cond_idx = selected
+            old_condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
+            title, initial = "Edit Timer Condition", (old_condition.timer_seconds or 5.0)
+        else:
+            location = self._selected_owning_step_location()
+            if location is None:
+                return
+            group_idx, step_idx = location
+            old_condition = None
+            title, initial = "Add Timer Condition", 5.0
         seconds = messagebox.askfloat(
-            "Add Timer Condition", "Minimum seconds since this step's last use:",
-            initialvalue=5.0, minvalue=0.1, parent=self)
+            title, "Minimum seconds since this step's last use:",
+            initialvalue=initial, minvalue=0.1, parent=self)
         if seconds is None:
             return
-        self._add_condition(group_idx, step_idx, Condition(match_type="timer", timer_seconds=seconds))
+        new_condition = Condition(match_type="timer", timer_seconds=seconds)
+        if old_condition is not None:
+            self._replacing_condition_applier(group_idx, step_idx, selected[2], old_condition)(new_condition)
+        else:
+            self._add_condition(group_idx, step_idx, new_condition)
+
+    def _replacing_condition_applier(self, group_idx, step_idx: int, cond_idx: int, old_condition: Condition):
+        """Returns a function that carries old_condition's Name/Action/
+        Negate/Timeout/Hold/Delay onto whichever new Condition it's called
+        with, then replaces (group_idx, step_idx, cond_idx) with it,
+        reselects that same row (the tree's own full-rebuild refresh below
+        would otherwise leave it looking deselected), and autosaves. Shared
+        by _add_or_recalibrate_condition/_on_add_timer_condition_clicked
+        (an existing condition selected) and _on_tree_double_click (below)."""
+        def apply(new_condition: Condition):
+            new_condition.name = old_condition.name
+            new_condition.negate = old_condition.negate
+            new_condition.action = old_condition.action
+            new_condition.timeout_ms = old_condition.timeout_ms
+            new_condition.hold_ms = old_condition.hold_ms
+            new_condition.delay_ms = old_condition.delay_ms
+            self._steps_list_for(group_idx)[step_idx].conditions[cond_idx] = new_condition
+            self._refresh_steps_tree()
+            self.tree.selection_set(self._location_iid(group_idx, step_idx, cond_idx))
+            self._populate_condition_form(new_condition)
+            self._autosave()
+        return apply
 
     def _add_condition(self, group_idx, step_idx: int, condition: Condition):
         """Appends `condition` (default action="fire", exactly today's plain
@@ -191,18 +267,7 @@ class ConditionsMixin:
         if cond_idx is None:
             return
         condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
-
-        def replace(new_condition: Condition):
-            new_condition.name = condition.name
-            new_condition.negate = condition.negate
-            new_condition.action = condition.action
-            new_condition.timeout_ms = condition.timeout_ms
-            new_condition.hold_ms = condition.hold_ms
-            new_condition.delay_ms = condition.delay_ms
-            self._steps_list_for(group_idx)[step_idx].conditions[cond_idx] = new_condition
-            self._refresh_steps_tree()
-            self._populate_condition_form(new_condition)
-            self._autosave()
+        replace = self._replacing_condition_applier(group_idx, step_idx, cond_idx, condition)
 
         if condition.match_type == "timer":
             seconds = messagebox.askfloat(
