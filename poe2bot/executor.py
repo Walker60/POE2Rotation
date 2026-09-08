@@ -112,6 +112,17 @@ def _current_game_window_size():
     return _cached_game_window_size
 
 
+def _invalidate_game_window_size_cache():
+    """Forces the next _current_game_window_size() call to do a fresh
+    lookup instead of trusting the cache -- called when the game regains
+    OS focus (see RotationRunner._wait_for_focus_or_stop), since that's
+    exactly when a resize that happened while the game was unfocused (e.g.
+    the user alt-tabbed away, resized it, and came back) would otherwise
+    take up to _GAME_WINDOW_SIZE_CACHE_S to be picked up."""
+    global _cached_game_window_size_at
+    _cached_game_window_size_at = 0.0
+
+
 def _rescaled_point(pixel_pos, calib_width: Optional[int], calib_height: Optional[int]):
     """pixel_pos rescaled from a (calib_width, calib_height) reference
     screen to the game window's CURRENT client size, if there's actually a
@@ -813,6 +824,10 @@ class RotationRunner:
             if self._stop_event.wait(timeout=_INTERRUPT_POLL_S):
                 return False
         if notified_waiting:
+            # A resize that happened while unfocused (alt-tabbed away, resized,
+            # tabbed back) should be picked up right away, not wait out however
+            # much of _GAME_WINDOW_SIZE_CACHE_S happens to be left.
+            _invalidate_game_window_size_cache()
             self._notify(STATUS_RUNNING)
             self._notify_activity("Game focus regained, resuming")
         return True

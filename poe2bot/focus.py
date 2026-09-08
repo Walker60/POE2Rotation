@@ -26,6 +26,10 @@ _is_window_visible = ctypes.windll.user32.IsWindowVisible
 _is_window_visible.restype = wintypes.BOOL
 _is_window_visible.argtypes = [wintypes.HWND]
 
+_is_iconic = ctypes.windll.user32.IsIconic
+_is_iconic.restype = wintypes.BOOL
+_is_iconic.argtypes = [wintypes.HWND]
+
 _get_client_rect = ctypes.windll.user32.GetClientRect
 _get_client_rect.restype = wintypes.BOOL
 _get_client_rect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
@@ -37,6 +41,7 @@ _enum_windows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
 
 _cached_pid = None
 _warned_no_process = False
+_warned_no_window = False
 
 
 def reset_process_cache():
@@ -84,6 +89,29 @@ def is_game_focused() -> bool:
     return focused
 
 
+def _client_size_if_valid(hwnd, pid):
+    """(width, height) of hwnd's client area if it's a visible, non-
+    minimized top-level window actually owned by `pid` with a sane
+    (nonzero) size -- else None. Shared by game_window_client_size()'s
+    focused-window fast path and its EnumWindows fallback below, so both
+    apply exactly the same "is this actually usable" checks. Minimized is
+    excluded because IsWindowVisible alone stays true for a minimized
+    window, whose reported client rect isn't a meaningful screen size."""
+    if not hwnd or not _is_window_visible(hwnd) or _is_iconic(hwnd):
+        return None
+    owner_pid = wintypes.DWORD(0)
+    _get_window_thread_process_id(hwnd, ctypes.byref(owner_pid))
+    if owner_pid.value != pid:
+        return None
+    rect = wintypes.RECT()
+    if not _get_client_rect(hwnd, ctypes.byref(rect)):
+        return None
+    width, height = rect.right - rect.left, rect.bottom - rect.top
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
 def game_window_client_size():
     """(width, height) of the configured game process's main window client
     area (i.e. its actual rendering surface, excluding the title bar/
@@ -97,34 +125,44 @@ def game_window_client_size():
     this doesn't require the game to currently have OS foreground focus,
     since calibration hides the bot's own window (and briefly shows a
     capture overlay) rather than necessarily leaving the game focused at
-    the exact instant a screenshot is taken. Finds the game's window by
-    enumerating every top-level window and keeping whichever visible one
-    (owned by the game's pid) has the largest client area -- a simple, but
-    effective, heuristic for "the main window" that also tolerates a
-    process owning multiple windows (e.g. a small launcher/overlay
-    window)."""
+    the exact instant a screenshot is taken.
+
+    Prefers whichever window currently has OS focus, if it's the game's --
+    the most direct available signal of "this is the window actually being
+    looked at right now," and immune to a same-process launcher/overlay
+    window ever being mistaken for the main one the way a pure size-based
+    heuristic could be. Only when the game isn't currently focused (as at
+    calibration time, per above) does this fall back to enumerating every
+    top-level window and keeping whichever visible, non-minimized one
+    (owned by the game's pid) has the largest client area."""
+    global _warned_no_window
     pid = _game_pid()
     if not pid:
         return None
+
+    focused = _client_size_if_valid(_get_foreground_window(), pid)
+    if focused is not None:
+        _warned_no_window = False
+        return focused
+
     best = None
 
     def callback(hwnd, _lparam):
         nonlocal best
-        if not _is_window_visible(hwnd):
-            return True
-        owner_pid = wintypes.DWORD(0)
-        _get_window_thread_process_id(hwnd, ctypes.byref(owner_pid))
-        if owner_pid.value != pid:
-            return True
-        rect = wintypes.RECT()
-        if not _get_client_rect(hwnd, ctypes.byref(rect)):
-            return True
-        width, height = rect.right - rect.left, rect.bottom - rect.top
-        if width <= 0 or height <= 0:
-            return True
-        if best is None or width * height > best[0] * best[1]:
-            best = (width, height)
+        size = _client_size_if_valid(hwnd, pid)
+        if size is not None and (best is None or size[0] * size[1] > best[0] * best[1]):
+            best = size
         return True
 
     _enum_windows(_WNDENUMPROC(callback), 0)
+    if best is None:
+        if not _warned_no_window:
+            log.warning(
+                f"game process '{config.GAME_PROCESS_NAME}' found (pid={pid}) but no suitably-sized "
+                f"visible window -- calibrated conditions won't be rescaled for this screen until "
+                f"one is found (expected while the game is still loading, otherwise check it isn't "
+                f"minimized)")
+            _warned_no_window = True
+    else:
+        _warned_no_window = False
     return best
