@@ -22,6 +22,19 @@ _get_window_thread_process_id = ctypes.windll.user32.GetWindowThreadProcessId
 _get_window_thread_process_id.restype = wintypes.DWORD
 _get_window_thread_process_id.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 
+_is_window_visible = ctypes.windll.user32.IsWindowVisible
+_is_window_visible.restype = wintypes.BOOL
+_is_window_visible.argtypes = [wintypes.HWND]
+
+_get_client_rect = ctypes.windll.user32.GetClientRect
+_get_client_rect.restype = wintypes.BOOL
+_get_client_rect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+
+_WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+_enum_windows = ctypes.windll.user32.EnumWindows
+_enum_windows.restype = wintypes.BOOL
+_enum_windows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+
 _cached_pid = None
 _warned_no_process = False
 
@@ -69,3 +82,49 @@ def is_game_focused() -> bool:
     if not focused:
         log.debug(f"foreground window belongs to pid={fg_pid.value}, game pid={pid} -- not focused")
     return focused
+
+
+def game_window_client_size():
+    """(width, height) of the configured game process's main window client
+    area (i.e. its actual rendering surface, excluding the title bar/
+    borders) -- the reference frame poe2bot/scaling.py rescales a
+    calibrated condition against so it still lines up after moving to a
+    different monitor/computer at a different resolution or aspect ratio.
+    None if the game process can't be found, or has no suitably-sized
+    visible top-level window (e.g. it's still loading).
+
+    Deliberately independent of is_game_focused() -- unlike that check,
+    this doesn't require the game to currently have OS foreground focus,
+    since calibration hides the bot's own window (and briefly shows a
+    capture overlay) rather than necessarily leaving the game focused at
+    the exact instant a screenshot is taken. Finds the game's window by
+    enumerating every top-level window and keeping whichever visible one
+    (owned by the game's pid) has the largest client area -- a simple, but
+    effective, heuristic for "the main window" that also tolerates a
+    process owning multiple windows (e.g. a small launcher/overlay
+    window)."""
+    pid = _game_pid()
+    if not pid:
+        return None
+    best = None
+
+    def callback(hwnd, _lparam):
+        nonlocal best
+        if not _is_window_visible(hwnd):
+            return True
+        owner_pid = wintypes.DWORD(0)
+        _get_window_thread_process_id(hwnd, ctypes.byref(owner_pid))
+        if owner_pid.value != pid:
+            return True
+        rect = wintypes.RECT()
+        if not _get_client_rect(hwnd, ctypes.byref(rect)):
+            return True
+        width, height = rect.right - rect.left, rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            return True
+        if best is None or width * height > best[0] * best[1]:
+            best = (width, height)
+        return True
+
+    _enum_windows(_WNDENUMPROC(callback), 0)
+    return best

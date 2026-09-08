@@ -3,8 +3,8 @@ from tkinter import ttk
 
 import pyautogui
 
-from poe2bot import templates
-from poe2bot.executor import check_condition_now
+from poe2bot import focus, templates
+from poe2bot.executor import calibration_scale_note, check_condition_now, rescaled_pixel_pos
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
 from poe2bot.gui.overlays import RegionCaptureOverlay, PointCaptureOverlay
@@ -92,8 +92,22 @@ class CalibrationMixin:
             self.deiconify()
             messagebox.showerror("Calibration failed", f"Could not capture the region:\n{e}")
             return
+        self._last_calib_size = focus.game_window_client_size()
         self.deiconify()
         self._show_image_match_preview(filename, region, on_use, default_confidence)
+
+    def _calib_size_kwargs(self) -> dict:
+        """calib_width/calib_height kwargs for a freshly-constructed
+        Condition, from whatever _last_calib_size was captured at the most
+        recent screenshot (_take_image_match_screenshot/
+        _sample_pixel_color) -- shared by every Condition(...) construction
+        site in ConditionsMixin/ConditionGroupsMixin so they don't each
+        need to unpack the None-or-(w, h) tuple themselves. None/None (no
+        rescaling reference recorded) if the game window couldn't be found
+        at calibration time -- matches this condition's behavior before
+        poe2bot/scaling.py existed."""
+        width, height = self._last_calib_size or (None, None)
+        return {"calib_width": width, "calib_height": height}
 
     def _build_preview_dialog(self, title: str) -> tk.Toplevel:
         """Shared Toplevel setup behind _show_image_match_preview() and
@@ -258,6 +272,7 @@ class CalibrationMixin:
             self.deiconify()
             messagebox.showerror("Calibration failed", f"Could not sample the pixel:\n{e}")
             return
+        self._last_calib_size = focus.game_window_client_size()
         self.deiconify()
         self._show_pixel_match_preview(point, color, on_use, default_confidence)
 
@@ -303,8 +318,8 @@ class CalibrationMixin:
 
         if condition.match_type == "pixel":
             try:
-                live_color = _screenshot_region(
-                    (condition.pixel_pos[0], condition.pixel_pos[1], 1, 1)).getpixel((0, 0))
+                live_x, live_y = rescaled_pixel_pos(condition)
+                live_color = _screenshot_region((live_x, live_y, 1, 1)).getpixel((0, 0))
             except Exception:
                 live_color = None
             row = ttk.Frame(preview)
@@ -330,6 +345,9 @@ class CalibrationMixin:
         ttk.Label(preview, text="MATCH" if matched else "NO MATCH",
                   foreground=(_MATCH_COLOR if matched else _NO_MATCH_COLOR),
                   font=("Segoe UI", 14, "bold")).pack(pady=(4, 0))
+        scale_note = calibration_scale_note(condition)
+        if scale_note:
+            ttk.Label(preview, text=scale_note, foreground="gray").pack()
         if condition.negate:
             ttk.Label(preview, text="(Negate is on -- this already reflects the inverted result)",
                       foreground="gray").pack(pady=(0, 8))

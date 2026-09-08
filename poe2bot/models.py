@@ -93,6 +93,15 @@ class Condition:
                                       # matches; None = don't override hold. Ignored for "fire"/"block".
     delay_ms: Optional[int] = None   # "hold" only: replaces the owning step's delay_ms while this condition
                                       # matches; None = don't override delay. Ignored for "fire"/"block".
+    calib_width: Optional[int] = None   # image/pixel mode only: the game window's client size at the moment
+    calib_height: Optional[int] = None  # region/pixel_pos/search_region were captured -- None (a rotation
+                                         # calibrated before this existed, or one where the game window
+                                         # couldn't be found at calibration time) means "no reference size
+                                         # recorded," so no auto-rescaling is attempted, same as before this
+                                         # existed. When set and the CURRENT game window size differs, every
+                                         # runtime match check rescales region/pixel_pos/search_region (and
+                                         # resizes the saved template) from this reference size to the
+                                         # current one instead -- see poe2bot/scaling.py.
 
     def has_check(self) -> bool:
         if self.match_type == "timer":
@@ -119,6 +128,8 @@ class Condition:
             timeout_ms=_int_or(data, "timeout_ms", 0),
             hold_ms=_int_or(data, "hold_ms", None),
             delay_ms=_int_or(data, "delay_ms", None),
+            calib_width=_int_or(data, "calib_width", None),
+            calib_height=_int_or(data, "calib_height", None),
         )
 
 

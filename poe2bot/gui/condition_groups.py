@@ -55,7 +55,7 @@ class ConditionGroupsMixin:
             return
         self._start_image_capture(on_use=lambda filename, region, confidence, search_mode, search_region: self._append_condition_group(
             Condition(match_type="image", template=filename, region=region, confidence=confidence,
-                      search_mode=search_mode, search_region=search_region)))
+                      search_mode=search_mode, search_region=search_region, **self._calib_size_kwargs())))
 
     def _on_add_pixel_condition_group_clicked(self):
         group_idx = self._selected_group_location()
@@ -63,7 +63,8 @@ class ConditionGroupsMixin:
             self._recalibrate_group(group_idx, "pixel")
             return
         self._start_pixel_capture(on_use=lambda point, color, confidence: self._append_condition_group(
-            Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)))
+            Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence,
+                      **self._calib_size_kwargs())))
 
     def _append_condition_group(self, condition: Condition):
         """Appends a new ConditionGroup (default action="fire", exactly
@@ -190,11 +191,12 @@ class ConditionGroupsMixin:
         if match_type == "pixel":
             self._start_pixel_capture(
                 on_use=lambda point, color, confidence: replace(
-                    Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)),
+                    Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence,
+                              **self._calib_size_kwargs())),
                 default_confidence=condition.confidence)
         else:
             self._start_image_capture(
                 on_use=lambda filename, region, confidence, search_mode, search_region: replace(
                     Condition(match_type="image", template=filename, region=region, confidence=confidence,
-                              search_mode=search_mode, search_region=search_region)),
+                              search_mode=search_mode, search_region=search_region, **self._calib_size_kwargs())),
                 default_confidence=condition.confidence)

@@ -12,9 +12,10 @@ import numpy as np
 from PIL import Image, ImageChops, ImageStat
 
 from poe2bot import config, controller, hotkeys, templates
-from poe2bot.focus import is_game_focused
+from poe2bot.focus import game_window_client_size, is_game_focused
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Condition, ConditionGroup, Rotation, Step, iter_steps
+from poe2bot.scaling import scale_point, scale_region
 
 log = get_logger()
 
@@ -31,7 +32,13 @@ _FIRE_GATE_POLL_S = 0.05  # how often _wait_for_fire_gate rechecks a "fire" cond
 
 _template_image_cache = {}   # filename -> grayscale PIL.Image.Image, decoded once and reused
 _template_array_cache = {}   # filename -> grayscale np.ndarray, decoded once -- area search only
+_resized_template_image_cache = {}  # (filename, target_size) -> grayscale PIL.Image.Image, resized once
+_resized_template_array_cache = {}  # (filename, target_size) -> grayscale np.ndarray, resized once
 _thread_local = threading.local()
+
+_cached_game_window_size = None
+_cached_game_window_size_at = 0.0
+_GAME_WINDOW_SIZE_CACHE_S = 1.0  # avoid a Win32 EnumWindows call on every single poll of a tight loop
 
 
 def _load_template_image(filename: str) -> Image.Image:
@@ -54,6 +61,80 @@ def _load_template_array(filename: str) -> np.ndarray:
         array = np.array(_load_template_image(filename))
         _template_array_cache[filename] = array
     return array
+
+
+def _load_template_image_resized(filename: str, target_size: tuple) -> Image.Image:
+    """_load_template_image(filename), resized to target_size if that
+    differs from the template's native size -- used when a condition's
+    calibrated region has been rescaled to a different screen (see
+    poe2bot/scaling.py) than the template was originally captured at, so
+    _image_matches_exact still compares two same-size images. Cached per
+    (filename, target_size) pair for the same reason _load_template_image
+    itself is cached -- resizing isn't free, and repeated polls at a
+    stable (unchanged) screen size need not pay for it more than once."""
+    base = _load_template_image(filename)
+    if base.size == target_size:
+        return base
+    key = (filename, target_size)
+    resized = _resized_template_image_cache.get(key)
+    if resized is None:
+        resized = base.resize(target_size, Image.LANCZOS)
+        _resized_template_image_cache[key] = resized
+    return resized
+
+
+def _load_template_array_resized(filename: str, target_size: tuple) -> np.ndarray:
+    """Same idea as _load_template_image_resized, but as a numpy array for
+    cv2.matchTemplate -- used only by area-search matching."""
+    base_image = _load_template_image(filename)
+    if base_image.size == target_size:
+        return _load_template_array(filename)
+    key = (filename, target_size)
+    array = _resized_template_array_cache.get(key)
+    if array is None:
+        array = np.array(base_image.resize(target_size, Image.LANCZOS))
+        _resized_template_array_cache[key] = array
+    return array
+
+
+def _current_game_window_size():
+    """(width, height) of the configured game process's window client
+    area, cached for _GAME_WINDOW_SIZE_CACHE_S at a time -- match checks
+    that need this (see _rescaled_point/_rescaled_region) run far more
+    often than a window/monitor change could plausibly happen, so this
+    caps the cost of asking Windows to at most once a second instead of
+    once per poll."""
+    global _cached_game_window_size, _cached_game_window_size_at
+    now = time.perf_counter()
+    if now - _cached_game_window_size_at >= _GAME_WINDOW_SIZE_CACHE_S:
+        _cached_game_window_size = game_window_client_size()
+        _cached_game_window_size_at = now
+    return _cached_game_window_size
+
+
+def _rescaled_point(pixel_pos, calib_width: Optional[int], calib_height: Optional[int]):
+    """pixel_pos rescaled from a (calib_width, calib_height) reference
+    screen to the game window's CURRENT client size, if there's actually a
+    reference recorded and a current size to rescale it to (see
+    poe2bot/scaling.py) -- otherwise pixel_pos unchanged, which also covers
+    the by-far-most-common case where the screen hasn't changed at all."""
+    if pixel_pos is None or calib_width is None or calib_height is None:
+        return pixel_pos
+    current = _current_game_window_size()
+    if current is None:
+        return pixel_pos
+    return scale_point(pixel_pos[0], pixel_pos[1], calib_width, calib_height, current[0], current[1])
+
+
+def _rescaled_region(region, calib_width: Optional[int], calib_height: Optional[int]):
+    """Same idea as _rescaled_point, for a (left, top, width, height)
+    region."""
+    if region is None or calib_width is None or calib_height is None:
+        return region
+    current = _current_game_window_size()
+    if current is None:
+        return region
+    return scale_region(region, calib_width, calib_height, current[0], current[1])
 
 
 def _screen_capture():
@@ -114,10 +195,12 @@ def _check_condition(condition: Condition, label: str, seconds_since_fired: Opti
         else:
             matched = seconds_since_fired >= condition.timer_seconds
     elif condition.match_type == "pixel":
-        matched = _pixel_matches(condition.pixel_pos, condition.pixel_color, condition.confidence, label)
+        matched = _pixel_matches(condition.pixel_pos, condition.pixel_color, condition.confidence, label,
+                                  condition.calib_width, condition.calib_height)
     else:
         matched = _image_matches(condition.template, condition.region, condition.confidence, label,
-                                  condition.search_mode, condition.search_region)
+                                  condition.search_mode, condition.search_region,
+                                  condition.calib_width, condition.calib_height)
     return (not matched) if condition.negate else matched
 
 
@@ -132,6 +215,32 @@ def check_condition_now(condition: Condition) -> bool:
     rotation, so callers should check for that themselves and skip calling
     this at all rather than getting a misleading always-"available" True."""
     return _check_condition(condition, "test match", seconds_since_fired=None)
+
+
+def rescaled_pixel_pos(condition: Condition):
+    """Public accessor for _rescaled_point, using `condition`'s own
+    calib_width/calib_height -- for the GUI's Test Match preview, so the
+    live swatch it screenshots is the same point the match check itself
+    actually used, even when a resolution/aspect-ratio change means that's
+    no longer condition.pixel_pos verbatim (see poe2bot/scaling.py)."""
+    return _rescaled_point(condition.pixel_pos, condition.calib_width, condition.calib_height)
+
+
+def calibration_scale_note(condition: Condition) -> Optional[str]:
+    """A short human-readable note describing whether `condition`'s
+    region/pixel_pos is currently being rescaled from its calibration-time
+    screen size to a different one right now, or None if it isn't --
+    either because no reference size was recorded (a condition calibrated
+    before this existed), the game window can't be found, or the current
+    size matches exactly. Used by the GUI's Test Match preview so a
+    match/no-match result after moving to a new screen is visibly
+    explained rather than looking identical to an ordinary check."""
+    if condition.calib_width is None or condition.calib_height is None:
+        return None
+    current = _current_game_window_size()
+    if current is None or current == (condition.calib_width, condition.calib_height):
+        return None
+    return f"Rescaled from {condition.calib_width}x{condition.calib_height} to {current[0]}x{current[1]}"
 
 
 def _fire_gate_passes(step: Step, seconds_since_fired: Optional[float]) -> bool:
@@ -192,19 +301,28 @@ def _condition_override(hold_condition: Optional[Condition], attr: str) -> Optio
 
 
 def _image_matches(template_filename, region, confidence: float, label: str,
-                    search_mode: str = "exact", search_region=None) -> bool:
+                    search_mode: str = "exact", search_region=None,
+                    calib_width: Optional[int] = None, calib_height: Optional[int] = None) -> bool:
     """Dispatches to the fast exact-region compare (default, unchanged) or, when
     search_mode == "area", a sliding-window search over a larger calibrated
     search_region. Shared by both a step's own cooldown check and any
-    image-match Condition."""
+    image-match Condition.
+
+    `region`/`search_region` are rescaled from (calib_width, calib_height)
+    -- the screen size they were actually calibrated at -- to the game
+    window's current size first, if that's known and actually different
+    (see _rescaled_region/poe2bot/scaling.py); a no-op in the ordinary
+    case where the screen hasn't changed since calibration."""
     if not template_filename:
         return False
+    region = _rescaled_region(region, calib_width, calib_height)
     if search_mode == "area":
         if not (isinstance(search_region, tuple) and len(search_region) == 4):
             log.error(f"match check for '{label}': search mode is 'area' but no valid "
                       f"search region is calibrated -- recalibrate this step")
             return False
-        return _image_matches_area(template_filename, search_region, confidence, label)
+        search_region = _rescaled_region(search_region, calib_width, calib_height)
+        return _image_matches_area(template_filename, search_region, confidence, label, region[2:])
     return _image_matches_exact(template_filename, region, confidence, label)
 
 
@@ -234,7 +352,7 @@ def _image_matches_exact(template_filename, region, confidence: float, label: st
     treated as not-ready rather than propagating out of the thread.
     """
     try:
-        template = _load_template_image(template_filename)
+        template = _load_template_image_resized(template_filename, (region[2], region[3]))
         screenshot = _capture_region(region).convert("L")
         if screenshot.size != template.size:
             log.error(
@@ -249,13 +367,20 @@ def _image_matches_exact(template_filename, region, confidence: float, label: st
         return False
 
 
-def _image_matches_area(template_filename, search_region, confidence: float, label: str) -> bool:
+def _image_matches_area(template_filename, search_region, confidence: float, label: str,
+                         template_size: Optional[tuple] = None) -> bool:
     """True if `template_filename` is found anywhere within a screenshot of the
     larger `search_region`, via OpenCV's cv2.matchTemplate -- used only when a
     step/condition is calibrated in area-search mode. Unlike _image_matches_exact
     this pays for an actual sliding-window correlation search, so it costs more
     per check the larger search_region is; use it for icons that can visibly
     shift position slightly (e.g. a UI panel that reflows), not as a default.
+
+    `template_size`, when given, resizes the template to that (width,
+    height) before searching -- the icon's own calibrated size rescaled to
+    the current screen (see _image_matches's `region[2:]`), since a
+    resolution/aspect-ratio change means the icon itself now renders at a
+    different size, not just a different position.
 
     TM_CCOEFF_NORMED is used because it's mean-normalized (robust to minor
     brightness shifts between calibration time and runtime) and its best-match
@@ -267,7 +392,8 @@ def _image_matches_area(template_filename, search_region, confidence: float, lab
     point after switching a step to area mode -- expect to retune it.
     """
     try:
-        template_array = _load_template_array(template_filename)
+        template_array = (_load_template_array_resized(template_filename, tuple(template_size))
+                           if template_size else _load_template_array(template_filename))
         screenshot = _capture_region(search_region).convert("L")
         template_h, template_w = template_array.shape
         if screenshot.width < template_w or screenshot.height < template_h:
@@ -284,7 +410,8 @@ def _image_matches_area(template_filename, search_region, confidence: float, lab
         return False
 
 
-def _pixel_matches(pixel_pos, pixel_color, confidence: float, label: str) -> bool:
+def _pixel_matches(pixel_pos, pixel_color, confidence: float, label: str,
+                    calib_width: Optional[int] = None, calib_height: Optional[int] = None) -> bool:
     """True if the current color at `pixel_pos` is within tolerance of the
     expected `pixel_color` -- shared by both a step's own cooldown check and
     any pixel-match Condition. Much cheaper than image matching (a single 1x1
@@ -295,11 +422,15 @@ def _pixel_matches(pixel_pos, pixel_color, confidence: float, label: str) -> boo
     `confidence` uses the same 0-1, higher-is-stricter meaning as image
     matching, mapped onto an equivalent max-allowed Euclidean RGB distance
     (0.9 default allows roughly 10% of the largest possible color distance).
+
+    `pixel_pos` is rescaled from (calib_width, calib_height) to the game
+    window's current size first, same as _image_matches -- see
+    _rescaled_point/poe2bot/scaling.py.
     """
     if not pixel_pos or not pixel_color:
         return False
     try:
-        x, y = pixel_pos
+        x, y = _rescaled_point(pixel_pos, calib_width, calib_height)
         monitor = {"left": x, "top": y, "width": 1, "height": 1}
         current = tuple(_screen_capture().grab(monitor).rgb)
         distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(current, pixel_color)))

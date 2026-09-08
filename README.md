@@ -156,9 +156,9 @@ elsewhere on screen for the icon by default — this is deliberately cheap: no
 sliding-window matching, so check speed doesn't scale with region size, and a
 single check can no longer blow past a very low wait timeout on its own. The
 trade-off is that both assume the icon/pixel is still exactly where it was
-when calibrated — if the game window moves, resizes, or the UI scale changes
-afterward, the check will stop matching (never crash, it'll just always read
-as "not matching") and that condition needs recalibrating.
+when calibrated — see "Moving a rotation to a different screen" below for what
+happens (and what doesn't need recalibrating) when the game window's own size
+changes.
 
 **Image matching can optionally search a larger area instead.** After
 confirming the tight icon capture, check "Search a larger area" and click-drag
@@ -180,6 +180,48 @@ the requested region is — for a check running many times a second, that's a
 real, avoidable cost that scales with your monitor's resolution. `mss`
 captures only the requested rectangle directly, so this is what actually makes
 repeated checks fast rather than just a smaller region or a cheaper threshold.
+
+## Moving a rotation to a different screen
+
+A rotation calibrated on one monitor/computer keeps working after moving to a
+different one at a different resolution — including a different aspect ratio
+(e.g. 16:9 to ultrawide) — with no separate rotation to maintain and no manual
+step. Every image/pixel condition quietly records the game window's client size
+at the moment it's calibrated; if a later check finds the game window is a
+different size, it rescales that condition's calibrated point/region (and the
+saved template's own size, for an image condition) from the size it was
+calibrated at to the current one before checking, live, every time. Two
+conditions calibrated on different screens at different times each rescale
+from their own reference size correctly — this is per-condition, not a single
+rotation-wide setting.
+
+The rescale isn't a blind stretch from the top-left corner: each point keeps
+its position relative to whichever screen edge (or the center) it was closest
+to when calibrated — the same "anchor" model most game HUDs are actually built
+on (health orb anchored to the bottom-left, flask bar anchored to bottom-*center*,
+minimap to the top-right, and so on), and the same one UI frameworks like
+Unity/Unreal use for exactly this "what should a UI element do when its canvas
+resizes" problem. A resolution change with the *same* aspect ratio (1080p to
+1440p to 4K) reduces to a plain proportional scale under this model, so that
+common case works exactly as you'd expect; a resolution change that also
+changes the aspect ratio additionally keeps each element anchored to its own
+edge/corner rather than stretching it across whatever space the new aspect
+ratio added or removed.
+
+This is a best-effort transform, not a guarantee — it depends on the game's
+HUD actually being built on that same anchor-per-element assumption, which
+holds for the vast majority of ARPG UIs but isn't verified against POE2
+specifically inside this tool. If a condition doesn't behave as expected after
+moving to a new screen, **Test Match** shows exactly what it's comparing right
+now, including a "Rescaled from WxH to WxH" note whenever a rescale actually
+applied, so you can tell at a glance whether the transform or something else
+(e.g. a UI scale setting that also changed) is the actual problem — recalibrate
+that one condition if so, the same as always.
+
+A condition calibrated before this existed (or one only ever edited by hand)
+has no recorded reference size, so nothing about it is rescaled — exactly its
+pre-existing behavior. Recalibrating it (or double-clicking to redo its match)
+records one going forward.
 
 Image-match calibrations are stored as individual PNGs under `templates/`, named
 by a random ID rather than the skill name, so rotations stay portable if you

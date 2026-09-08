@@ -96,13 +96,14 @@ class ConditionsMixin:
         if match_type == "pixel":
             self._start_pixel_capture(
                 on_use=lambda point, color, confidence: apply(
-                    Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)),
+                    Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence,
+                              **self._calib_size_kwargs())),
                 default_confidence=default_confidence)
         else:
             self._start_image_capture(
                 on_use=lambda filename, region, confidence, search_mode, search_region: apply(
                     Condition(match_type="image", template=filename, region=region, confidence=confidence,
-                              search_mode=search_mode, search_region=search_region)),
+                              search_mode=search_mode, search_region=search_region, **self._calib_size_kwargs())),
                 default_confidence=default_confidence)
 
     def _on_add_timer_condition_clicked(self):
@@ -296,13 +297,14 @@ class ConditionsMixin:
         elif condition.match_type == "pixel":
             self._start_pixel_capture(
                 on_use=lambda point, color, confidence: replace(
-                    Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence)),
+                    Condition(match_type="pixel", pixel_pos=point, pixel_color=color, confidence=confidence,
+                              **self._calib_size_kwargs())),
                 default_confidence=condition.confidence)
         else:
             self._start_image_capture(
                 on_use=lambda filename, region, confidence, search_mode, search_region: replace(
                     Condition(match_type="image", template=filename, region=region, confidence=confidence,
-                              search_mode=search_mode, search_region=search_region)),
+                              search_mode=search_mode, search_region=search_region, **self._calib_size_kwargs())),
                 default_confidence=condition.confidence)
 
     # ---- copy/paste conditions between steps ---------------------------------
