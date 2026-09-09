@@ -102,6 +102,17 @@ class Condition:
                                          # runtime match check rescales region/pixel_pos/search_region (and
                                          # resizes the saved template) from this reference size to the
                                          # current one instead -- see poe2bot/scaling.py.
+    calib_left: Optional[int] = None    # image/pixel mode only: the game window's client area origin (in
+    calib_top: Optional[int] = None     # absolute virtual-desktop pixels) at the same moment as calib_width/
+                                         # calib_height. region/pixel_pos/search_region are themselves stored
+                                         # in absolute screen pixels, so rescaling needs this to translate them
+                                         # into (and back out of) the window-relative space poe2bot/scaling.py's
+                                         # anchor model actually operates in -- without it, a window that isn't
+                                         # sitting at the desktop's own (0, 0) (a secondary monitor, or windowed
+                                         # mode) would rescale against the wrong reference frame. None (a
+                                         # condition calibrated before this existed) is treated as (0, 0), i.e.
+                                         # the client area's absolute position is assumed unchanged -- matching
+                                         # that condition's pre-existing behavior.
 
     def has_check(self) -> bool:
         if self.match_type == "timer":
@@ -130,6 +141,8 @@ class Condition:
             delay_ms=_int_or(data, "delay_ms", None),
             calib_width=_int_or(data, "calib_width", None),
             calib_height=_int_or(data, "calib_height", None),
+            calib_left=_int_or(data, "calib_left", None),
+            calib_top=_int_or(data, "calib_top", None),
         )
 
 

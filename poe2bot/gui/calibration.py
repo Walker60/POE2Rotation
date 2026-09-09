@@ -92,22 +92,23 @@ class CalibrationMixin:
             self.deiconify()
             messagebox.showerror("Calibration failed", f"Could not capture the region:\n{e}")
             return
-        self._last_calib_size = focus.game_window_client_size()
+        self._last_calib_rect = focus.game_window_client_rect()
         self.deiconify()
         self._show_image_match_preview(filename, region, on_use, default_confidence)
 
     def _calib_size_kwargs(self) -> dict:
-        """calib_width/calib_height kwargs for a freshly-constructed
-        Condition, from whatever _last_calib_size was captured at the most
-        recent screenshot (_take_image_match_screenshot/
-        _sample_pixel_color) -- shared by every Condition(...) construction
-        site in ConditionsMixin/ConditionGroupsMixin so they don't each
-        need to unpack the None-or-(w, h) tuple themselves. None/None (no
-        rescaling reference recorded) if the game window couldn't be found
-        at calibration time -- matches this condition's behavior before
+        """calib_width/calib_height/calib_left/calib_top kwargs for a
+        freshly-constructed Condition, from whatever _last_calib_rect was
+        captured at the most recent screenshot
+        (_take_image_match_screenshot/_sample_pixel_color) -- shared by
+        every Condition(...) construction site in ConditionsMixin/
+        ConditionGroupsMixin so they don't each need to unpack the
+        None-or-(l, t, w, h) tuple themselves. All None (no rescaling
+        reference recorded) if the game window couldn't be found at
+        calibration time -- matches this condition's behavior before
         poe2bot/scaling.py existed."""
-        width, height = self._last_calib_size or (None, None)
-        return {"calib_width": width, "calib_height": height}
+        left, top, width, height = self._last_calib_rect or (None, None, None, None)
+        return {"calib_width": width, "calib_height": height, "calib_left": left, "calib_top": top}
 
     def _build_preview_dialog(self, title: str) -> tk.Toplevel:
         """Shared Toplevel setup behind _show_image_match_preview() and
@@ -272,7 +273,7 @@ class CalibrationMixin:
             self.deiconify()
             messagebox.showerror("Calibration failed", f"Could not sample the pixel:\n{e}")
             return
-        self._last_calib_size = focus.game_window_client_size()
+        self._last_calib_rect = focus.game_window_client_rect()
         self.deiconify()
         self._show_pixel_match_preview(point, color, on_use, default_confidence)
 

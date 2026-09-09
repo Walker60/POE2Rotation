@@ -119,8 +119,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.rotation_filter_var = tk.StringVar()  # substring filter for the rotation list
         self._calibration_hint_shown = False  # show the "here's how calibration works" popup
                                                # at most once per session -- see CalibrationMixin
-        self._last_calib_size = None  # (width, height) of the game window's client area as of the
-                                       # most recent screenshot, or None -- see CalibrationMixin._calib_size_kwargs
+        self._last_calib_rect = None  # (left, top, width, height) of the game window's client area as of
+                                       # the most recent screenshot, or None -- see CalibrationMixin._calib_size_kwargs
 
         self._build_widgets()
         self._load_rotations_from_disk()

@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image, ImageChops, ImageStat
 
 from poe2bot import config, controller, hotkeys, templates
-from poe2bot.focus import game_window_client_size, is_game_focused
+from poe2bot.focus import game_window_client_rect, is_game_focused
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Condition, ConditionGroup, Rotation, Step, iter_steps
 from poe2bot.scaling import scale_point, scale_region
@@ -36,8 +36,8 @@ _resized_template_image_cache = {}  # (filename, target_size) -> grayscale PIL.I
 _resized_template_array_cache = {}  # (filename, target_size) -> grayscale np.ndarray, resized once
 _thread_local = threading.local()
 
-_cached_game_window_size = None
-_cached_game_window_size_at = 0.0
+_cached_game_window_rect = None
+_cached_game_window_rect_at = 0.0
 _GAME_WINDOW_SIZE_CACHE_S = 1.0  # avoid a Win32 EnumWindows call on every single poll of a tight loop
 
 
@@ -97,55 +97,76 @@ def _load_template_array_resized(filename: str, target_size: tuple) -> np.ndarra
     return array
 
 
-def _current_game_window_size():
-    """(width, height) of the configured game process's window client
-    area, cached for _GAME_WINDOW_SIZE_CACHE_S at a time -- match checks
-    that need this (see _rescaled_point/_rescaled_region) run far more
-    often than a window/monitor change could plausibly happen, so this
-    caps the cost of asking Windows to at most once a second instead of
-    once per poll."""
-    global _cached_game_window_size, _cached_game_window_size_at
+def _current_game_window_rect():
+    """(left, top, width, height) of the configured game process's window
+    client area, cached for _GAME_WINDOW_SIZE_CACHE_S at a time -- match
+    checks that need this (see _rescaled_point/_rescaled_region) run far
+    more often than a window/monitor change could plausibly happen, so
+    this caps the cost of asking Windows to at most once a second instead
+    of once per poll."""
+    global _cached_game_window_rect, _cached_game_window_rect_at
     now = time.perf_counter()
-    if now - _cached_game_window_size_at >= _GAME_WINDOW_SIZE_CACHE_S:
-        _cached_game_window_size = game_window_client_size()
-        _cached_game_window_size_at = now
-    return _cached_game_window_size
+    if now - _cached_game_window_rect_at >= _GAME_WINDOW_SIZE_CACHE_S:
+        _cached_game_window_rect = game_window_client_rect()
+        _cached_game_window_rect_at = now
+    return _cached_game_window_rect
 
 
 def _invalidate_game_window_size_cache():
-    """Forces the next _current_game_window_size() call to do a fresh
+    """Forces the next _current_game_window_rect() call to do a fresh
     lookup instead of trusting the cache -- called when the game regains
     OS focus (see RotationRunner._wait_for_focus_or_stop), since that's
-    exactly when a resize that happened while the game was unfocused (e.g.
-    the user alt-tabbed away, resized it, and came back) would otherwise
-    take up to _GAME_WINDOW_SIZE_CACHE_S to be picked up."""
-    global _cached_game_window_size_at
-    _cached_game_window_size_at = 0.0
+    exactly when a resize/move that happened while the game was unfocused
+    (e.g. the user alt-tabbed away, resized or dragged it, and came back)
+    would otherwise take up to _GAME_WINDOW_SIZE_CACHE_S to be picked up."""
+    global _cached_game_window_rect_at
+    _cached_game_window_rect_at = 0.0
 
 
-def _rescaled_point(pixel_pos, calib_width: Optional[int], calib_height: Optional[int]):
+def _rescaled_point(pixel_pos, calib_width: Optional[int], calib_height: Optional[int],
+                     calib_left: Optional[int] = None, calib_top: Optional[int] = None):
     """pixel_pos rescaled from a (calib_width, calib_height) reference
     screen to the game window's CURRENT client size, if there's actually a
     reference recorded and a current size to rescale it to (see
     poe2bot/scaling.py) -- otherwise pixel_pos unchanged, which also covers
-    the by-far-most-common case where the screen hasn't changed at all."""
+    the by-far-most-common case where the screen hasn't changed at all.
+
+    pixel_pos is stored in absolute virtual-desktop pixels (see
+    overlays.py), but poe2bot/scaling.py's anchor model only makes sense
+    relative to the client area it was calibrated against -- so this
+    subtracts off the calibration-time client origin (calib_left/
+    calib_top) before rescaling, then adds back the CURRENT client
+    origin afterward. calib_left/calib_top default to 0 for a condition
+    calibrated before these were recorded, matching that condition's
+    pre-existing behavior of implicitly assuming the client area started
+    at the desktop's own (0, 0)."""
     if pixel_pos is None or calib_width is None or calib_height is None:
         return pixel_pos
-    current = _current_game_window_size()
+    current = _current_game_window_rect()
     if current is None:
         return pixel_pos
-    return scale_point(pixel_pos[0], pixel_pos[1], calib_width, calib_height, current[0], current[1])
+    current_left, current_top, current_width, current_height = current
+    rel_x = pixel_pos[0] - (calib_left or 0)
+    rel_y = pixel_pos[1] - (calib_top or 0)
+    new_x, new_y = scale_point(rel_x, rel_y, calib_width, calib_height, current_width, current_height)
+    return new_x + current_left, new_y + current_top
 
 
-def _rescaled_region(region, calib_width: Optional[int], calib_height: Optional[int]):
+def _rescaled_region(region, calib_width: Optional[int], calib_height: Optional[int],
+                      calib_left: Optional[int] = None, calib_top: Optional[int] = None):
     """Same idea as _rescaled_point, for a (left, top, width, height)
     region."""
     if region is None or calib_width is None or calib_height is None:
         return region
-    current = _current_game_window_size()
+    current = _current_game_window_rect()
     if current is None:
         return region
-    return scale_region(region, calib_width, calib_height, current[0], current[1])
+    current_left, current_top, current_width, current_height = current
+    left, top, width, height = region
+    rel_region = (left - (calib_left or 0), top - (calib_top or 0), width, height)
+    new_left, new_top, new_width, new_height = scale_region(
+        rel_region, calib_width, calib_height, current_width, current_height)
+    return new_left + current_left, new_top + current_top, new_width, new_height
 
 
 def _screen_capture():
@@ -207,11 +228,13 @@ def _check_condition(condition: Condition, label: str, seconds_since_fired: Opti
             matched = seconds_since_fired >= condition.timer_seconds
     elif condition.match_type == "pixel":
         matched = _pixel_matches(condition.pixel_pos, condition.pixel_color, condition.confidence, label,
-                                  condition.calib_width, condition.calib_height)
+                                  condition.calib_width, condition.calib_height,
+                                  condition.calib_left, condition.calib_top)
     else:
         matched = _image_matches(condition.template, condition.region, condition.confidence, label,
                                   condition.search_mode, condition.search_region,
-                                  condition.calib_width, condition.calib_height)
+                                  condition.calib_width, condition.calib_height,
+                                  condition.calib_left, condition.calib_top)
     return (not matched) if condition.negate else matched
 
 
@@ -230,11 +253,13 @@ def check_condition_now(condition: Condition) -> bool:
 
 def rescaled_pixel_pos(condition: Condition):
     """Public accessor for _rescaled_point, using `condition`'s own
-    calib_width/calib_height -- for the GUI's Test Match preview, so the
-    live swatch it screenshots is the same point the match check itself
-    actually used, even when a resolution/aspect-ratio change means that's
-    no longer condition.pixel_pos verbatim (see poe2bot/scaling.py)."""
-    return _rescaled_point(condition.pixel_pos, condition.calib_width, condition.calib_height)
+    calib_width/calib_height/calib_left/calib_top -- for the GUI's Test
+    Match preview, so the live swatch it screenshots is the same point the
+    match check itself actually used, even when a resolution/aspect-ratio
+    change (or the window simply having moved) means that's no longer
+    condition.pixel_pos verbatim (see poe2bot/scaling.py)."""
+    return _rescaled_point(condition.pixel_pos, condition.calib_width, condition.calib_height,
+                            condition.calib_left, condition.calib_top)
 
 
 def calibration_scale_note(condition: Condition) -> Optional[str]:
@@ -243,15 +268,31 @@ def calibration_scale_note(condition: Condition) -> Optional[str]:
     screen size to a different one right now, or None if it isn't --
     either because no reference size was recorded (a condition calibrated
     before this existed), the game window can't be found, or the current
-    size matches exactly. Used by the GUI's Test Match preview so a
-    match/no-match result after moving to a new screen is visibly
-    explained rather than looking identical to an ordinary check."""
+    client rect matches the calibration-time one exactly. Used by the
+    GUI's Test Match preview so a match/no-match result after moving to a
+    new screen is visibly explained rather than looking identical to an
+    ordinary check.
+
+    Compares the full (left, top, width, height) rect, not just size --
+    a window that moved without resizing (e.g. dragged to another
+    monitor) still needs its calibrated point/region shifted to follow
+    it, so that case should be called out here too, not just an actual
+    resolution/aspect-ratio change."""
     if condition.calib_width is None or condition.calib_height is None:
         return None
-    current = _current_game_window_size()
-    if current is None or current == (condition.calib_width, condition.calib_height):
+    current = _current_game_window_rect()
+    if current is None:
         return None
-    return f"Rescaled from {condition.calib_width}x{condition.calib_height} to {current[0]}x{current[1]}"
+    current_left, current_top, current_width, current_height = current
+    calib_left, calib_top = condition.calib_left or 0, condition.calib_top or 0
+    size_changed = (current_width, current_height) != (condition.calib_width, condition.calib_height)
+    moved = (current_left, current_top) != (calib_left, calib_top)
+    if not size_changed and not moved:
+        return None
+    if size_changed:
+        note = f"Rescaled from {condition.calib_width}x{condition.calib_height} to {current_width}x{current_height}"
+        return note + " (window also moved)" if moved else note
+    return f"Repositioned: game window moved from ({calib_left}, {calib_top}) to ({current_left}, {current_top})"
 
 
 def _fire_gate_passes(step: Step, seconds_since_fired: Optional[float]) -> bool:
@@ -313,26 +354,29 @@ def _condition_override(hold_condition: Optional[Condition], attr: str) -> Optio
 
 def _image_matches(template_filename, region, confidence: float, label: str,
                     search_mode: str = "exact", search_region=None,
-                    calib_width: Optional[int] = None, calib_height: Optional[int] = None) -> bool:
+                    calib_width: Optional[int] = None, calib_height: Optional[int] = None,
+                    calib_left: Optional[int] = None, calib_top: Optional[int] = None) -> bool:
     """Dispatches to the fast exact-region compare (default, unchanged) or, when
     search_mode == "area", a sliding-window search over a larger calibrated
     search_region. Shared by both a step's own cooldown check and any
     image-match Condition.
 
     `region`/`search_region` are rescaled from (calib_width, calib_height)
-    -- the screen size they were actually calibrated at -- to the game
-    window's current size first, if that's known and actually different
-    (see _rescaled_region/poe2bot/scaling.py); a no-op in the ordinary
-    case where the screen hasn't changed since calibration."""
+    -- the screen size they were actually calibrated at, at whatever
+    position (calib_left, calib_top) the client area was in then -- to the
+    game window's current size/position first, if that's known and
+    actually different (see _rescaled_region/poe2bot/scaling.py); a no-op
+    in the ordinary case where the screen hasn't changed since
+    calibration."""
     if not template_filename:
         return False
-    region = _rescaled_region(region, calib_width, calib_height)
+    region = _rescaled_region(region, calib_width, calib_height, calib_left, calib_top)
     if search_mode == "area":
         if not (isinstance(search_region, tuple) and len(search_region) == 4):
             log.error(f"match check for '{label}': search mode is 'area' but no valid "
                       f"search region is calibrated -- recalibrate this step")
             return False
-        search_region = _rescaled_region(search_region, calib_width, calib_height)
+        search_region = _rescaled_region(search_region, calib_width, calib_height, calib_left, calib_top)
         return _image_matches_area(template_filename, search_region, confidence, label, region[2:])
     return _image_matches_exact(template_filename, region, confidence, label)
 
@@ -422,7 +466,8 @@ def _image_matches_area(template_filename, search_region, confidence: float, lab
 
 
 def _pixel_matches(pixel_pos, pixel_color, confidence: float, label: str,
-                    calib_width: Optional[int] = None, calib_height: Optional[int] = None) -> bool:
+                    calib_width: Optional[int] = None, calib_height: Optional[int] = None,
+                    calib_left: Optional[int] = None, calib_top: Optional[int] = None) -> bool:
     """True if the current color at `pixel_pos` is within tolerance of the
     expected `pixel_color` -- shared by both a step's own cooldown check and
     any pixel-match Condition. Much cheaper than image matching (a single 1x1
@@ -434,14 +479,14 @@ def _pixel_matches(pixel_pos, pixel_color, confidence: float, label: str,
     matching, mapped onto an equivalent max-allowed Euclidean RGB distance
     (0.9 default allows roughly 10% of the largest possible color distance).
 
-    `pixel_pos` is rescaled from (calib_width, calib_height) to the game
-    window's current size first, same as _image_matches -- see
-    _rescaled_point/poe2bot/scaling.py.
+    `pixel_pos` is rescaled from (calib_width, calib_height) at
+    (calib_left, calib_top) to the game window's current size/position
+    first, same as _image_matches -- see _rescaled_point/poe2bot/scaling.py.
     """
     if not pixel_pos or not pixel_color:
         return False
     try:
-        x, y = _rescaled_point(pixel_pos, calib_width, calib_height)
+        x, y = _rescaled_point(pixel_pos, calib_width, calib_height, calib_left, calib_top)
         monitor = {"left": x, "top": y, "width": 1, "height": 1}
         current = tuple(_screen_capture().grab(monitor).rgb)
         distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(current, pixel_color)))

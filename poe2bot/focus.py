@@ -34,6 +34,16 @@ _get_client_rect = ctypes.windll.user32.GetClientRect
 _get_client_rect.restype = wintypes.BOOL
 _get_client_rect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 
+# GetClientRect alone only gives the client area's SIZE, always relative to its own
+# (0, 0) -- ClientToScreen is what maps that origin to an absolute virtual-desktop
+# position, which is what a calibrated pixel_pos/region is actually expressed in (see
+# game_window_client_rect). Needed so a calibration done on a secondary monitor (or
+# any window not sitting at the desktop's own (0, 0)) rescales correctly instead of
+# silently assuming the window's client area starts at the desktop origin.
+_client_to_screen = ctypes.windll.user32.ClientToScreen
+_client_to_screen.restype = wintypes.BOOL
+_client_to_screen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+
 _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 _enum_windows = ctypes.windll.user32.EnumWindows
 _enum_windows.restype = wintypes.BOOL
@@ -89,14 +99,24 @@ def is_game_focused() -> bool:
     return focused
 
 
-def _client_size_if_valid(hwnd, pid):
-    """(width, height) of hwnd's client area if it's a visible, non-
-    minimized top-level window actually owned by `pid` with a sane
-    (nonzero) size -- else None. Shared by game_window_client_size()'s
-    focused-window fast path and its EnumWindows fallback below, so both
-    apply exactly the same "is this actually usable" checks. Minimized is
-    excluded because IsWindowVisible alone stays true for a minimized
-    window, whose reported client rect isn't a meaningful screen size."""
+def _client_rect_if_valid(hwnd, pid):
+    """(left, top, width, height) of hwnd's client area, in absolute
+    virtual-desktop pixels, if it's a visible, non-minimized top-level
+    window actually owned by `pid` with a sane (nonzero) size -- else None.
+    Shared by game_window_client_rect()'s focused-window fast path and its
+    EnumWindows fallback below, so both apply exactly the same "is this
+    actually usable" checks. Minimized is excluded because IsWindowVisible
+    alone stays true for a minimized window, whose reported client rect
+    isn't a meaningful screen size.
+
+    `left`/`top` come from ClientToScreen, not just GetClientRect (which
+    only ever reports a rect relative to its own (0, 0)) -- a calibrated
+    pixel_pos/region is stored in absolute screen pixels (see
+    overlays.py), so rescaling it needs to know where the client area
+    actually sits on screen, not just how big it is. Without this, a
+    window that isn't sitting at the desktop's own (0, 0) -- e.g. one on a
+    secondary monitor, or in windowed mode -- would rescale against the
+    wrong reference frame."""
     if not hwnd or not _is_window_visible(hwnd) or _is_iconic(hwnd):
         return None
     owner_pid = wintypes.DWORD(0)
@@ -109,17 +129,21 @@ def _client_size_if_valid(hwnd, pid):
     width, height = rect.right - rect.left, rect.bottom - rect.top
     if width <= 0 or height <= 0:
         return None
-    return width, height
+    origin = wintypes.POINT(0, 0)
+    if not _client_to_screen(hwnd, ctypes.byref(origin)):
+        return None
+    return origin.x, origin.y, width, height
 
 
-def game_window_client_size():
-    """(width, height) of the configured game process's main window client
-    area (i.e. its actual rendering surface, excluding the title bar/
-    borders) -- the reference frame poe2bot/scaling.py rescales a
-    calibrated condition against so it still lines up after moving to a
-    different monitor/computer at a different resolution or aspect ratio.
-    None if the game process can't be found, or has no suitably-sized
-    visible top-level window (e.g. it's still loading).
+def game_window_client_rect():
+    """(left, top, width, height) of the configured game process's main
+    window client area (i.e. its actual rendering surface, excluding the
+    title bar/borders), in absolute virtual-desktop pixels -- the
+    reference frame poe2bot/scaling.py rescales a calibrated condition
+    against so it still lines up after moving to a different monitor/
+    computer at a different resolution or aspect ratio, or after simply
+    being repositioned. None if the game process can't be found, or has no
+    suitably-sized visible top-level window (e.g. it's still loading).
 
     Deliberately independent of is_game_focused() -- unlike that check,
     this doesn't require the game to currently have OS foreground focus,
@@ -140,7 +164,7 @@ def game_window_client_size():
     if not pid:
         return None
 
-    focused = _client_size_if_valid(_get_foreground_window(), pid)
+    focused = _client_rect_if_valid(_get_foreground_window(), pid)
     if focused is not None:
         _warned_no_window = False
         return focused
@@ -149,9 +173,9 @@ def game_window_client_size():
 
     def callback(hwnd, _lparam):
         nonlocal best
-        size = _client_size_if_valid(hwnd, pid)
-        if size is not None and (best is None or size[0] * size[1] > best[0] * best[1]):
-            best = size
+        rect = _client_rect_if_valid(hwnd, pid)
+        if rect is not None and (best is None or rect[2] * rect[3] > best[2] * best[3]):
+            best = rect
         return True
 
     _enum_windows(_WNDENUMPROC(callback), 0)

@@ -186,14 +186,15 @@ repeated checks fast rather than just a smaller region or a cheaper threshold.
 A rotation calibrated on one monitor/computer keeps working after moving to a
 different one at a different resolution — including a different aspect ratio
 (e.g. 16:9 to ultrawide) — with no separate rotation to maintain and no manual
-step. Every image/pixel condition quietly records the game window's client size
-at the moment it's calibrated; if a later check finds the game window is a
-different size, it rescales that condition's calibrated point/region (and the
-saved template's own size, for an image condition) from the size it was
-calibrated at to the current one before checking, live, every time. Two
-conditions calibrated on different screens at different times each rescale
-from their own reference size correctly — this is per-condition, not a single
-rotation-wide setting.
+step. Every image/pixel condition quietly records the game window's client
+rect (size *and* on-screen position) at the moment it's calibrated; if a later
+check finds the game window is a different size, in a different position (e.g.
+it's now on a different monitor), or both, it rescales that condition's
+calibrated point/region (and the saved template's own size, for an image
+condition) from the rect it was calibrated at to the current one before
+checking, live, every time. Two conditions calibrated on different screens at
+different times each rescale from their own reference rect correctly — this
+is per-condition, not a single rotation-wide setting.
 
 The rescale isn't a blind stretch from the top-left corner: each point keeps
 its position relative to whichever screen edge (or the center) it was closest
@@ -213,10 +214,11 @@ HUD actually being built on that same anchor-per-element assumption, which
 holds for the vast majority of ARPG UIs but isn't verified against POE2
 specifically inside this tool. If a condition doesn't behave as expected after
 moving to a new screen, **Test Match** shows exactly what it's comparing right
-now, including a "Rescaled from WxH to WxH" note whenever a rescale actually
-applied, so you can tell at a glance whether the transform or something else
-(e.g. a UI scale setting that also changed) is the actual problem — recalibrate
-that one condition if so, the same as always.
+now, including a "Rescaled from WxH to WxH" (or, if just the window's position
+changed, "Repositioned: game window moved from (...) to (...)") note whenever
+a rescale actually applied, so you can tell at a glance whether the transform
+or something else (e.g. a UI scale setting that also changed) is the actual
+problem — recalibrate that one condition if so, the same as always.
 
 A condition calibrated before this existed (or one only ever edited by hand)
 has no recorded reference size, so nothing about it is rescaled — exactly its
