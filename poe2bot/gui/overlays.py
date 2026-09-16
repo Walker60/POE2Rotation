@@ -4,6 +4,25 @@ import tkinter as tk
 from poe2bot.gui import geometry
 
 
+def _shrunk_to_dodge_fullscreen_unredirect(width: int, height: int) -> tuple:
+    """(width, height) unchanged on Windows; each reduced by 1px on Linux.
+
+    Belt-and-suspenders alongside _disable_compositor_bypass below, for the
+    same underlying compositor behavior: on at least some configurations,
+    _NET_WM_BYPASS_COMPOSITOR appears NOT to be honored for an
+    override-redirect window like this one specifically (this overlay
+    remained fully opaque on a real Steam Deck even with that hint set),
+    which suggests the compositor's "unredirect fullscreen windows"
+    detection for such windows is purely geometric -- does this window's
+    rect exactly cover an output -- rather than actually consulting the
+    hint. Making the window reliably NOT that exact shape sidesteps the
+    detection directly instead of depending on a hint that may or may not
+    be respected for this window class on a given compositor."""
+    if sys.platform == "win32":
+        return width, height
+    return max(1, width - 1), max(1, height - 1)
+
+
 def _disable_compositor_bypass(window: tk.Toplevel):
     """Linux only: explicitly tells the compositor (KWin, as used by
     SteamOS Desktop Mode, included) NOT to skip compositing this window, via
@@ -65,8 +84,16 @@ class _FullscreenPickerOverlay(tk.Toplevel):
             width, height = self.winfo_screenwidth(), self.winfo_screenheight()
         self._overlay_width = width
 
+        # On Linux, shave 1px off each dimension (see _shrunk_to_dodge_fullscreen_unredirect):
+        # some compositors bypass alpha blending entirely for a window whose
+        # geometry EXACTLY matches a screen's resolution, regardless of the
+        # _NET_WM_BYPASS_COMPOSITOR hint below -- so this overlay is
+        # deliberately never quite that shape there. A 1px-narrower capture
+        # area is an imperceptible trade-off for actually being translucent.
+        draw_width, draw_height = _shrunk_to_dodge_fullscreen_unredirect(width, height)
+
         self.overrideredirect(True)
-        self.geometry(f"{width}x{height}+{left}+{top}")
+        self.geometry(f"{draw_width}x{draw_height}+{left}+{top}")
         self.attributes("-alpha", 0.25)
         self.attributes("-topmost", True)
         self.configure(bg="gray")
