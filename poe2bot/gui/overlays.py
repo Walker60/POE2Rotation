@@ -3,6 +3,7 @@ import threading
 import tkinter as tk
 
 import keyboard
+import mouse
 from PIL import Image, ImageTk
 
 from poe2bot.log_setup import get_logger
@@ -10,7 +11,7 @@ from poe2bot.log_setup import get_logger
 log = get_logger()
 
 _IS_WINDOWS = sys.platform == "win32"
-_ESCAPE_POLL_MS = 50  # how often the Tk thread checks for a background-thread Escape request
+_INPUT_POLL_MS = 33  # ~30Hz -- Linux-only Escape/mouse polling, see _poll_linux_input
 
 
 class _FullscreenPickerOverlay(tk.Toplevel):
@@ -91,18 +92,35 @@ class _FullscreenPickerOverlay(tk.Toplevel):
         # independent of which window X11 thinks has focus, so Escape can
         # always dismiss this overlay regardless of what the game has
         # grabbed. Runs on keyboard's own hook thread, not Tk's -- it only
-        # ever sets a flag; _poll_escape_requested (driven by self.after,
-        # so it always runs on the Tk thread) is what actually acts on it.
+        # ever sets a flag; _poll_linux_input (driven by self.after, so it
+        # always runs on the Tk thread) is what actually acts on it.
+        #
+        # The same poll loop also drives raw mouse-button tracking on
+        # Linux (see _poll_linux_input/_on_raw_mouse_*) -- it turned out
+        # grab_set_global() can't actually be relied on either: X11 active
+        # grabs cannot be preempted by a new client's grab request at all
+        # ("grab failed: another application has grab" -- confirmed on
+        # real Steam Deck hardware while Path of Exile 2 itself holds its
+        # own pointer grab for camera-look/click-to-move). With no way to
+        # win the grab back, X11 simply never delivers ButtonPress/Motion/
+        # ButtonRelease events to this window's canvas at all while the
+        # game holds it -- no Tk-level fix can change that, since Tk is
+        # just as subject to X11's event routing as anything else. mouse.
+        # is_pressed()/get_position() (like keyboard.hook() above) read
+        # raw evdev state directly, the same way this app's own mouse-
+        # button rotation triggers already work while the game has focus
+        # (see hotkeys.py) -- entirely independent of X11 focus/grabs.
         self._escape_requested = threading.Event()
-        self._escape_poll_id = None
+        self._input_poll_id = None
         self._global_escape_hook = None
+        self._raw_mouse_was_pressed = False
         if not _IS_WINDOWS:
             def on_key_event(event):
                 if event.event_type == keyboard.KEY_DOWN and event.name == "esc":
                     self._escape_requested.set()
             keyboard.hook(on_key_event)
             self._global_escape_hook = on_key_event
-            self._poll_escape_requested()
+            self._poll_linux_input()
 
         # wait_visibility() BEFORE grab_set()/focus_force() -- not just
         # belt-and-suspenders. On X11 (Steam Deck/Linux Desktop Mode),
@@ -129,23 +147,23 @@ class _FullscreenPickerOverlay(tk.Toplevel):
             if _IS_WINDOWS:
                 self.grab_set()
             else:
-                # A plain grab_set() is a *local* grab -- it only
-                # arbitrates between this application's own windows, it
-                # can't take pointer/keyboard events away from a DIFFERENT
-                # X11 client. Path of Exile 2 (like many games, for
-                # camera-look/click-to-move) commonly holds its own active
-                # X11 pointer grab, which keeps routing every click to the
-                # game even after this overlay becomes the topmost,
-                # focused-looking window -- observed on Steam Deck as "the
-                # overlay appears but clicking it does nothing."
-                # grab_set_global() performs a real global grab, which X11
-                # allows a new requester to take over from whichever client
-                # held it before, exactly what's needed here. Not done on
-                # Windows: the local grab already works fine there (this
-                # class of persistent OS-level exclusive input grab isn't a
-                # thing on Windows the same way), and a global grab is more
-                # disruptive than necessary to reach for unless it's
-                # actually needed.
+                # NOTE: grab_set_global() does NOT reliably win this away
+                # from a game holding its own active X11 pointer grab (as
+                # Path of Exile 2 commonly does, for camera-look/
+                # click-to-move) -- confirmed on real Steam Deck hardware,
+                # X11 refuses a new active grab outright while another
+                # client already holds one ("grab failed: another
+                # application has grab"), it does not hand it over. This
+                # call is kept anyway since it's harmless (wrapped below)
+                # and still helps when nothing else is grabbing (e.g.
+                # calibrating against the bare desktop) -- but the actual
+                # fix for the game-is-grabbing case is the raw mouse.
+                # is_pressed()/get_position() polling below
+                # (_poll_linux_input/_on_raw_mouse_*), which reads input
+                # independent of X11 entirely, same idea as the Escape
+                # hatch above. Not done on Windows: the local grab already
+                # works fine there, and this class of persistent OS-level
+                # exclusive grab isn't a thing on Windows the same way.
                 self.grab_set_global()
         except tk.TclError as e:
             log.warning(f"calibration overlay: grab_set{'_global' if not _IS_WINDOWS else ''}() failed: {e}")
@@ -154,11 +172,56 @@ class _FullscreenPickerOverlay(tk.Toplevel):
         except tk.TclError as e:
             log.warning(f"calibration overlay: focus_force() failed: {e}")
 
-    def _poll_escape_requested(self):
+    def _poll_linux_input(self):
+        """Linux-only self.after() loop: acts on a pending Escape request
+        (see keyboard.hook() above), and edge-detects raw left-mouse-button
+        press/drag/release via mouse.is_pressed()/get_position() -- reading
+        evdev state directly rather than waiting for X11 to deliver Button
+        events to this window's canvas, which it never will while another
+        client (e.g. the game) holds an active pointer grab (see the
+        grab_set_global() comment above). Feeds the exact same _on_press/
+        _on_drag/_on_release/_on_click methods the Tk canvas bindings use
+        (see each subclass) -- both input paths are always active
+        simultaneously on Linux, not just as a fallback, since there's no
+        reliable way to know in advance whether X11 delivery will actually
+        work for a given capture (e.g. it does when calibrating against the
+        bare desktop with no grabbing game running). _finish() is
+        idempotent and _on_press() ignores a press while one is already in
+        progress, so both paths racing to report the same physical click is
+        harmless.
+
+        The mouse-reading portion is wrapped in its own try/except so a
+        transient failure there (unlike the Escape check above it) can
+        never stop this loop from rescheduling itself -- silently losing
+        the Escape hatch too would be worse than a single missed mouse
+        poll."""
         if self._escape_requested.is_set():
             self._on_cancel(None)
             return
-        self._escape_poll_id = self.after(_ESCAPE_POLL_MS, self._poll_escape_requested)
+        try:
+            pressed = mouse.is_pressed("left")
+            x, y = mouse.get_position()
+            was_pressed = self._raw_mouse_was_pressed
+            self._raw_mouse_was_pressed = pressed
+            if pressed and not was_pressed:
+                self._on_raw_mouse_press(x, y)
+            elif pressed and was_pressed:
+                self._on_raw_mouse_drag(x, y)
+            elif not pressed and was_pressed:
+                self._on_raw_mouse_release(x, y)
+        except Exception as e:
+            log.warning(f"calibration overlay: raw mouse poll failed: {e}")
+        self._input_poll_id = self.after(_INPUT_POLL_MS, self._poll_linux_input)
+
+    def _on_raw_mouse_press(self, x, y):
+        """Overridden by RegionCaptureOverlay; a single-click subclass
+        (PointCaptureOverlay) has nothing to do on press."""
+
+    def _on_raw_mouse_drag(self, x, y):
+        """Overridden by RegionCaptureOverlay."""
+
+    def _on_raw_mouse_release(self, x, y):
+        """Overridden by both subclasses."""
 
     def _draw_hint(self, hint_text):
         """A persistent on-canvas reminder of what to do, so the one-time
@@ -184,16 +247,18 @@ class _FullscreenPickerOverlay(tk.Toplevel):
 
     def _finish(self, value):
         # Guards against a double-finish: a real click/Escape landing right
-        # as _poll_escape_requested's own after()-scheduled check fires (or
-        # vice versa) would otherwise call self.destroy() on an
-        # already-destroyed widget and invoke on_done twice.
+        # as _poll_linux_input's own after()-scheduled check fires (or a
+        # click reported through both the Tk canvas binding and the raw
+        # mouse poll -- see _poll_linux_input) would otherwise call
+        # self.destroy() on an already-destroyed widget and invoke on_done
+        # twice.
         if self._finished:
             return
         self._finished = True
         if self._global_escape_hook is not None:
             keyboard.unhook(self._global_escape_hook)
-        if self._escape_poll_id is not None:
-            self.after_cancel(self._escape_poll_id)
+        if self._input_poll_id is not None:
+            self.after_cancel(self._input_poll_id)
         callback = self.on_done
         self.destroy()
         callback(value)
@@ -212,35 +277,52 @@ class RegionCaptureOverlay(_FullscreenPickerOverlay):
         super().__init__(master, on_done, bounds, captured_image, hint_text)
         self._start = None
         self._rect_id = None
-        self.canvas.bind("<ButtonPress-1>", self._on_press)
-        self.canvas.bind("<B1-Motion>", self._on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<ButtonPress-1>", lambda e: self._on_press(e.x_root, e.y_root))
+        self.canvas.bind("<B1-Motion>", lambda e: self._on_drag(e.x_root, e.y_root))
+        self.canvas.bind("<ButtonRelease-1>", lambda e: self._on_release(e.x_root, e.y_root))
 
-    def _on_press(self, event):
-        self._start = (event.x_root, event.y_root)
+    # _on_raw_mouse_*(x, y): fed by _poll_linux_input's raw evdev-based
+    # mouse.is_pressed()/get_position() polling (Linux only) -- the actual
+    # fix for a game holding an X11 pointer grab, which stops the Tk canvas
+    # bindings above from ever firing at all (see _poll_linux_input's
+    # docstring). Both input paths call the exact same _on_press/_on_drag/
+    # _on_release below.
+    def _on_raw_mouse_press(self, x, y):
+        self._on_press(x, y)
+
+    def _on_raw_mouse_drag(self, x, y):
+        self._on_drag(x, y)
+
+    def _on_raw_mouse_release(self, x, y):
+        self._on_release(x, y)
+
+    def _on_press(self, x_root, y_root):
+        if self._start is not None:
+            return  # already tracking a press -- the other input path got here first
+        self._start = (x_root, y_root)
+        x_local, y_local = x_root - self.winfo_rootx(), y_root - self.winfo_rooty()
         self._rect_id = self.canvas.create_rectangle(
-            event.x, event.y, event.x, event.y, outline="red", width=2)
+            x_local, y_local, x_local, y_local, outline="red", width=2)
 
-    def _on_drag(self, event):
+    def _on_drag(self, x_root, y_root):
         if self._start is None:
             return
         x0, y0 = self._start
         # This rectangle is purely cosmetic drag feedback in canvas-local coordinates;
-        # the authoritative region below is computed entirely from x_root/y_root,
+        # the authoritative region below is computed entirely from root coordinates,
         # never from an assumed canvas-local == screen equivalence.
         self.canvas.coords(
             self._rect_id,
             x0 - self.winfo_rootx(), y0 - self.winfo_rooty(),
-            event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty())
+            x_root - self.winfo_rootx(), y_root - self.winfo_rooty())
 
-    def _on_release(self, event):
+    def _on_release(self, x_root, y_root):
         if self._start is None:
             self._finish(None)
             return
         x0, y0 = self._start
-        x1, y1 = event.x_root, event.y_root
-        left, top = min(x0, x1), min(y0, y1)
-        width, height = abs(x1 - x0), abs(y1 - y0)
+        left, top = min(x0, x_root), min(y0, y_root)
+        width, height = abs(x_root - x0), abs(y_root - y0)
         if width < 4 or height < 4:
             self._finish(None)
             return
@@ -257,7 +339,12 @@ class PointCaptureOverlay(_FullscreenPickerOverlay):
 
     def __init__(self, master, on_done, bounds, captured_image, hint_text=None):
         super().__init__(master, on_done, bounds, captured_image, hint_text)
-        self.canvas.bind("<ButtonRelease-1>", self._on_click)
+        self.canvas.bind("<ButtonRelease-1>", lambda e: self._on_click(e.x_root, e.y_root))
 
-    def _on_click(self, event):
-        self._finish((event.x_root, event.y_root))
+    # See RegionCaptureOverlay's _on_raw_mouse_* -- same reasoning, fed by
+    # _poll_linux_input's raw evdev-based polling (Linux only).
+    def _on_raw_mouse_release(self, x, y):
+        self._on_click(x, y)
+
+    def _on_click(self, x_root, y_root):
+        self._finish((x_root, y_root))
