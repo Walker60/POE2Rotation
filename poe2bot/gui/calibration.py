@@ -6,6 +6,9 @@ from poe2bot.executor import calibration_scale_note, capture_region, check_condi
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
 from poe2bot.gui.overlays import RegionCaptureOverlay, PointCaptureOverlay
+from poe2bot.log_setup import get_logger
+
+log = get_logger()
 
 _MATCH_COLOR = "#50fa7b"    # Dracula green -- reads as "good" regardless of theme
 _NO_MATCH_COLOR = "#ff5555"  # Dracula red == theme.DANGER_COLOR
@@ -65,7 +68,17 @@ class CalibrationMixin:
             left, top = 0, 0
             width, height = self.winfo_screenwidth(), self.winfo_screenheight()
         bounds = (left, top, width, height)
-        return bounds, capture_region(bounds)
+        image = capture_region(bounds)
+        # Diagnostic for the "overlay renders as a flat gray/black" reports:
+        # getextrema() gives (min, max) per channel -- a real screenshot has
+        # a wide spread; (0, 0) on every channel means capture_region itself
+        # got back solid black (e.g. mss/X11 unable to see a directly-scanned-out
+        # exclusive-fullscreen game surface, or a GPU-composited one), which
+        # would explain the flat-color overlay independently of anything this
+        # module or overlays.py does with the image afterward.
+        log.info(f"calibration capture: bounds={bounds} size={image.size} "
+                  f"extrema(min,max)/channel={image.getextrema()}")
+        return bounds, image
 
     def _start_image_capture(self, on_use, default_confidence=_DEFAULT_CONFIDENCE):
         """Runs the region-capture-overlay flow, ending in an image-match
