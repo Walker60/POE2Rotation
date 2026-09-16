@@ -29,7 +29,12 @@ class DragDropMixin:
     not just among current siblings -- and it becomes that group's first
     child. Two guards keep this sane: a group can never be dropped into
     itself or one of its own current descendants (which would create a
-    cycle), and dropping is refused past MAX_GROUP_NESTING_DEPTH.
+    cycle), and dropping is refused past MAX_GROUP_NESTING_DEPTH. Dropping
+    a nested group onto a plain STEP row instead reorders/inserts it as a
+    sibling within whatever list that step lives in -- which is how a
+    nested group gets pulled back out to a shallower level, including all
+    the way to the top level, by hovering an existing entry that's already
+    there (see _resolve_group_drop_target).
 
     A plain click (Button-1) on ttk.Treeview unconditionally collapses multi-
     selection to the single clicked row, synchronously, before any B1-Motion
@@ -40,6 +45,10 @@ class DragDropMixin:
     the collapse (returns "break") so the whole multi-selection can be
     dragged as a group; the release handler replicates the collapse itself
     if it turns out no drag actually happened (a plain click, not a drag).
+    A press that lands on a row's own expand/collapse arrow is left
+    completely alone (no "break", no drag candidate) so Tk's native
+    click-to-toggle keeps working there regardless of what's selected --
+    see _on_tree_press.
 
     The tree is never rebuilt (_refresh_steps_tree) while a drag is in
     progress -- only at release, once the reorder is fully resolved -- since
@@ -104,6 +113,18 @@ class DragDropMixin:
         return 1 + max((cls._group_subtree_depth(e) for e in nested), default=0)
 
     def _on_tree_press(self, event):
+        if self.tree.identify_element(event.x, event.y) == "Treeitem.indicator":
+            # The expand/collapse arrow -- never treat this as a drag, and
+            # don't return "break" below (which a row already in the current
+            # selection otherwise would): this binding runs before Tk's own
+            # class-level bindings, so "break" would silently swallow the
+            # native toggle for any row that happened to already be
+            # selected, which is most of the time you'd actually want to
+            # collapse/expand something. Leaving this click alone entirely
+            # lets Tk's own indicator handling run exactly as it would with
+            # no drag-and-drop bindings installed at all.
+            self._drag_candidate = None
+            return
         if event.state & 0x0005:  # Shift (0x1) or Control (0x4) held -- leave extend/toggle select alone
             self._drag_candidate = None
             return
@@ -278,33 +299,33 @@ class DragDropMixin:
     def _resolve_group_drop_target(self, event, candidate, parsed, target_row):
         """Resolves a drop target while dragging one or more Condition
         Groups (candidate[*][1] is None), which all share the same current
-        parent list (see _is_valid_drag_set). Hovering a DIFFERENT group's
-        own header row -- one that isn't among the dragged groups and isn't
-        nested inside one of them, and wouldn't push nesting past
-        MAX_GROUP_NESTING_DEPTH -- nests the dragged group(s) as that
-        group's first child(ren), exactly mirroring how a step dragged onto
-        a group's header row already nests into it (see the step-dragging
-        branch above) -- this is true even if the hovered group is a
-        current sibling of the dragged one(s), same as a step dragged onto
-        a sibling group's row already nests rather than just reordering.
-        Hovering the dragged groups' own current parent's header row (or
-        anywhere else that doesn't resolve to a valid nest target) instead
-        reorders the dragged group(s) among their own current siblings."""
+        parent list (see _is_valid_drag_set).
+
+        Hovering a group's own header row -- any group, at any depth,
+        whether or not it's a current sibling of the dragged one(s) -- ALWAYS
+        nests the dragged group(s) as that group's first child(ren), exactly
+        mirroring how a step dropped on a group's row already nests into it.
+        Refused (no valid drop) if the hovered group is one of the dragged
+        ones itself, one of their own descendants (that would create a
+        cycle), or nesting there would push past MAX_GROUP_NESTING_DEPTH.
+
+        Hovering a plain step (or one of its conditions, treated as hovering
+        that step's own row) instead reorders/inserts the dragged group(s)
+        as a sibling within WHATEVER list that step itself currently lives
+        in -- the top level, the dragged groups' own current parent, or any
+        other group entirely. This is what lets a nested group be dragged
+        back out to a shallower level (including all the way to the top
+        level): hover an existing entry that already lives there, the same
+        way a nested STEP is already promoted/moved by hovering a plain step
+        wherever it should end up. Blank space (nothing hovered) instead
+        stays within the dragged group(s)' own current parent, same as
+        before."""
         dragged_paths = {gp for gp, _s, _c in candidate}
         parent_path = next(iter(dragged_paths))[:-1]
 
-        if parsed is not None and parsed[0] and parsed[1] is not None:
-            # Hovering a step or one of its conditions that itself lives
-            # inside some group -- redirect to that OWNING group's header
-            # row (whatever depth it's at), mirroring how a condition row
-            # redirects to its owning step's row in
-            # _resolve_condition_drop_target. A TOP-LEVEL step/condition
-            # (parsed[0] == ()) has no owning group to redirect to -- left
-            # as-is, it flows through to sibling-target resolution below,
-            # used as a plain reorder anchor within the top-level list,
-            # exactly like hovering a plain step already works for a step
-            # drag.
-            parsed = (parsed[0], None, None)
+        if parsed is not None and parsed[2] is not None:
+            # Hovered a condition row -- treat it as hovering its owning step's own row.
+            parsed = (parsed[0], parsed[1], None)
 
         if parsed is not None and parsed[1] is None:
             target_path = parsed[0]
@@ -312,19 +333,27 @@ class DragDropMixin:
                 return None  # dropped on one of the dragged groups itself, or one of their own descendants
             # No special-case for target_path == parent_path (hovering the
             # dragged group(s)' own current parent's row): that just falls
-            # out of the same nest-at-front logic below as "reorder to the
-            # front of the list they're already in," mirroring exactly how
-            # a step dragged onto its own current group's header row
-            # already just moves it to the front of that same list.
+            # out of this same nest-at-front logic as "reorder to the front
+            # of the list they're already in," mirroring exactly how a step
+            # dragged onto its own current group's header row already just
+            # moves it to the front of that same list.
             max_dragged_depth = max(self._group_subtree_depth(self._group_at(gp)) for gp in dragged_paths)
             if len(target_path) + max_dragged_depth <= MAX_GROUP_NESTING_DEPTH:
                 dest_entries = self._steps_list_for(target_path)
                 highlight_iid = self._sibling_iid(target_path, 0) if dest_entries else target_row
                 return highlight_iid, target_path, 0, False
+            return None  # would exceed the nesting cap -- a group's own row never means "reorder"
 
-        exclude = {gp[-1] for gp in dragged_paths}
-        result = self._resolve_sibling_target(event, parsed, exclude, parent_path)
-        return (result[0], parent_path, result[1], result[2]) if result is not None else None
+        # Hovering a plain step, or blank space -- reorder/insert as a
+        # sibling within whichever list is actually in scope: that step's
+        # own current list if one is hovered, else the dragged group(s)'
+        # own current parent for blank space.
+        container_path = parsed[0] if parsed is not None else parent_path
+        if self._path_within(container_path, dragged_paths):
+            return None  # would require nesting a dragged group inside its own current subtree
+        exclude = {gp[-1] for gp in dragged_paths} if container_path == parent_path else set()
+        result = self._resolve_sibling_target(event, parsed, exclude, container_path)
+        return (result[0], container_path, result[1], result[2]) if result is not None else None
 
     def _resolve_condition_drop_target(self, event, candidate, parsed, target_row):
         owning_group, owning_step = candidate[0][0], candidate[0][1]
