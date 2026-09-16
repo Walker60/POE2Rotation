@@ -9,6 +9,12 @@ numpy>=1.24
 # Linux box (or inside a minimal container/CI runner) -- this variant has no
 # such runtime dependency, on either platform.
 opencv-python-headless>=4.8
+# Used by poe2bot/updater.py (Linux/Steam Deck self-update, see README's
+# Steam Deck section) to verify HTTPS certificates against a known-good CA
+# bundle instead of the OS's own -- a PyInstaller bundle carries the CA
+# paths its OpenSSL was built against, which may not exist on whatever
+# machine actually runs it.
+certifi
 psutil>=5.9
 pyautogui>=0.9.54
 Pillow>=10.0

@@ -59,7 +59,12 @@ jobs:
           source .venv/bin/activate
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          # pyinstaller-hooks-contrib -- specifically for its hook-certifi.py
+          # (collect_data_files('certifi')), which bundles certifi's own CA
+          # bundle file correctly so poe2bot/updater.py's HTTPS calls can
+          # verify certificates at runtime; PyInstaller has no built-in hook
+          # for certifi on its own.
+          pip install pyinstaller pyinstaller-hooks-contrib
 
       - name: Verify tkinter actually works in this environment
         run: |

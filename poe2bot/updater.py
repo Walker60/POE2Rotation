@@ -15,6 +15,7 @@ not a polished release channel.
 import json
 import os
 import shutil
+import ssl
 import sys
 import tarfile
 import tempfile
@@ -22,7 +23,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import certifi
+
 IS_SUPPORTED = sys.platform != "win32" and getattr(sys, "frozen", False)
+
+# A PyInstaller onedir bundle carries its own OpenSSL shared libraries,
+# built against whatever CA certificate PATHS happened to exist on the CI
+# runner that built it -- those paths (or the certs at them) may not exist
+# at all on the actual target machine, so ssl.create_default_context()'s
+# normal "ask the OS" behavior can fail with "unable to get local issuer
+# certificate" even though the connection itself is fine. Pointing
+# explicitly at certifi's own bundled CA file sidesteps the target
+# system's cert layout entirely -- this is the standard fix for exactly
+# this class of "frozen app can't verify HTTPS on a machine it wasn't
+# built on" problem.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 _REPO = "Walker60/POE2Rotation"
 _RELEASE_TAG = "steamdeck-latest"
@@ -74,7 +89,7 @@ def check_for_update() -> "UpdateInfo | None":
     as "no update," which would be actively misleading."""
     try:
         request = urllib.request.Request(_API_URL, headers=_REQUEST_HEADERS)
-        with urllib.request.urlopen(request, timeout=_CHECK_TIMEOUT_S) as response:
+        with urllib.request.urlopen(request, timeout=_CHECK_TIMEOUT_S, context=_SSL_CONTEXT) as response:
             data = json.load(response)
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -133,7 +148,7 @@ def download_and_install(update_info: "UpdateInfo", progress_callback=None) -> N
         if progress_callback:
             progress_callback("Downloading...")
         request = urllib.request.Request(update_info.download_url, headers=_REQUEST_HEADERS)
-        with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_S) as response, \
+        with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_S, context=_SSL_CONTEXT) as response, \
                 open(archive_path, "wb") as out_file:
             shutil.copyfileobj(response, out_file)
 
