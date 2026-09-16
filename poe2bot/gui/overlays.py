@@ -46,6 +46,21 @@ class _FullscreenPickerOverlay(tk.Toplevel):
             self._draw_hint(hint_text)
 
         self.bind("<Escape>", self._on_cancel)
+        # wait_visibility() BEFORE grab_set()/focus_force() -- not just
+        # belt-and-suspenders. On X11 (Steam Deck/Linux Desktop Mode),
+        # XSetInputFocus/XGrabPointer require the target window to already
+        # be viewable (mapped by the X server) or they silently fail --
+        # calling grab_set()/focus_force() right after creating the window,
+        # before Tk has actually finished mapping it, wins that race often
+        # enough to matter: the overlay still becomes visible (it doesn't
+        # need the grab for that), but never actually receives the click,
+        # which is exactly "screen goes gray, nothing responds to clicking
+        # it" with no error anywhere. Windows' focus/activation model has no
+        # equivalent "must already be mapped" requirement, so this was never
+        # reachable there. wait_visibility() blocks until the window is
+        # actually mapped, so the grab/focus calls that follow always land
+        # on a real, viewable window on every platform.
+        self.wait_visibility()
         self.grab_set()
         self.focus_force()
 
