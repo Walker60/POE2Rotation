@@ -27,6 +27,7 @@ from poe2bot.gui.conditions import ConditionsMixin, CONDITION_ACTION_LABELS
 from poe2bot.gui.condition_groups import ConditionGroupsMixin, GROUP_CONDITION_ACTION_LABELS
 from poe2bot.gui.hotkeys_ui import HotkeysMixin
 from poe2bot.gui.autosave import AutosaveMixin
+from poe2bot.gui.updater_ui import UpdaterMixin
 from poe2bot.gui.widgets import CollapsibleSection
 from poe2bot.gui.constants import STATUS_COLORS
 
@@ -34,7 +35,7 @@ log = get_logger()
 
 
 class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
-          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, HotkeysMixin, AutosaveMixin):
+          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, HotkeysMixin, AutosaveMixin, UpdaterMixin):
     def __init__(self):
         super().__init__()
         self.title("POE2 Rotation Bot")
@@ -993,6 +994,12 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         "__pause_capture__": "_on_pause_key_captured",
         "__step_key_capture__": "_on_step_key_captured",
         "__step_mouse_capture__": "_on_step_mouse_captured",
+        # UpdaterMixin (poe2bot/gui/updater_ui.py) -- Linux/Steam Deck only.
+        "__update_check_failed__": "_on_update_check_failed",
+        "__update_check_done__": "_on_update_check_done",
+        "__update_install_progress__": "_on_update_install_progress",
+        "__update_install_failed__": "_on_update_install_failed",
+        "__update_install_done__": "_on_update_install_done",
     }
 
     def _poll_status_queue(self):

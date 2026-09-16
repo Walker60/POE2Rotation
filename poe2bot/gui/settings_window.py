@@ -2,6 +2,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk
 
+from poe2bot import updater
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry
 
@@ -49,9 +50,33 @@ class SettingsWindow(tk.Toplevel):
         ttk.Button(window_frame, text="Open Logs Folder",
                    command=master._on_view_logs_clicked).pack(fill="x", pady=(4, 0))
 
+        if updater.IS_SUPPORTED:
+            self._build_updates_section(container)
+
         self._build_advanced_section(container)
 
         geometry.size_window_to_contents(self)
+
+    def _build_updates_section(self, container):
+        """Linux/Steam Deck only (see updater.IS_SUPPORTED) -- Windows has
+        no update mechanism yet, so this section doesn't exist there at
+        all, rather than showing a button that can't do anything."""
+        updates_frame = ttk.LabelFrame(container, text="Updates", padding=8)
+        updates_frame.pack(fill="x", pady=(8, 0))
+        ttk.Label(updates_frame, text=f"Current version: {updater.current_version()}",
+                  foreground="gray").pack(anchor="w")
+        self._update_btn = ttk.Button(
+            updates_frame, text="Check for Updates...", command=self._master._on_check_for_updates_clicked)
+        self._update_btn.pack(fill="x", pady=(4, 0))
+
+    def set_update_button_state(self, state: str, text: str):
+        """Called from UpdaterMixin (poe2bot/gui/updater_ui.py) as a check/
+        download progresses -- kept as a method (like refresh_theme_label)
+        rather than having that mixin reach into self._update_btn directly,
+        since this window is created once and reused via deiconify(), so
+        whatever's mid-flight when it's hidden needs a stable handle to
+        keep updating."""
+        self._update_btn.config(state=state, text=text)
 
     def _build_advanced_section(self, container):
         """The four settings poe2bot/config.py otherwise only reads from

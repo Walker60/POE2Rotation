@@ -62,12 +62,20 @@ work, check the specific caveats called out in `poe2bot/focus.py` and
 `main`/`steam-deck-linux-support` branches runs
 [`.github/workflows/build-steamdeck.yml`](.github/workflows/build-steamdeck.yml),
 which builds a self-contained folder (a full Python + Tcl/Tk + every
-dependency, via PyInstaller — see `packaging/linux.spec`) on a Linux runner
-and publishes it as a downloadable Actions artifact
-(`poe2bot-steamdeck-linux-x86_64.tar.gz`). Download that, extract it
-anywhere on the Deck, and run the `poe2bot` executable inside it directly —
-no `pip`, `pacman`, or Distrobox needed just to get Python/the dependencies
-in place. This is a first build pipeline, not yet confirmed to actually run
+dependency, via PyInstaller — see `packaging/linux.spec`) on a Linux runner.
+**The very first time**, download it from the workflow's Actions artifact
+(`poe2bot-steamdeck-linux-x86_64.tar.gz` — requires being logged into GitHub
+in a browser, since Actions artifacts have no public download link), extract
+it anywhere on the Deck, and run the `poe2bot` executable inside it directly
+— no `pip`, `pacman`, or Distrobox needed just to get Python/the dependencies
+in place. **After that**, use **Settings → Check for Updates** inside the
+app itself instead of repeating this by hand: it checks a rolling GitHub
+Release the same workflow publishes (which, unlike a plain Actions artifact,
+has a permanent public download link) and, if the SHA it was built from
+differs from the one currently running, downloads and installs the new
+build in place, then offers to restart into it — no browser, no manual
+download/extract needed for every iteration. This is a first build pipeline
+(and a first self-update mechanism), not yet confirmed to actually run
 correctly on real Deck hardware — see the rest of this section for what
 still has to be true regardless of how you got the app onto the Deck, and
 report back what breaks.

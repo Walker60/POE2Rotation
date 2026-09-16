@@ -26,11 +26,20 @@ on:
       - ".github/workflows/build-steamdeck.yml"
   workflow_dispatch: {}
 
+# Needed so softprops/action-gh-release (below) can create/update the rolling
+# release using the default GITHUB_TOKEN, with no extra secret to manage.
+permissions:
+  contents: write
+
 jobs:
   build-linux:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Record the version (short commit SHA) being built
+        id: version
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       # The system python3 (not actions/setup-python's own build) so that
       # apt's python3-tk is guaranteed to be the SAME Python tkinter links
@@ -62,6 +71,13 @@ jobs:
           source .venv/bin/activate
           pyinstaller packaging/linux.spec --distpath dist --workpath build --noconfirm
 
+      # Read by poe2bot/updater.py's current_version() at runtime -- this is
+      # the ONLY versioning scheme this project has (a git short SHA, not a
+      # semantic version), matched against the rolling release's own body
+      # below by the in-app "Check for Updates" button.
+      - name: Write the VERSION file
+        run: echo "${{ steps.version.outputs.sha }}" > dist/poe2bot/VERSION
+
       - name: Archive the bundle
         run: |
           cd dist
@@ -72,3 +88,22 @@ jobs:
           name: poe2bot-steamdeck-linux-x86_64
           path: dist/poe2bot-steamdeck-linux-x86_64.tar.gz
           retention-days: 30
+
+      # A single ROLLING release (same tag every time -- this action updates
+      # an existing release in place, replacing its assets, rather than
+      # creating a new one per push) is what poe2bot/updater.py's in-app
+      # "Check for Updates" button reads: unlike a plain Actions artifact
+      # (only downloadable by someone logged into GitHub, no public URL,
+      # 30-day retention), a Release's assets have permanent, unauthenticated
+      # download URLs, which is what makes an automated in-app updater
+      # possible at all. Deliberately a "-prerelease" (this is a rolling dev
+      # build for fast iteration, not a vetted stable release) so it never
+      # shows up as this repo's "Latest release" on GitHub's own UI.
+      - name: Publish/update the rolling steamdeck-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: steamdeck-latest
+          name: "Steam Deck build ${{ steps.version.outputs.sha }}"
+          body: "${{ steps.version.outputs.sha }}"
+          prerelease: true
+          files: dist/poe2bot-steamdeck-linux-x86_64.tar.gz
