@@ -5,6 +5,10 @@ import tkinter as tk
 import keyboard
 from PIL import Image, ImageTk
 
+from poe2bot.log_setup import get_logger
+
+log = get_logger()
+
 _IS_WINDOWS = sys.platform == "win32"
 _ESCAPE_POLL_MS = 50  # how often the Tk thread checks for a background-thread Escape request
 
@@ -71,6 +75,35 @@ class _FullscreenPickerOverlay(tk.Toplevel):
             self._draw_hint(hint_text)
 
         self.bind("<Escape>", self._on_cancel)
+
+        # Belt-and-suspenders escape hatch, Linux only -- installed BEFORE
+        # any grab attempt below, deliberately: if grab_set_global() (or
+        # even wait_visibility()/focus_force()) ever raises -- a real
+        # possibility, since this overlay's geometry exactly matches the
+        # screen resolution, which KWin's own fullscreen-window heuristics
+        # (see this class's docstring) can make transiently un-viewable --
+        # an exception here would abort the rest of __init__, meaning this
+        # hook (and even the subclass's own click bindings, registered
+        # after super().__init__() returns) would never get installed at
+        # all. That exactly reproduces "overlay stuck, nothing responds,
+        # not even Escape," which is worse than not having a grab.
+        # keyboard.hook() reads raw input events itself (evdev on Linux)
+        # independent of which window X11 thinks has focus, so Escape can
+        # always dismiss this overlay regardless of what the game has
+        # grabbed. Runs on keyboard's own hook thread, not Tk's -- it only
+        # ever sets a flag; _poll_escape_requested (driven by self.after,
+        # so it always runs on the Tk thread) is what actually acts on it.
+        self._escape_requested = threading.Event()
+        self._escape_poll_id = None
+        self._global_escape_hook = None
+        if not _IS_WINDOWS:
+            def on_key_event(event):
+                if event.event_type == keyboard.KEY_DOWN and event.name == "esc":
+                    self._escape_requested.set()
+            keyboard.hook(on_key_event)
+            self._global_escape_hook = on_key_event
+            self._poll_escape_requested()
+
         # wait_visibility() BEFORE grab_set()/focus_force() -- not just
         # belt-and-suspenders. On X11 (Steam Deck/Linux Desktop Mode),
         # XSetInputFocus/XGrabPointer require the target window to already
@@ -85,53 +118,41 @@ class _FullscreenPickerOverlay(tk.Toplevel):
         # reachable there. wait_visibility() blocks until the window is
         # actually mapped, so the grab/focus calls that follow always land
         # on a real, viewable window on every platform.
+        #
+        # Both grab_set()/grab_set_global() and focus_force() are wrapped
+        # in try/except: any of them failing (e.g. TclError: grab failed:
+        # window not viewable) must not prevent the escape hatch installed
+        # above from working, or the click bindings the subclass registers
+        # right after this constructor returns.
         self.wait_visibility()
-        if _IS_WINDOWS:
-            self.grab_set()
-        else:
-            # A plain grab_set() is a *local* grab -- it only arbitrates
-            # between this application's own windows, it can't take pointer/
-            # keyboard events away from a DIFFERENT X11 client. Path of
-            # Exile 2 (like many games, for camera-look/click-to-move)
-            # commonly holds its own active X11 pointer grab, which keeps
-            # routing every click to the game even after this overlay
-            # becomes the topmost, focused-looking window -- observed on
-            # Steam Deck as "the overlay appears but clicking it does
-            # nothing." grab_set_global() performs a real global grab,
-            # which X11 allows a new requester to take over from whichever
-            # client held it before, exactly what's needed here. Not done
-            # on Windows: the local grab already works fine there (this
-            # class of persistent OS-level exclusive input grab isn't a
-            # thing on Windows the same way), and a global grab is more
-            # disruptive than necessary to reach for unless it's actually
-            # needed.
-            self.grab_set_global()
-        self.focus_force()
-
-        # Belt-and-suspenders escape hatch, Linux only: if grab_set_global()
-        # above still doesn't win back keyboard focus from the game (e.g. a
-        # raw evdev-level input grab the game holds for itself, entirely
-        # below X11), the plain <Escape> binding above would never fire
-        # either, leaving this fullscreen, click-through-nothing overlay with
-        # no way to cancel it short of killing the process -- reported on
-        # Steam Deck as "stuck there with no way of continuing or
-        # cancelling it." keyboard.hook() reads raw input events itself
-        # (evdev on Linux) independent of which window X11 thinks has
-        # focus, so Escape can always dismiss this overlay regardless of
-        # what the game has grabbed. Runs on keyboard's own hook thread, not
-        # Tk's -- it only ever sets a flag; _poll_escape_requested (driven by
-        # self.after, so it always runs on the Tk thread) is what actually
-        # acts on it.
-        self._escape_requested = threading.Event()
-        self._escape_poll_id = None
-        self._global_escape_hook = None
-        if not _IS_WINDOWS:
-            def on_key_event(event):
-                if event.event_type == keyboard.KEY_DOWN and event.name == "esc":
-                    self._escape_requested.set()
-            keyboard.hook(on_key_event)
-            self._global_escape_hook = on_key_event
-            self._poll_escape_requested()
+        try:
+            if _IS_WINDOWS:
+                self.grab_set()
+            else:
+                # A plain grab_set() is a *local* grab -- it only
+                # arbitrates between this application's own windows, it
+                # can't take pointer/keyboard events away from a DIFFERENT
+                # X11 client. Path of Exile 2 (like many games, for
+                # camera-look/click-to-move) commonly holds its own active
+                # X11 pointer grab, which keeps routing every click to the
+                # game even after this overlay becomes the topmost,
+                # focused-looking window -- observed on Steam Deck as "the
+                # overlay appears but clicking it does nothing."
+                # grab_set_global() performs a real global grab, which X11
+                # allows a new requester to take over from whichever client
+                # held it before, exactly what's needed here. Not done on
+                # Windows: the local grab already works fine there (this
+                # class of persistent OS-level exclusive input grab isn't a
+                # thing on Windows the same way), and a global grab is more
+                # disruptive than necessary to reach for unless it's
+                # actually needed.
+                self.grab_set_global()
+        except tk.TclError as e:
+            log.warning(f"calibration overlay: grab_set{'_global' if not _IS_WINDOWS else ''}() failed: {e}")
+        try:
+            self.focus_force()
+        except tk.TclError as e:
+            log.warning(f"calibration overlay: focus_force() failed: {e}")
 
     def _poll_escape_requested(self):
         if self._escape_requested.is_set():
