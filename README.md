@@ -56,7 +56,32 @@ debug on an actual Deck, not a finished, tested feature. If something doesn't
 work, check the specific caveats called out in `poe2bot/focus.py` and
 `poe2bot/controller_input.py`'s module docstrings first.
 
-What you need before running it:
+### Getting it onto the Deck
+
+**Option A (recommended): the pre-built bundle.** Every push to this repo's
+`main`/`steam-deck-linux-support` branches runs
+[`.github/workflows/build-steamdeck.yml`](.github/workflows/build-steamdeck.yml),
+which builds a self-contained folder (a full Python + Tcl/Tk + every
+dependency, via PyInstaller — see `packaging/linux.spec`) on a Linux runner
+and publishes it as a downloadable Actions artifact
+(`poe2bot-steamdeck-linux-x86_64.tar.gz`). Download that, extract it
+anywhere on the Deck, and run the `poe2bot` executable inside it directly —
+no `pip`, `pacman`, or Distrobox needed just to get Python/the dependencies
+in place. This is a first build pipeline, not yet confirmed to actually run
+correctly on real Deck hardware — see the rest of this section for what
+still has to be true regardless of how you got the app onto the Deck, and
+report back what breaks.
+
+**Option B: install everything yourself**, e.g. inside
+[Distrobox](https://github.com/89luca89/distrobox) (a container that doesn't
+require Developer Mode's permanent read-write unlock, recommended since
+SteamOS's own root filesystem is read-only) — install Python 3 + `tk`
+inside it, then `pip install -r requirements.txt` (`python-xlib` and
+`evdev`, the two Linux-only additions, are pulled in automatically via
+environment markers; they're never installed on Windows).
+
+### What has to be true either way
+
 - **An X11 session**, not Wayland: `steamos-session-select plasma-x11-persistent`.
   `keyboard`/`mouse`/`mss`/`pyautogui` (hotkey capture, input injection, screen/pixel
   capture) have no Wayland support at all, on any platform, so this isn't optional.
@@ -64,19 +89,12 @@ What you need before running it:
   still selectable as of this writing, but Valve's long-term direction is Wayland
   — if a future SteamOS update drops the X11 desktop session, this whole approach
   needs revisiting.)
-- **A real, mutable Linux userspace with Tk installed** — SteamOS's own root
-  filesystem is read-only by default. [Distrobox](https://github.com/89luca89/distrobox)
-  (a container that doesn't require Developer Mode's permanent read-write unlock)
-  is the recommended way to get one; install Python 3 + `tk` inside it, with X11
-  GUI passthrough (Distrobox does this by default) and device passthrough for
-  `/dev/uinput` (virtual controller output) and `/dev/input/*` (real controller
-  input).
-- **Permission to read/write those devices** without root: add your user to the
-  `input`/`uinput` groups (or an equivalent udev rule) inside the container —
-  `vgamepad`'s own Linux docs describe the exact steps.
-- `pip install -r requirements.txt` inside that container — `python-xlib` and
-  `evdev` (the two Linux-only additions) are pulled in automatically via
-  environment markers; they're never installed on Windows.
+- **Permission to read/write `/dev/uinput` (virtual controller output) and
+  `/dev/input/*` (real controller input) without root** — add your user to the
+  `input`/`uinput` groups (or an equivalent udev rule); `vgamepad`'s own Linux
+  docs describe the exact steps. If running inside a container (Option B, or
+  if you choose to run Option A's bundle inside one too), it also needs device
+  passthrough for both of those.
 
 **Virtual-controller output** (a step that presses a button on the emulated
 controller — see "Controller output" above): `vgamepad`, the same library

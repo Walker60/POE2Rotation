@@ -1,6 +1,18 @@
 import os
+import sys
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# When frozen (PyInstaller -- see packaging/linux.spec), __file__ points
+# somewhere inside the bundle's own extracted/embedded copy of this package,
+# not a location that should hold the user's actual rotations/logs/templates
+# -- those need to live alongside the executable itself instead, so they
+# persist across replacing the bundle with a newer build. sys.executable is
+# the frozen app's own binary in that case; getattr(sys, "frozen", False) is
+# the flag PyInstaller sets on the sys module at runtime for exactly this
+# check (unset, so falsy, under a normal `python main.py` run either way).
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 ROTATIONS_DIR = os.path.join(BASE_DIR, "rotations")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")

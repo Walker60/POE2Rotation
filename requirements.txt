@@ -2,7 +2,13 @@ keyboard>=0.13.5
 mouse>=0.7.1
 mss>=9.0.1
 numpy>=1.24
-opencv-python>=4.8
+# -headless (not plain opencv-python): the app only ever calls
+# cv2.matchTemplate/cv2.minMaxLoc (see executor.py's area-search matching),
+# never any GUI window function, so there's no reason to pull in a build
+# linked against system GL/GTK libraries that may not be present on a given
+# Linux box (or inside a minimal container/CI runner) -- this variant has no
+# such runtime dependency, on either platform.
+opencv-python-headless>=4.8
 psutil>=5.9
 pyautogui>=0.9.54
 Pillow>=10.0
