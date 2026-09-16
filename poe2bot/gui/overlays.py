@@ -1,6 +1,12 @@
+import sys
+import threading
 import tkinter as tk
 
+import keyboard
 from PIL import Image, ImageTk
+
+_IS_WINDOWS = sys.platform == "win32"
+_ESCAPE_POLL_MS = 50  # how often the Tk thread checks for a background-thread Escape request
 
 
 class _FullscreenPickerOverlay(tk.Toplevel):
@@ -46,6 +52,7 @@ class _FullscreenPickerOverlay(tk.Toplevel):
     def __init__(self, master, on_done, bounds, captured_image, hint_text=None):
         super().__init__(master)
         self.on_done = on_done
+        self._finished = False
         left, top, width, height = bounds
         self._overlay_width = width
 
@@ -79,8 +86,58 @@ class _FullscreenPickerOverlay(tk.Toplevel):
         # actually mapped, so the grab/focus calls that follow always land
         # on a real, viewable window on every platform.
         self.wait_visibility()
-        self.grab_set()
+        if _IS_WINDOWS:
+            self.grab_set()
+        else:
+            # A plain grab_set() is a *local* grab -- it only arbitrates
+            # between this application's own windows, it can't take pointer/
+            # keyboard events away from a DIFFERENT X11 client. Path of
+            # Exile 2 (like many games, for camera-look/click-to-move)
+            # commonly holds its own active X11 pointer grab, which keeps
+            # routing every click to the game even after this overlay
+            # becomes the topmost, focused-looking window -- observed on
+            # Steam Deck as "the overlay appears but clicking it does
+            # nothing." grab_set_global() performs a real global grab,
+            # which X11 allows a new requester to take over from whichever
+            # client held it before, exactly what's needed here. Not done
+            # on Windows: the local grab already works fine there (this
+            # class of persistent OS-level exclusive input grab isn't a
+            # thing on Windows the same way), and a global grab is more
+            # disruptive than necessary to reach for unless it's actually
+            # needed.
+            self.grab_set_global()
         self.focus_force()
+
+        # Belt-and-suspenders escape hatch, Linux only: if grab_set_global()
+        # above still doesn't win back keyboard focus from the game (e.g. a
+        # raw evdev-level input grab the game holds for itself, entirely
+        # below X11), the plain <Escape> binding above would never fire
+        # either, leaving this fullscreen, click-through-nothing overlay with
+        # no way to cancel it short of killing the process -- reported on
+        # Steam Deck as "stuck there with no way of continuing or
+        # cancelling it." keyboard.hook() reads raw input events itself
+        # (evdev on Linux) independent of which window X11 thinks has
+        # focus, so Escape can always dismiss this overlay regardless of
+        # what the game has grabbed. Runs on keyboard's own hook thread, not
+        # Tk's -- it only ever sets a flag; _poll_escape_requested (driven by
+        # self.after, so it always runs on the Tk thread) is what actually
+        # acts on it.
+        self._escape_requested = threading.Event()
+        self._escape_poll_id = None
+        self._global_escape_hook = None
+        if not _IS_WINDOWS:
+            def on_key_event(event):
+                if event.event_type == keyboard.KEY_DOWN and event.name == "esc":
+                    self._escape_requested.set()
+            keyboard.hook(on_key_event)
+            self._global_escape_hook = on_key_event
+            self._poll_escape_requested()
+
+    def _poll_escape_requested(self):
+        if self._escape_requested.is_set():
+            self._on_cancel(None)
+            return
+        self._escape_poll_id = self.after(_ESCAPE_POLL_MS, self._poll_escape_requested)
 
     def _draw_hint(self, hint_text):
         """A persistent on-canvas reminder of what to do, so the one-time
@@ -105,6 +162,17 @@ class _FullscreenPickerOverlay(tk.Toplevel):
         self._finish(None)
 
     def _finish(self, value):
+        # Guards against a double-finish: a real click/Escape landing right
+        # as _poll_escape_requested's own after()-scheduled check fires (or
+        # vice versa) would otherwise call self.destroy() on an
+        # already-destroyed widget and invoke on_done twice.
+        if self._finished:
+            return
+        self._finished = True
+        if self._global_escape_hook is not None:
+            keyboard.unhook(self._global_escape_hook)
+        if self._escape_poll_id is not None:
+            self.after_cancel(self._escape_poll_id)
         callback = self.on_done
         self.destroy()
         callback(value)
