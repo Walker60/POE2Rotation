@@ -23,19 +23,20 @@ class HotkeysMixin:
     # ---- hotkey binding ----------------------------------------------------
 
     def _set_bind_buttons_enabled(self, enabled: bool):
-        """capture_next_key()/capture_next_controller_button()/
-        capture_next_mouse_button() are blocking calls sharing one lock
-        (HotkeyManager._capture_lock) and only one can meaningfully be in
-        flight at a time -- disabling all six buttons, not just the one
-        clicked, makes that exclusivity visible rather than letting a second
-        click silently queue up behind the first with no feedback. The four
-        _KEY_BIND_SPECS buttons are looped rather than named individually so
-        adding a new bindable key only means adding a spec entry, not also
-        remembering to list its button here."""
+        """capture_next_key()/capture_next_mouse_button() are blocking calls
+        sharing one lock (HotkeyManager._capture_lock) and only one can
+        meaningfully be in flight at a time -- disabling all five buttons,
+        not just the one clicked, makes that exclusivity visible rather than
+        letting a second click silently queue up behind the first with no
+        feedback. The four _KEY_BIND_SPECS buttons are looped rather than
+        named individually so adding a new bindable key only means adding a
+        spec entry, not also remembering to list its button here. (The step
+        editor's Map Controller Button isn't included -- it opens its own
+        modal window instead of contending for this same lock; see
+        StepEditorMixin._on_map_step_key_clicked.)"""
         state = "normal" if enabled else "disabled"
         for spec in self._KEY_BIND_SPECS.values():
             getattr(self, spec["button_attr"]).config(state=state)
-        self.capture_step_key_btn.config(state=state)
         self.capture_step_mouse_btn.config(state=state)
 
     def _on_bind_hotkey_clicked(self):

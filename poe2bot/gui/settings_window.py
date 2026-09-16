@@ -5,6 +5,7 @@ from tkinter import ttk
 from poe2bot import updater
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry
+from poe2bot.gui.controller_layouts import CONTROLLER_TYPE_LABELS
 
 
 class SettingsWindow(tk.Toplevel):
@@ -34,6 +35,18 @@ class SettingsWindow(tk.Toplevel):
                         value="keyboard", command=master._on_active_device_changed).pack(anchor="w")
         ttk.Radiobutton(device_frame, text="Controller", variable=master.active_device_var,
                         value="controller", command=master._on_active_device_changed).pack(anchor="w")
+
+        controller_frame = ttk.LabelFrame(container, text="Controller", padding=8)
+        controller_frame.pack(fill="x", pady=(8, 0))
+        ttk.Label(controller_frame, text="Controller type:").pack(anchor="w")
+        controller_type_combo = ttk.Combobox(
+            controller_frame, textvariable=master.controller_type_var,
+            values=list(CONTROLLER_TYPE_LABELS.values()), state="readonly")
+        controller_type_combo.pack(fill="x", pady=(2, 0))
+        controller_type_combo.bind("<<ComboboxSelected>>", master._on_controller_type_changed)
+        ttk.Label(controller_frame, foreground="gray", wraplength=320, justify="left",
+                  text="Which labels/layout \"Map Controller Button\" (in the step editor) shows -- "
+                       "doesn't change which controller is actually read.").pack(anchor="w", pady=(4, 0))
 
         appearance_frame = ttk.LabelFrame(container, text="Appearance", padding=8)
         appearance_frame.pack(fill="x", pady=(8, 0))

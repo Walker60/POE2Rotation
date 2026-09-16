@@ -5,6 +5,7 @@ import tkinter as tk
 
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui.action_labels import ACTION_LABELS
+from poe2bot.gui.controller_map_window import ControllerMapWindow
 from poe2bot.models import ConditionGroup, Step, iter_steps, replace_step_fields
 
 # (StringVar attr, Entry attr, parser, allow_blank, Step field name, display label) for
@@ -24,8 +25,16 @@ class StepEditorMixin:
     """The step Treeview and the "Selected Step" editing form: reading/writing
     it, the reset helpers that blank it for a fresh step (also called from
     RotationListMixin when switching rotations), Add/Update/Remove/Copy/
-    Paste/Move, and capturing a controller button press directly into the
+    Paste/Move, and mapping a controller or mouse button directly into the
     Key field. Mixed into App (see poe2bot/gui/app.py).
+
+    The controller-button map (poe2bot/gui/controller_map_window.py) is a
+    click-to-choose picker, not a physical-press capture like the mouse
+    button one below or the rotation-level hotkey/cancel/reset/pause binds
+    in poe2bot/gui/hotkeys_ui.py -- deliberately, since it's the only
+    reliable way to bind a Steam Deck's own built-in controls (they're
+    normally owned by Steam Input and never reach evdev unless poe2bot
+    itself is launched through Steam; see README's Steam Deck section).
 
     self.editing_steps is a heterogeneous list of Step | ConditionGroup (see
     poe2bot/models.py), and a ConditionGroup's own `entries` is the same
@@ -54,24 +63,21 @@ class StepEditorMixin:
     lists.
     """
 
-    # ---- controller-button capture for the Key field -----------------------
+    # ---- controller-button map for the Key field ----------------------------
 
-    def _on_capture_step_key_clicked(self):
-        self.capture_step_key_btn.config(text="Press a controller button...")
-        self._set_bind_buttons_enabled(False)
-        threading.Thread(target=self._capture_step_key_worker, daemon=True).start()
+    def _on_map_step_key_clicked(self):
+        # Synchronous, unlike the physical-press captures below -- Controller
+        # MapWindow is a click-to-choose Toplevel, not a blocking wait on
+        # hardware input, so there's no worker thread/status_queue hop needed,
+        # and no other bind button needs disabling while it's open (its own
+        # grab_set() already prevents interacting with the rest of the editor).
+        ControllerMapWindow(self, self.controller_type, self._on_step_key_mapped)
 
-    def _capture_step_key_worker(self):
-        key = self.hotkey_manager.capture_next_controller_button()
-        self.status_queue.put(("__step_key_capture__", key))
-
-    def _on_step_key_captured(self, key: str):
+    def _on_step_key_mapped(self, key: str):
         # No display_name() indirection needed here, unlike the four rotation-
         # level captures -- the Key field is a plain editable Entry that
         # already shows raw text (e.g. "controller:a"), not a read-only label.
         self.step_key_var.set(key)
-        self.capture_step_key_btn.config(text="Capture Controller Button")
-        self._set_bind_buttons_enabled(True)
 
     # ---- mouse-button capture for the Key field -----------------------------
 
@@ -85,7 +91,7 @@ class StepEditorMixin:
         self.status_queue.put(("__step_mouse_capture__", key))
 
     def _on_step_mouse_captured(self, key: str):
-        # Same raw-text Entry as _on_step_key_captured -- e.g. "mouse:left".
+        # Same raw-text Entry as _on_step_key_mapped -- e.g. "mouse:left".
         self.step_key_var.set(key)
         self.capture_step_mouse_btn.config(text="Capture Mouse Button")
         self._set_bind_buttons_enabled(True)

@@ -120,15 +120,18 @@ display — a template captured on a Windows PC's screen won't match the Deck's
 rendering, the same as moving between any two different screens today.
 
 **The Deck's own built-in controls (buttons/sticks/trackpads) won't show up
-for "Capture Controller Button" out of the box.** They're normally owned by
-**Steam Input**, which only creates a generic virtual gamepad for a game
-Steam is actively running/targeting — a plain terminal-launched app in
-Desktop Mode never gets one, so `evdev` genuinely has nothing gamepad-like to
-find (this isn't a bug; if it happens, poe2bot's log will list every
-`/dev/input` device it actually saw, none of them recognized as a gamepad —
-check `logs/poe2bot.log` for that dump if you want to confirm this is what's
-happening on your setup before trying the fix below). Two ways to make the
-Deck's own controls visible as a real evdev gamepad:
+for a physical-press capture (e.g. a rotation's "Bind Hotkey...") out of the
+box.** They're normally owned by **Steam Input**, which only creates a
+generic virtual gamepad for a game Steam is actively running/targeting — a
+plain terminal-launched app in Desktop Mode never gets one, so `evdev`
+genuinely has nothing gamepad-like to find (this isn't a bug; if it happens,
+poe2bot's log will list every `/dev/input` device it actually saw, none of
+them recognized as a gamepad — check `logs/poe2bot.log` for that dump if you
+want to confirm this is what's happening on your setup before trying the fix
+below). This also means the Deck's own controls can't actually *trigger* a
+rotation while playing until one of the two fixes below is in place, even
+after a hotkey is bound to one of their buttons. Two ways to make the Deck's
+own controls visible as a real evdev gamepad:
 
 - **Add poe2bot as a non-Steam shortcut and launch it through Steam** (Desktop
   Mode → Steam → Games → "Add a Non-Steam Game" → point it at the `poe2bot`
@@ -147,6 +150,15 @@ Deck's own controls visible as a real evdev gamepad:
 Either way, a real USB/Bluetooth controller plugged into the Deck doesn't
 have this problem at all — it shows up as a normal gamepad to `evdev`
 regardless of Steam.
+
+Choosing which button a *step* should press is a separate, unaffected path:
+the step editor's **Map Controller Button** lets you click a button's name
+from a list instead of physically pressing it, so it works immediately no
+matter what `evdev` can currently see. Pick **Settings... > Controller >
+Controller type: Steam Deck** first so that list shows Deck-style labels
+(View/Menu, L1/R1/L2/R2) instead of Xbox ones (Back/Start, LB/RB/LT/RT) —
+purely cosmetic, since every button still presses the same spot on the
+emulated Xbox 360 controller either way.
 
 ## Configuration
 

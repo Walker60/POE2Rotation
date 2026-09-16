@@ -287,7 +287,7 @@ class HotkeyManager:
         pause handler (every rotation, all three kinds) so a capture flow's
         physical input doesn't also fire whatever action currently owns it,
         then restores them all on exit. Shared by capture_next_key() and
-        capture_next_controller_button() -- both mutate/restore the same
+        capture_next_mouse_button() -- both mutate/restore the same
         registries, so callers must hold self._capture_lock around this too,
         not just each other."""
         if self._enabled:
@@ -339,23 +339,23 @@ class HotkeyManager:
 
     def _capture(self, attach_fns) -> str:
         """BLOCKING -- call from a background thread only, never the Tk main
-        thread. Shared implementation behind capture_next_key(),
-        capture_next_controller_button(), and capture_next_mouse_button():
-        temporarily suspends every bound rotation hotkey -- trigger, cancel,
-        reset, and pause alike (not the panic key) -- so the input being
-        pressed to bind doesn't also fire whatever action currently owns it,
-        then waits for the first of `attach_fns` (each one of the
-        _attach_*_capture methods above) to report a value, and returns it.
+        thread. Shared implementation behind capture_next_key() and
+        capture_next_mouse_button(): temporarily suspends every bound
+        rotation hotkey -- trigger, cancel, reset, and pause alike (not the
+        panic key) -- so the input being pressed to bind doesn't also fire
+        whatever action currently owns it, then waits for the first of
+        `attach_fns` (each one of the _attach_*_capture methods above) to
+        report a value, and returns it.
 
         Guarded by self._capture_lock so two overlapping calls (e.g. the GUI
         lets a user click a second "Bind ..." button before the first capture
         resolves) can't both unregister-then-restore concurrently -- without
         this, both callers' restore step would re-register every action key,
         leaving a duplicate, permanently orphaned hook that nothing could ever
-        unhook again short of restarting the process. All three public
-        methods share this lock (via _suspend_all_action_keys()), since they
-        all mutate/restore the same registries and so must be mutually
-        exclusive with each other, not just with themselves.
+        unhook again short of restarting the process. Both public methods
+        share this lock (via _suspend_all_action_keys()), since they both
+        mutate/restore the same registries and so must be mutually exclusive
+        with each other, not just with themselves.
         """
         with self._capture_lock, self._suspend_all_action_keys():
             result = {}
@@ -382,14 +382,6 @@ class HotkeyManager:
         See _capture() for the suspend/restore/locking discipline."""
         return self._capture((self._attach_keyboard_capture, self._attach_mouse_capture,
                                self._attach_controller_capture))
-
-    def capture_next_controller_button(self) -> str:
-        """BLOCKING -- same as capture_next_key(), but listens ONLY to the
-        controller reader -- for the step editor's controller-only capture,
-        where a stray keyboard/mouse event must not be able to win the race
-        and silently write the wrong kind of value into a field meant to
-        hold a controller button."""
-        return self._capture((self._attach_controller_capture,))
 
     def capture_next_mouse_button(self) -> str:
         """BLOCKING -- same as capture_next_key(), but listens ONLY to the

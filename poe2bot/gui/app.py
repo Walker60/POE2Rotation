@@ -17,6 +17,7 @@ from poe2bot.models import Rotation, replace_step_fields, folder_in_scope, iter_
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
 from poe2bot.gui.activity_window import ActivityWindow
+from poe2bot.gui.controller_layouts import CONTROLLER_TYPE_LABELS, controller_type_from_label
 from poe2bot.gui.hotkey_map_window import HotkeyMapWindow
 from poe2bot.gui.settings_window import SettingsWindow
 from poe2bot.gui.rotation_list import RotationListMixin
@@ -77,6 +78,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
 
         self.active_folder = state["active_folder"]  # None = "(All Folders)" -- no scoping restriction
         self.active_device = state["active_device"]  # "keyboard" or "controller"
+        self.controller_type = state["controller_type"]  # "xbox" or "steam_deck" -- see controller_layouts.py
 
         self.rotations = {}          # name -> Rotation, mirrors what's on disk
         self.editing_original_name = None    # name of rotation being edited, or None if new/unsaved
@@ -141,7 +143,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         them, so adding a new one only means updating this method and
         app_state.py, not hunting down every save_state(...) call site."""
         app_state.save_state(
-            self.active_folder, self.active_device, self._theme,
+            self.active_folder, self.active_device, self.controller_type, self._theme,
             self.game_process_name, self.panic_key,
             self.controller_min_tap_ms, self.controller_index)
 
@@ -279,6 +281,17 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self._persist_app_state()
         self._refresh_rotation_tree()
 
+    def _on_controller_type_changed(self, _event=None):
+        """Purely cosmetic -- picks which labels/layout the step editor's
+        Map Controller Button window shows (see controller_layouts.py), not
+        which real device is read or which button names get encoded into a
+        step's Key field. Nothing needs re-binding or re-registering."""
+        new_type = controller_type_from_label(self.controller_type_var.get())
+        if new_type == self.controller_type:
+            return
+        self.controller_type = new_type
+        self._persist_app_state()
+
     def _on_advanced_settings_changed(self, game_process_name: str, panic_key: str,
                                        controller_min_tap_ms: int, controller_index: int):
         """Applies and persists a new Target Process Name/Panic Key/
@@ -355,6 +368,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # created here, unconditionally, since _on_active_device_changed reads it
         # regardless of whether Settings has ever been opened this session.
         self.active_device_var = tk.StringVar(value=self.active_device)
+        # Same reasoning as active_device_var above -- bound to SettingsWindow's
+        # "Controller type" Combobox, but owned here so it (and therefore
+        # self.controller_type) survives Settings being closed and reopened.
+        self.controller_type_var = tk.StringVar(value=CONTROLLER_TYPE_LABELS[self.controller_type])
         ttk.Button(bottom, text="Settings...", command=self._on_show_settings_clicked).pack(side="right")
 
     def _build_rotation_list_panel(self):
@@ -648,9 +665,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Label(identity_row, text="Key").grid(row=0, column=2, sticky="w")
         ttk.Entry(identity_row, textvariable=self.step_key_var, width=10).grid(
             row=0, column=3, padx=(4, 8), sticky="w")
-        self.capture_step_key_btn = ttk.Button(
-            identity_row, text="Capture Controller Button", command=self._on_capture_step_key_clicked)
-        self.capture_step_key_btn.grid(row=0, column=4, padx=(0, 4))
+        self.map_step_key_btn = ttk.Button(
+            identity_row, text="Map Controller Button", command=self._on_map_step_key_clicked)
+        self.map_step_key_btn.grid(row=0, column=4, padx=(0, 4))
         self.capture_step_mouse_btn = ttk.Button(
             identity_row, text="Capture Mouse Button", command=self._on_capture_step_mouse_clicked)
         self.capture_step_mouse_btn.grid(row=0, column=5, padx=(0, 4))
@@ -992,7 +1009,6 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         "__cancel_capture__": "_on_cancel_key_captured",
         "__reset_capture__": "_on_reset_key_captured",
         "__pause_capture__": "_on_pause_key_captured",
-        "__step_key_capture__": "_on_step_key_captured",
         "__step_mouse_capture__": "_on_step_mouse_captured",
         # UpdaterMixin (poe2bot/gui/updater_ui.py) -- Linux/Steam Deck only.
         "__update_check_failed__": "_on_update_check_failed",

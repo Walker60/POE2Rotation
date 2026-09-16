@@ -1,6 +1,9 @@
 """Reads a REAL, physically-connected gamepad, for use as a hotkey trigger
-source (alongside keyboard/mouse in poe2bot/hotkeys.py) and for the step
-editor's "capture a controller button" flow.
+source (alongside keyboard/mouse in poe2bot/hotkeys.py) -- e.g. binding a
+rotation's trigger/cancel/reset/pause key to a controller press via
+HotkeyManager.capture_next_key(). The step editor's own Key field instead
+uses poe2bot/gui/controller_map_window.py's click-to-choose picker, which
+needs no real hardware at all -- see its docstring for why.
 
 Two platform backends, selected once at import time via _IS_WINDOWS:
 
