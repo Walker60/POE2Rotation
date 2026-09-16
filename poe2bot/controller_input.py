@@ -118,6 +118,15 @@ else:
 
     _TRIGGER_AXES = {ecodes.ABS_Z: "lt", ecodes.ABS_RZ: "rt"} if evdev is not None else {}
 
+    # A device only needs to report ONE of these to be treated as
+    # "gamepad-like" by _candidate_gamepad_paths -- BTN_SOUTH alone (the
+    # original, narrower check) would miss a real controller/virtual pad
+    # that happens to report a different subset of these.
+    _GAMEPAD_INDICATOR_CODES = {
+        ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_NORTH, ecodes.BTN_WEST,
+        ecodes.BTN_GAMEPAD, ecodes.BTN_THUMBL, ecodes.BTN_THUMBR, ecodes.BTN_TRIGGER,
+    } if evdev is not None else set()
+
 
 class ControllerReader:
     """Watches one gamepad (an XInput slot on Windows, an evdev device on
@@ -220,22 +229,51 @@ class ControllerReader:
 
     def _candidate_gamepad_paths(self):
         """Every /dev/input/event* device that looks like a gamepad (reports
-        at least the South face button), in a stable sorted-by-path order --
-        the closest Linux equivalent of "XInput slots 0-3," used with
-        CONTROLLER_INDEX picking the Nth one. Opens each device only briefly
-        to check its capabilities, not to read from it."""
+        at least one of _GAMEPAD_INDICATOR_CODES), in a stable sorted-by-path
+        order -- the closest Linux equivalent of "XInput slots 0-3," used
+        with CONTROLLER_INDEX picking the Nth one. Opens each device only
+        briefly to check its capabilities, not to read from it.
+
+        Logs a one-time diagnostic dump of EVERY /dev/input device seen
+        (path, name, whether it looks gamepad-like) when nothing qualifies
+        -- on a Steam Deck in particular, the built-in controls are normally
+        owned by Steam Input and simply don't appear as a generic gamepad to
+        an app that isn't currently being run/targeted through Steam, so
+        "nothing found" is the expected, common case there, not necessarily
+        a bug -- see README's Steam Deck section."""
         paths = []
+        seen = []
         for path in sorted(evdev.list_devices()):
             try:
                 dev = evdev.InputDevice(path)
             except (OSError, PermissionError):
+                seen.append((path, "<unreadable>", False))
                 continue
             try:
-                if ecodes.BTN_SOUTH in dev.capabilities().get(ecodes.EV_KEY, []):
+                key_caps = dev.capabilities().get(ecodes.EV_KEY, [])
+                is_gamepad_like = any(code in key_caps for code in _GAMEPAD_INDICATOR_CODES)
+                seen.append((path, dev.name, is_gamepad_like))
+                if is_gamepad_like:
                     paths.append(path)
             finally:
                 dev.close()
+        if not paths:
+            self._log_device_dump_once(seen)
         return paths
+
+    def _log_device_dump_once(self, seen):
+        if self._warned_disconnected:
+            return  # already dumped this info on a previous scan -- don't spam it every rescan interval
+        if not seen:
+            log.info("no /dev/input devices found at all")
+            return
+        lines = "\n".join(f"  {path}  name={name!r}  gamepad-like={is_gamepad}"
+                           for path, name, is_gamepad in seen)
+        log.info(
+            f"no gamepad-like /dev/input device found; every device currently visible:\n{lines}\n"
+            f"On a Steam Deck, the built-in controls are normally owned by Steam Input and only "
+            f"exposed to a game Steam is actively running/targeting -- see README's Steam Deck "
+            f"section for how to get them recognized here too.")
 
     def _open_evdev_device(self):
         paths = self._candidate_gamepad_paths()

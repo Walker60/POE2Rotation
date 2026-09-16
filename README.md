@@ -111,6 +111,35 @@ Recalibrate every rotation's image/pixel conditions fresh on the Deck's own
 display — a template captured on a Windows PC's screen won't match the Deck's
 rendering, the same as moving between any two different screens today.
 
+**The Deck's own built-in controls (buttons/sticks/trackpads) won't show up
+for "Capture Controller Button" out of the box.** They're normally owned by
+**Steam Input**, which only creates a generic virtual gamepad for a game
+Steam is actively running/targeting — a plain terminal-launched app in
+Desktop Mode never gets one, so `evdev` genuinely has nothing gamepad-like to
+find (this isn't a bug; if it happens, poe2bot's log will list every
+`/dev/input` device it actually saw, none of them recognized as a gamepad —
+check `logs/poe2bot.log` for that dump if you want to confirm this is what's
+happening on your setup before trying the fix below). Two ways to make the
+Deck's own controls visible as a real evdev gamepad:
+
+- **Add poe2bot as a non-Steam shortcut and launch it through Steam** (Desktop
+  Mode → Steam → Games → "Add a Non-Steam Game" → point it at the `poe2bot`
+  executable) — launching it this way, rather than directly from a terminal,
+  is what gets Steam Input to engage and expose a virtual Xbox 360 controller
+  the same way it does for an actual game; `evdev` should then find it like
+  any other gamepad. Unconfirmed against real hardware yet — if Steam Input
+  doesn't engage for a plain utility app this way, or the virtual pad it
+  creates isn't visible system-wide to a process Steam didn't itself launch,
+  this needs another approach.
+- **[Handheld Daemon (HHD)](https://github.com/hhd-dev/hhd)**, a community
+  project that exposes the Deck's built-in controls as a normal evdev gamepad
+  independent of Steam/Steam Input entirely — the more robust option if the
+  above doesn't pan out, at the cost of installing another piece of software.
+
+Either way, a real USB/Bluetooth controller plugged into the Deck doesn't
+have this problem at all — it shows up as a normal gamepad to `evdev`
+regardless of Steam.
+
 ## Configuration
 
 Every setting below can also be viewed and changed from **Settings... > Advanced**
