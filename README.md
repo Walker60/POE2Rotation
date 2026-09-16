@@ -91,8 +91,8 @@ environment markers; they're never installed on Windows).
 ### What has to be true either way
 
 - **An X11 session**, not Wayland: `steamos-session-select plasma-x11-persistent`.
-  `keyboard`/`mouse`/`mss`/`pyautogui` (hotkey capture, input injection, screen/pixel
-  capture) have no Wayland support at all, on any platform, so this isn't optional.
+  `keyboard`/`mouse`/`mss` (hotkey capture, input injection, screen/pixel capture)
+  have no Wayland support at all, on any platform, so this isn't optional.
   (SteamOS has moved to Wayland-by-default for Desktop Mode; the X11 session is
   still selectable as of this writing, but Valve's long-term direction is Wayland
   — if a future SteamOS update drops the X11 desktop session, this whole approach
@@ -276,13 +276,19 @@ matching algorithm than exact mode (normalized cross-correlation, not mean
 pixel difference), so a Confidence value tuned for exact mode is only a
 starting point after switching to area mode; expect to retune it.
 
-**Screenshots go through `mss`, not `pyautogui`.** On Windows, `pyautogui`
-(and even Pillow's own `ImageGrab.grab()` used directly) always captures the
-*entire* screen internally and crops it down afterward, no matter how small
-the requested region is — for a check running many times a second, that's a
-real, avoidable cost that scales with your monitor's resolution. `mss`
-captures only the requested rectangle directly, so this is what actually makes
-repeated checks fast rather than just a smaller region or a cheaper threshold.
+**Screenshots go through `mss`, not `pyautogui`/Pillow's `ImageGrab`** — for
+both runtime condition checks and the calibration flow itself. Pillow's own
+`ImageGrab.grab()` (what `pyautogui.screenshot()` uses underneath) always
+captures the *entire* screen internally and crops it down afterward, no
+matter how small the requested region is — for a check running many times a
+second, that's a real, avoidable cost that scales with your monitor's
+resolution; `mss` captures only the requested rectangle directly, so this is
+what actually makes repeated checks fast rather than just a smaller region or
+a cheaper threshold. It's also the only one of the two that works everywhere
+this app runs at all: Pillow's Linux `ImageGrab` backend shells out to an
+external `gnome-screenshot` binary, which doesn't exist on KDE Plasma (Steam
+Deck Desktop Mode) — `mss` needs nothing beyond the X11 connection it already
+requires.
 
 ## Moving a rotation to a different screen
 

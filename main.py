@@ -3,15 +3,16 @@ import sys
 
 
 def _enable_dpi_awareness():
-    """Must run before poe2bot.gui (and therefore pyautogui) is imported, and before
-    any Tk window exists. pyautogui calls SetProcessDPIAware() as an import side
-    effect on Windows, which changes how Win32 reports screen/mouse coordinates for
-    the whole process from that point on -- if that fires at some other, accidental
-    time relative to Tk's own window creation, Tk's winfo_screenwidth()/event.x_root
-    and pyautogui's screenshot()/locateOnScreen() can end up disagreeing about
-    physical vs. logical pixels on any display running above 100% scaling. Doing
-    this ourselves, first, with the more capable per-monitor API removes that
-    dependency on import ordering."""
+    """Must run before poe2bot.gui is imported, and before any Tk window
+    exists. Setting this affects how Win32 reports screen/mouse coordinates
+    for the whole process from that point on -- if it happened at some
+    other, accidental time relative to Tk's own window creation instead
+    (e.g. as an import-time side effect of some other dependency calling
+    the older, coarser SetProcessDPIAware() itself), Tk's
+    winfo_screenwidth()/event.x_root could end up disagreeing with
+    anything doing its own raw screen-pixel math on any display running
+    above 100% scaling. Doing this ourselves, first, with the more capable
+    per-monitor API removes any dependency on import ordering."""
     if sys.platform != "win32":
         return
     try:

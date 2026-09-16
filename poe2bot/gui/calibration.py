@@ -1,13 +1,10 @@
-import sys
 import tkinter as tk
 from tkinter import ttk
 
-import pyautogui
-
 from poe2bot import focus, templates
-from poe2bot.executor import calibration_scale_note, check_condition_now, rescaled_pixel_pos
+from poe2bot.executor import calibration_scale_note, capture_region, check_condition_now, rescaled_pixel_pos
 from poe2bot.gui import dialogs as messagebox
-from poe2bot.gui import geometry, theme
+from poe2bot.gui import theme
 from poe2bot.gui.overlays import RegionCaptureOverlay, PointCaptureOverlay
 
 _MATCH_COLOR = "#50fa7b"    # Dracula green -- reads as "good" regardless of theme
@@ -16,33 +13,6 @@ _NO_MATCH_COLOR = "#ff5555"  # Dracula red == theme.DANGER_COLOR
 _DEFAULT_CONFIDENCE = 0.90
 _HIDE_WINDOW_DELAY_MS = 150   # lets self.withdraw() actually finish hiding before an overlay opens
 _OVERLAY_CLOSE_DELAY_MS = 200  # lets the overlay's own window fully disappear/repaint before a screenshot
-
-
-def _screenshot_region(region):
-    """pyautogui.screenshot(region=region, allScreens=True) on Windows,
-    corrected for a quirk in pyautogui 0.9.54's allScreens support: it still
-    crops using `region` as raw pixel offsets into the captured image,
-    which is always 0-based even when the real virtual desktop's origin is
-    negative (a monitor positioned above/left of the primary one -- see
-    geometry.virtual_screen_bounds). Shifting `region` by the virtual
-    screen's own left/top before cropping corrects for that; it's a no-op
-    in the overwhelmingly common case where every monitor is at/right-of/
-    below the primary, since the virtual origin is already (0, 0) then.
-
-    `allScreens` is a Windows-only pyautogui parameter -- its Linux backend
-    raises TypeError on an unrecognized keyword argument if it's passed
-    there at all, so this is omitted entirely on non-Windows platforms
-    (harmless: geometry.virtual_screen_bounds() itself only ever returns
-    non-None on Windows -- see its own guard -- so `region` is already
-    unshifted here in every other case, single-monitor-only on Linux for
-    now regardless)."""
-    bounds = geometry.virtual_screen_bounds()
-    virtual_left, virtual_top = (bounds[0], bounds[1]) if bounds else (0, 0)
-    left, top, width, height = region
-    shifted_region = (left - virtual_left, top - virtual_top, width, height)
-    if sys.platform == "win32":
-        return pyautogui.screenshot(region=shifted_region, allScreens=True)
-    return pyautogui.screenshot(region=shifted_region)
 
 
 class CalibrationMixin:
@@ -98,7 +68,7 @@ class CalibrationMixin:
         path = templates.template_path(filename)
         try:
             templates.ensure_dir()
-            _screenshot_region(region).save(path)
+            capture_region(region).save(path)
         except Exception as e:
             self.deiconify()
             messagebox.showerror("Calibration failed", f"Could not capture the region:\n{e}")
@@ -279,7 +249,7 @@ class CalibrationMixin:
 
     def _sample_pixel_color(self, point, on_use, default_confidence=_DEFAULT_CONFIDENCE):
         try:
-            color = _screenshot_region((point[0], point[1], 1, 1)).getpixel((0, 0))
+            color = capture_region((point[0], point[1], 1, 1)).getpixel((0, 0))
         except Exception as e:
             self.deiconify()
             messagebox.showerror("Calibration failed", f"Could not sample the pixel:\n{e}")
@@ -331,7 +301,7 @@ class CalibrationMixin:
         if condition.match_type == "pixel":
             try:
                 live_x, live_y = rescaled_pixel_pos(condition)
-                live_color = _screenshot_region((live_x, live_y, 1, 1)).getpixel((0, 0))
+                live_color = capture_region((live_x, live_y, 1, 1)).getpixel((0, 0))
             except Exception:
                 live_color = None
             row = ttk.Frame(preview)
