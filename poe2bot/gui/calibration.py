@@ -4,7 +4,7 @@ from tkinter import ttk
 from poe2bot import focus, templates
 from poe2bot.executor import calibration_scale_note, capture_region, check_condition_now, rescaled_pixel_pos
 from poe2bot.gui import dialogs as messagebox
-from poe2bot.gui import theme
+from poe2bot.gui import geometry, theme
 from poe2bot.gui.overlays import RegionCaptureOverlay, PointCaptureOverlay
 
 _MATCH_COLOR = "#50fa7b"    # Dracula green -- reads as "good" regardless of theme
@@ -12,7 +12,19 @@ _NO_MATCH_COLOR = "#ff5555"  # Dracula red == theme.DANGER_COLOR
 
 _DEFAULT_CONFIDENCE = 0.90
 _HIDE_WINDOW_DELAY_MS = 150   # lets self.withdraw() actually finish hiding before an overlay opens
-_OVERLAY_CLOSE_DELAY_MS = 200  # lets the overlay's own window fully disappear/repaint before a screenshot
+
+
+def _crop_from_captured(captured_image, bounds, region):
+    """The (left, top, width, height) `region` (absolute screen pixels),
+    cropped out of `captured_image` -- which itself covers `bounds`
+    (also absolute screen pixels, not necessarily starting at the
+    screen's own (0, 0) -- see geometry.virtual_screen_bounds), so a
+    region's coordinates need shifting to be relative to the image's own
+    (0, 0) before cropping."""
+    bounds_left, bounds_top, _bounds_width, _bounds_height = bounds
+    left, top, width, height = region
+    rel_left, rel_top = left - bounds_left, top - bounds_top
+    return captured_image.crop((rel_left, rel_top, rel_left + width, rel_top + height))
 
 
 class CalibrationMixin:
@@ -32,6 +44,29 @@ class CalibrationMixin:
         self._calibration_hint_shown = True
         messagebox.showinfo(title, message)
 
+    def _capture_full_screen_for_overlay(self):
+        """(bounds, captured_image): bounds is (left, top, width, height)
+        covering the full virtual desktop (see geometry.virtual_screen_bounds,
+        falling back to just the primary monitor if that Win32-only query
+        isn't available); captured_image is that exact region screenshotted
+        right now, via capture_region (mss). Every capture-overlay flow needs
+        this same pairing: an image to display as the overlay's own
+        background (see overlays.py's _FullscreenPickerOverlay for why this
+        no longer relies on the window manager's own transparency), sized
+        and positioned to exactly match where the overlay itself will sit --
+        and, once the user clicks, the same image is what calibration crops/
+        samples the final result from (see _crop_from_captured), rather than
+        needing a second, separately-timed screenshot after the overlay
+        closes."""
+        bounds = geometry.virtual_screen_bounds()
+        if bounds:
+            left, top, width, height = bounds
+        else:
+            left, top = 0, 0
+            width, height = self.winfo_screenwidth(), self.winfo_screenheight()
+        bounds = (left, top, width, height)
+        return bounds, capture_region(bounds)
+
     def _start_image_capture(self, on_use, default_confidence=_DEFAULT_CONFIDENCE):
         """Runs the region-capture-overlay flow, ending in an image-match
         preview. "Use This" calls on_use(filename, region, confidence,
@@ -50,31 +85,30 @@ class CalibrationMixin:
         self.after(_HIDE_WINDOW_DELAY_MS, lambda: self._open_region_capture_overlay(on_use, default_confidence))
 
     def _open_region_capture_overlay(self, on_use, default_confidence=_DEFAULT_CONFIDENCE):
+        bounds, captured_image = self._capture_full_screen_for_overlay()
         RegionCaptureOverlay(
-            self, on_done=lambda region: self._on_image_region_captured(region, on_use, default_confidence),
+            self, bounds=bounds, captured_image=captured_image,
+            on_done=lambda region: self._on_image_region_captured(
+                region, bounds, captured_image, on_use, default_confidence),
             hint_text="Click-drag tightly around the icon  ·  Esc to cancel")
 
-    def _on_image_region_captured(self, region, on_use, default_confidence=_DEFAULT_CONFIDENCE):
+    def _on_image_region_captured(self, region, bounds, captured_image, on_use, default_confidence=_DEFAULT_CONFIDENCE):
+        self.deiconify()
         if region is None:
-            self.deiconify()
             return
-        # Let the overlay's own window fully disappear/repaint first, so the
-        # captured template isn't tinted by our own semi-transparent gray overlay.
-        self.after(_OVERLAY_CLOSE_DELAY_MS,
-                   lambda: self._take_image_match_screenshot(region, on_use, default_confidence))
+        self._take_image_match_screenshot(region, bounds, captured_image, on_use, default_confidence)
 
-    def _take_image_match_screenshot(self, region, on_use, default_confidence=_DEFAULT_CONFIDENCE):
+    def _take_image_match_screenshot(self, region, bounds, captured_image, on_use,
+                                      default_confidence=_DEFAULT_CONFIDENCE):
         filename = templates.new_template_filename()
         path = templates.template_path(filename)
         try:
             templates.ensure_dir()
-            capture_region(region).save(path)
+            _crop_from_captured(captured_image, bounds, region).save(path)
         except Exception as e:
-            self.deiconify()
             messagebox.showerror("Calibration failed", f"Could not capture the region:\n{e}")
             return
         self._last_calib_rect = focus.game_window_client_rect()
-        self.deiconify()
         self._show_image_match_preview(filename, region, on_use, default_confidence)
 
     def _calib_size_kwargs(self) -> dict:
@@ -199,8 +233,10 @@ class CalibrationMixin:
                    lambda: self._open_search_area_overlay(filename, region, confidence, on_use))
 
     def _open_search_area_overlay(self, filename, region, confidence, on_use):
+        bounds, captured_image = self._capture_full_screen_for_overlay()
         RegionCaptureOverlay(
-            self, on_done=lambda search_region: self._on_search_area_captured(
+            self, bounds=bounds, captured_image=captured_image,
+            on_done=lambda search_region: self._on_search_area_captured(
                 search_region, filename, region, confidence, on_use),
             hint_text="Drag a LARGER rectangle around the icon  ·  Esc to cancel")
 
@@ -234,28 +270,26 @@ class CalibrationMixin:
         self.after(_HIDE_WINDOW_DELAY_MS, lambda: self._open_point_capture_overlay(on_use, default_confidence))
 
     def _open_point_capture_overlay(self, on_use, default_confidence=_DEFAULT_CONFIDENCE):
+        bounds, captured_image = self._capture_full_screen_for_overlay()
         PointCaptureOverlay(
-            self, on_done=lambda point: self._on_point_captured(point, on_use, default_confidence),
+            self, bounds=bounds, captured_image=captured_image,
+            on_done=lambda point: self._on_point_captured(point, bounds, captured_image, on_use, default_confidence),
             hint_text="Click exactly on the pixel  ·  Esc to cancel")
 
-    def _on_point_captured(self, point, on_use, default_confidence=_DEFAULT_CONFIDENCE):
+    def _on_point_captured(self, point, bounds, captured_image, on_use, default_confidence=_DEFAULT_CONFIDENCE):
+        self.deiconify()
         if point is None:
-            self.deiconify()
             return
-        # Let the overlay's own window fully disappear/repaint first, so the
-        # sampled color isn't tinted by our own semi-transparent gray overlay.
-        self.after(_OVERLAY_CLOSE_DELAY_MS,
-                   lambda: self._sample_pixel_color(point, on_use, default_confidence))
+        self._sample_pixel_color(point, bounds, captured_image, on_use, default_confidence)
 
-    def _sample_pixel_color(self, point, on_use, default_confidence=_DEFAULT_CONFIDENCE):
+    def _sample_pixel_color(self, point, bounds, captured_image, on_use, default_confidence=_DEFAULT_CONFIDENCE):
         try:
-            color = capture_region((point[0], point[1], 1, 1)).getpixel((0, 0))
+            bounds_left, bounds_top, _bounds_width, _bounds_height = bounds
+            color = captured_image.getpixel((point[0] - bounds_left, point[1] - bounds_top))
         except Exception as e:
-            self.deiconify()
             messagebox.showerror("Calibration failed", f"Could not sample the pixel:\n{e}")
             return
         self._last_calib_rect = focus.game_window_client_rect()
-        self.deiconify()
         self._show_pixel_match_preview(point, color, on_use, default_confidence)
 
     def _show_pixel_match_preview(self, point, color, on_use, default_confidence=_DEFAULT_CONFIDENCE):

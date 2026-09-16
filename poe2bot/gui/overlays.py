@@ -1,106 +1,65 @@
-import sys
 import tkinter as tk
 
-from poe2bot.gui import geometry
-
-
-def _shrunk_to_dodge_fullscreen_unredirect(width: int, height: int) -> tuple:
-    """(width, height) unchanged on Windows; each reduced by 1px on Linux.
-
-    Belt-and-suspenders alongside _disable_compositor_bypass below, for the
-    same underlying compositor behavior: on at least some configurations,
-    _NET_WM_BYPASS_COMPOSITOR appears NOT to be honored for an
-    override-redirect window like this one specifically (this overlay
-    remained fully opaque on a real Steam Deck even with that hint set),
-    which suggests the compositor's "unredirect fullscreen windows"
-    detection for such windows is purely geometric -- does this window's
-    rect exactly cover an output -- rather than actually consulting the
-    hint. Making the window reliably NOT that exact shape sidesteps the
-    detection directly instead of depending on a hint that may or may not
-    be respected for this window class on a given compositor."""
-    if sys.platform == "win32":
-        return width, height
-    return max(1, width - 1), max(1, height - 1)
-
-
-def _disable_compositor_bypass(window: tk.Toplevel):
-    """Linux only: explicitly tells the compositor (KWin, as used by
-    SteamOS Desktop Mode, included) NOT to skip compositing this window, via
-    the _NET_WM_BYPASS_COMPOSITOR EWMH property. Several compositors
-    automatically bypass compositing entirely -- direct scanout, no alpha
-    blending -- for any window whose geometry exactly matches a screen's
-    full resolution, as a performance optimization aimed at fullscreen
-    games; this overlay is deliberately that exact shape (see
-    _FullscreenPickerOverlay), which defeats its requested -alpha
-    transparency completely on those compositors -- it renders fully
-    opaque gray instead of see-through, even though the identical code
-    renders correctly translucent on Windows (whose equivalent, DWM, has
-    no such fullscreen-bypass heuristic).
-
-    Best-effort and silent: does nothing if python-xlib isn't installed, or
-    if anything else about this fails, since a fully-opaque overlay is a
-    visual regression, not a functional one -- capture/calibration still
-    works, it's just harder to see exactly what you're clicking on."""
-    if sys.platform == "win32":
-        return
-    try:
-        from Xlib import Xatom, display
-        d = display.Display()
-        xwindow = d.create_resource_object("window", window.winfo_id())
-        xwindow.change_property(d.intern_atom("_NET_WM_BYPASS_COMPOSITOR"), Xatom.CARDINAL, 32, [0])
-        d.flush()
-    except Exception:
-        pass
+from PIL import Image, ImageTk
 
 
 class _FullscreenPickerOverlay(tk.Toplevel):
-    """Shared fullscreen, borderless, semi-transparent picker chrome behind
-    RegionCaptureOverlay (click-drag-release rectangle) and
-    PointCaptureOverlay (single-click point): window/canvas setup, the
-    optional persistent hint-text banner, Escape-to-cancel, and the
-    destroy-then-callback finish sequence. Subclasses only add their own
-    canvas bindings and `_finish(...)` payload.
+    """Shared fullscreen, borderless picker chrome behind RegionCaptureOverlay
+    (click-drag-release rectangle) and PointCaptureOverlay (single-click
+    point): window/canvas setup, the optional persistent hint-text banner,
+    Escape-to-cancel, and the destroy-then-callback finish sequence.
+    Subclasses only add their own canvas bindings and `_finish(...)` payload.
+
+    Displayed as an actual captured-screen-plus-gray-tint IMAGE (`bounds`/
+    `captured_image`, both supplied by the caller -- see
+    CalibrationMixin._capture_full_screen_for_overlay), not a semi-
+    transparent WINDOW: an earlier version of this used a real
+    -alpha-attributed window instead, relying on the window manager/
+    compositor to blend it with whatever's underneath live. That turned out
+    to be unreliable on at least one real Linux compositor (KDE Plasma/
+    KWin, as used by SteamOS Desktop Mode) -- the overlay rendered fully
+    opaque no matter what per-window transparency hint was set, seemingly
+    because compositors commonly skip alpha blending entirely for a window
+    whose geometry exactly matches a screen's resolution (a performance
+    optimization aimed at fullscreen games), and neither asking to opt out
+    of that (_NET_WM_BYPASS_COMPOSITOR) nor making the window 1px smaller
+    than the screen actually fixed it in practice. Baking the tint into a
+    static image instead works identically regardless of compositor
+    behavior, or even with no compositor running at all -- and as a
+    bonus, this is also what lets calibration crop/sample the exact same
+    pixels the user saw on screen directly from `captured_image`,
+    rather than needing a SECOND, separately-timed screenshot after this
+    overlay closes (which is what used to produce a black/stale read on
+    that same Linux setup -- see CalibrationMixin, no longer applicable).
 
     Spans the full virtual desktop (every connected monitor's combined
     bounds -- see geometry.virtual_screen_bounds), not just the primary
     monitor's own resolution at +0+0, so a skill icon on a secondary
     monitor (including one positioned above/left of the primary, at
-    negative virtual coordinates) can be calibrated too. Falls back to
-    primary-monitor-only geometry if that Win32 query ever fails.
+    negative virtual coordinates) can be calibrated too.
     """
 
     _HINT_FONT = ("Segoe UI", 12, "bold")
     _HINT_PAD = 8
+    _TINT_WEIGHT = 0.25  # how much the gray tint contributes to the blended image -- matches the old -alpha value
 
-    def __init__(self, master, on_done, hint_text=None):
+    def __init__(self, master, on_done, bounds, captured_image, hint_text=None):
         super().__init__(master)
         self.on_done = on_done
-
-        bounds = geometry.virtual_screen_bounds()
-        if bounds:
-            left, top, width, height = bounds
-        else:
-            left, top = 0, 0
-            width, height = self.winfo_screenwidth(), self.winfo_screenheight()
+        left, top, width, height = bounds
         self._overlay_width = width
 
-        # On Linux, shave 1px off each dimension (see _shrunk_to_dodge_fullscreen_unredirect):
-        # some compositors bypass alpha blending entirely for a window whose
-        # geometry EXACTLY matches a screen's resolution, regardless of the
-        # _NET_WM_BYPASS_COMPOSITOR hint below -- so this overlay is
-        # deliberately never quite that shape there. A 1px-narrower capture
-        # area is an imperceptible trade-off for actually being translucent.
-        draw_width, draw_height = _shrunk_to_dodge_fullscreen_unredirect(width, height)
+        tint = Image.new("RGB", (width, height), "gray")
+        tinted = Image.blend(captured_image, tint, self._TINT_WEIGHT)
+        self._tk_image = ImageTk.PhotoImage(tinted)
 
         self.overrideredirect(True)
-        self.geometry(f"{draw_width}x{draw_height}+{left}+{top}")
-        self.attributes("-alpha", 0.25)
+        self.geometry(f"{width}x{height}+{left}+{top}")
         self.attributes("-topmost", True)
-        self.configure(bg="gray")
-        _disable_compositor_bypass(self)
 
-        self.canvas = tk.Canvas(self, cursor="cross", bg="gray", highlightthickness=0)
+        self.canvas = tk.Canvas(self, cursor="cross", highlightthickness=0, width=width, height=height)
         self.canvas.pack(fill="both", expand=True)
+        self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image)
         if hint_text:
             self._draw_hint(hint_text)
 
@@ -127,8 +86,8 @@ class _FullscreenPickerOverlay(tk.Toplevel):
         """A persistent on-canvas reminder of what to do, so the one-time
         instructional popup (shown at most once per app session -- see
         CalibrationMixin) doesn't need repeating before every capture. A
-        dark backing rectangle keeps light text legible over whatever is
-        actually behind this semi-transparent overlay. Centered on this
+        dark backing rectangle keeps light text legible over whatever the
+        captured screen image happens to show behind it. Centered on this
         overlay's OWN width (the full virtual desktop), not
         winfo_screenwidth() (always just the primary monitor's), so the
         hint lands in the middle of whichever monitor setup this is."""
@@ -160,8 +119,8 @@ class RegionCaptureOverlay(_FullscreenPickerOverlay):
     release without a meaningfully-sized drag).
     """
 
-    def __init__(self, master, on_done, hint_text=None):
-        super().__init__(master, on_done, hint_text)
+    def __init__(self, master, on_done, bounds, captured_image, hint_text=None):
+        super().__init__(master, on_done, bounds, captured_image, hint_text)
         self._start = None
         self._rect_id = None
         self.canvas.bind("<ButtonPress-1>", self._on_press)
@@ -207,8 +166,8 @@ class PointCaptureOverlay(_FullscreenPickerOverlay):
     on_done(None) if cancelled (Escape).
     """
 
-    def __init__(self, master, on_done, hint_text=None):
-        super().__init__(master, on_done, hint_text)
+    def __init__(self, master, on_done, bounds, captured_image, hint_text=None):
+        super().__init__(master, on_done, bounds, captured_image, hint_text)
         self.canvas.bind("<ButtonRelease-1>", self._on_click)
 
     def _on_click(self, event):
