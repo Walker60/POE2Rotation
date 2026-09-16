@@ -329,14 +329,21 @@ above.
 Steps end up nested under a group two ways: select the group (or one of its
 own nested steps/conditions) and click **Add Step**/**Add Sleep**, which
 appends into that group instead of the top level; or drag an existing step
-onto the group's row to move it in — dragging a nested step out to the top
-level, or into a different group, works the same way in reverse. A group
-itself is nested inside another group only by dragging it onto that other
-group's own row — there's no "Add Nested Group" button; the Add Condition
-Group buttons always add a brand-new group at the top level, exactly as
-above. Move Up/Move Down and a plain drag reorder a nested step within its
-own group, or a group itself among whichever list it currently lives in
-(the top level, or another group's own nested entries), the same way Move
+onto the group's row to move it in — dragging a nested step onto a plain
+step's row instead repositions it as a sibling of that step, wherever it
+lives, which is how a nested step gets pulled back out to the top level or
+into a different group. A group itself is nested inside another group only
+by dragging it onto the *middle* of that other group's own row — there's
+no "Add Nested Group" button; the Add Condition Group buttons always add a
+brand-new group at the top level, exactly as above. Dragging a group onto
+that same row's top or bottom edge instead repositions it as a plain
+sibling of that group, which is how a nested group gets pulled back out to
+a shallower level (including the top level) — handy since hovering a
+group's row otherwise always means nesting into it, even when it's the
+only row there is to drop next to. Move Up/Move Down and a plain drag
+reorder a nested step within its own group, or a group itself among
+whichever list it currently lives in (the top level, or another group's
+own nested entries), the same way Move
 Up/Move Down and dragging already work for a plain step. Removing a
 non-empty group (Remove Selected) asks for confirmation first, since it
 deletes everything nested inside it — steps and any further-nested groups,
@@ -372,21 +379,21 @@ list on the left) and drag-and-drop, on top of the buttons described above:
 
 - **Drag** one or more selected rows to reorder them — drag a step (or
   several multi-selected steps sharing the same current group, or lack of
-  one) to reposition it, including onto a Condition Group's row (or a step
-  already nested in one) to move it into/out of/between groups; drag a
-  Condition Group (or several sharing the same current parent) to reorder
-  it among its own current siblings, or onto a *different* group's row to
-  nest it inside that group instead — the same "drop onto a group's row
-  nests into it" rule a step already follows, so this works whether that
-  other group is a current sibling or lives somewhere else in the tree
-  entirely, and a group can be pulled back out to a shallower level the
-  same way, by dragging it onto whichever group should contain it next (or
-  into blank space to land at the top level). Dropping a group onto itself
-  or one of its own current descendants is refused (it would create a
-  cycle), and dropping past 5 levels of nesting is refused too. Drag a
-  condition (or several, multi-selected) to reposition it within its own
-  step. A highlighted row shows where it'll land as you drag. Dragging a
-  mix of groups/steps/conditions together, or conditions from more than one
+  one) onto a Condition Group's row to move it into that group, or onto a
+  plain step's row to reposition it as a sibling of that step (wherever it
+  lives — the top level, or any group); drag a Condition Group (or several
+  sharing the same current parent) onto the *middle* of another group's row
+  to nest it inside that group instead, or onto that same row's top/bottom
+  edge to reposition it as a plain sibling of that group instead — this
+  sibling-edge drop is what lets a group (or a step inside one) be dragged
+  back out to a shallower level, all the way to the top level if you want,
+  even when the only row available to hover is a single group with nothing
+  else next to it to drop beside. Dropping a group onto itself or one of
+  its own current descendants is refused (it would create a cycle), and
+  dropping past 5 levels of nesting is refused too. Drag a condition (or
+  several, multi-selected) to reposition it within its own step. A
+  highlighted row shows where it'll land as you drag. Dragging a mix of
+  groups/steps/conditions together, or conditions from more than one
   step at once, isn't supported — nothing happens rather than doing
   something surprising. Move Up/Move Down still work as a click-based
   alternative, moving a step or a group within whichever list it currently

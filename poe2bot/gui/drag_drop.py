@@ -25,16 +25,21 @@ class DragDropMixin:
     possible), or several conditions of the same step.
 
     Nesting a group happens the same way a step already nests into a group
-    today: drop it onto another group's own header row -- at any depth,
-    not just among current siblings -- and it becomes that group's first
-    child. Two guards keep this sane: a group can never be dropped into
-    itself or one of its own current descendants (which would create a
-    cycle), and dropping is refused past MAX_GROUP_NESTING_DEPTH. Dropping
-    a nested group onto a plain STEP row instead reorders/inserts it as a
-    sibling within whatever list that step lives in -- which is how a
-    nested group gets pulled back out to a shallower level, including all
-    the way to the top level, by hovering an existing entry that's already
-    there (see _resolve_group_drop_target).
+    today: drop it onto the MIDDLE of another group's own header row -- at
+    any depth, not just among current siblings -- and it becomes that
+    group's first child. The TOP/BOTTOM edge of a group's header row means
+    something different (see _hover_zone): reposition the dragged item as a
+    plain sibling of that group instead, in its own parent list -- which is
+    what lets something be dragged back out to a shallower level, including
+    all the way to the top level, even when the only row available to hover
+    is a single group with nothing else alongside it to drop next to.
+    Dropping a nested group onto a plain STEP row (anywhere on it, no
+    edge/middle distinction needed since a step can't be nested into)
+    reorders/inserts it as a sibling within whatever list that step lives
+    in, the same promotion idea. Two guards keep group-nesting sane: a
+    group can never be dropped into itself or one of its own current
+    descendants (which would create a cycle), and dropping is refused past
+    MAX_GROUP_NESTING_DEPTH (see _resolve_group_drop_target).
 
     A plain click (Button-1) on ttk.Treeview unconditionally collapses multi-
     selection to the single clicked row, synchronously, before any B1-Motion
@@ -111,6 +116,37 @@ class DragDropMixin:
         inside it would."""
         nested = [e for e in group.entries if isinstance(e, ConditionGroup)]
         return 1 + max((cls._group_subtree_depth(e) for e in nested), default=0)
+
+    @staticmethod
+    def _fits_nesting_cap(container_path, max_dragged_depth: int) -> bool:
+        """True if landing the dragged group(s) in `container_path` (their
+        own new parent list, whatever depth it's at) keeps every entry in
+        their combined subtree -- not just the dragged group(s) themselves,
+        see _group_subtree_depth -- at or under MAX_GROUP_NESTING_DEPTH."""
+        return len(container_path) + max_dragged_depth <= MAX_GROUP_NESTING_DEPTH
+
+    def _hover_zone(self, row_iid: str, event_y: int) -> str:
+        """Splits a hovered GROUP header row into three vertical zones, so a
+        group can always be repositioned as a plain sibling of another group
+        -- including all the way out to the top level -- even when that
+        other group is the only row available to hover (no separate
+        top-level row of its own to drop next to instead): the top and
+        bottom quarters mean "insert as a sibling before/after this row" (in
+        ITS OWN parent list), the middle half means "nest inside this row,
+        as its first child" -- the existing, more discoverable behavior for
+        a plain click-drag onto the middle of a row. Returns "before",
+        "into", or "after"; "into" if the row has no bbox (shouldn't happen
+        for a real hovered row, but keeps this total)."""
+        bbox = self.tree.bbox(row_iid)
+        if not bbox:
+            return "into"
+        _left, top, _width, height = bbox
+        offset = event_y - top
+        if offset < height * 0.25:
+            return "before"
+        if offset > height * 0.75:
+            return "after"
+        return "into"
 
     def _on_tree_press(self, event):
         if self.tree.identify_element(event.x, event.y) == "Treeitem.indicator":
@@ -265,22 +301,31 @@ class DragDropMixin:
 
         # Dragging steps.
         if parsed is not None and parsed[1] is None:
-            # Hovering a group's own header row -- drop INTO it, at the front,
-            # mirroring "hovering the step's own row targets index 0 of its
-            # conditions" one level up (see _resolve_condition_drop_target).
-            # Unlike that case, the target group can genuinely be empty right
-            # now (dropping the first step ever into it) -- there's no
-            # existing child row yet to highlight, so fall back to
-            # highlighting the group's own row instead of a nonexistent one.
             dest_group_path = parsed[0]
-            # _sibling_iid (not a bare _location_iid(dest_group_path, 0)) --
-            # whatever's CURRENTLY at index 0 of this group's entries might
-            # itself be a nested ConditionGroup rather than a Step, now that
-            # groups can nest, so the highlighted row's iid must be built
-            # according to what that entry actually is.
-            highlight_iid = (self._sibling_iid(dest_group_path, 0)
-                              if self._steps_list_for(dest_group_path) else target_row)
-            return highlight_iid, dest_group_path, 0, False
+            zone = self._hover_zone(target_row, event.y)
+            if zone == "into":
+                # Drop INTO the group, at the front, mirroring "hovering the
+                # step's own row targets index 0 of its conditions" one level
+                # up (see _resolve_condition_drop_target). Unlike that case,
+                # the target group can genuinely be empty right now (dropping
+                # the first step ever into it) -- there's no existing child
+                # row yet to highlight, so fall back to highlighting the
+                # group's own row instead of a nonexistent one.
+                # _sibling_iid (not a bare _location_iid(dest_group_path, 0))
+                # -- whatever's CURRENTLY at index 0 of this group's entries
+                # might itself be a nested ConditionGroup rather than a Step,
+                # now that groups can nest, so the highlighted row's iid must
+                # be built according to what that entry actually is.
+                highlight_iid = (self._sibling_iid(dest_group_path, 0)
+                                  if self._steps_list_for(dest_group_path) else target_row)
+                return highlight_iid, dest_group_path, 0, False
+            # "before"/"after" -- reposition as a plain sibling of the
+            # hovered group itself, within ITS OWN parent list. This is what
+            # lets a step be promoted out to the top level (or any shallower
+            # group) even when the only row available to hover is a single
+            # group with nothing alongside it -- hover that group's top or
+            # bottom edge instead of its middle.
+            return target_row, dest_group_path[:-1], dest_group_path[-1], zone == "after"
         if parsed is not None and parsed[2] is not None:
             # Hovered a condition row -- treat a step and its conditions as one block.
             target_row, parsed = self._location_iid(parsed[0], parsed[1]), (parsed[0], parsed[1], None)
@@ -302,26 +347,32 @@ class DragDropMixin:
         parent list (see _is_valid_drag_set).
 
         Hovering a group's own header row -- any group, at any depth,
-        whether or not it's a current sibling of the dragged one(s) -- ALWAYS
-        nests the dragged group(s) as that group's first child(ren), exactly
-        mirroring how a step dropped on a group's row already nests into it.
-        Refused (no valid drop) if the hovered group is one of the dragged
-        ones itself, one of their own descendants (that would create a
-        cycle), or nesting there would push past MAX_GROUP_NESTING_DEPTH.
+        whether or not it's a current sibling of the dragged one(s) -- means
+        one of two things depending on WHERE on that row (see _hover_zone):
+        the middle nests the dragged group(s) as that group's first
+        child(ren), exactly mirroring how a step dropped on a group's row
+        already nests into it; the top/bottom edge instead repositions the
+        dragged group(s) as a plain SIBLING of the hovered group, in ITS OWN
+        parent list. That sibling placement is what lets a nested group be
+        dragged back out to a shallower level -- including all the way to
+        the top level -- even when the only row available to hover is a
+        single group with nothing alongside it to drop next to instead.
+        Either way, refused (no valid drop) if the hovered group is one of
+        the dragged ones itself, one of their own descendants (that would
+        create a cycle), or landing there would push past
+        MAX_GROUP_NESTING_DEPTH.
 
         Hovering a plain step (or one of its conditions, treated as hovering
-        that step's own row) instead reorders/inserts the dragged group(s)
-        as a sibling within WHATEVER list that step itself currently lives
-        in -- the top level, the dragged groups' own current parent, or any
-        other group entirely. This is what lets a nested group be dragged
-        back out to a shallower level (including all the way to the top
-        level): hover an existing entry that already lives there, the same
-        way a nested STEP is already promoted/moved by hovering a plain step
-        wherever it should end up. Blank space (nothing hovered) instead
-        stays within the dragged group(s)' own current parent, same as
-        before."""
+        that step's own row) reorders/inserts the dragged group(s) as a
+        sibling within WHATEVER list that step itself currently lives in --
+        the top level, the dragged groups' own current parent, or any other
+        group entirely -- the same promote-by-hovering-an-existing-entry
+        idea as the sibling-edge case above. Blank space (nothing hovered)
+        instead stays within the dragged group(s)' own current parent, same
+        as before."""
         dragged_paths = {gp for gp, _s, _c in candidate}
         parent_path = next(iter(dragged_paths))[:-1]
+        max_dragged_depth = max(self._group_subtree_depth(self._group_at(gp)) for gp in dragged_paths)
 
         if parsed is not None and parsed[2] is not None:
             # Hovered a condition row -- treat it as hovering its owning step's own row.
@@ -331,18 +382,30 @@ class DragDropMixin:
             target_path = parsed[0]
             if target_path in dragged_paths or self._path_within(target_path, dragged_paths):
                 return None  # dropped on one of the dragged groups itself, or one of their own descendants
-            # No special-case for target_path == parent_path (hovering the
-            # dragged group(s)' own current parent's row): that just falls
-            # out of this same nest-at-front logic as "reorder to the front
-            # of the list they're already in," mirroring exactly how a step
-            # dragged onto its own current group's header row already just
-            # moves it to the front of that same list.
-            max_dragged_depth = max(self._group_subtree_depth(self._group_at(gp)) for gp in dragged_paths)
-            if len(target_path) + max_dragged_depth <= MAX_GROUP_NESTING_DEPTH:
+            zone = self._hover_zone(target_row, event.y)
+            if zone == "into":
+                # No special-case for target_path == parent_path (hovering
+                # the dragged group(s)' own current parent's row): that just
+                # falls out of this same nest-at-front logic as "reorder to
+                # the front of the list they're already in," mirroring
+                # exactly how a step dragged onto its own current group's
+                # header row already just moves it to the front of that same
+                # list.
+                if not self._fits_nesting_cap(target_path, max_dragged_depth):
+                    return None  # would exceed the nesting cap
                 dest_entries = self._steps_list_for(target_path)
                 highlight_iid = self._sibling_iid(target_path, 0) if dest_entries else target_row
                 return highlight_iid, target_path, 0, False
-            return None  # would exceed the nesting cap -- a group's own row never means "reorder"
+            # "before"/"after" -- reposition as a plain sibling of the
+            # hovered group, within ITS OWN parent list (same depth the
+            # hovered group itself is already at, so the cap check uses that
+            # group's own parent path, not one level deeper).
+            sibling_container = target_path[:-1]
+            if self._path_within(sibling_container, dragged_paths):
+                return None  # would nest a dragged group inside its own current subtree
+            if not self._fits_nesting_cap(sibling_container, max_dragged_depth):
+                return None
+            return target_row, sibling_container, target_path[-1], zone == "after"
 
         # Hovering a plain step, or blank space -- reorder/insert as a
         # sibling within whichever list is actually in scope: that step's
@@ -351,6 +414,8 @@ class DragDropMixin:
         container_path = parsed[0] if parsed is not None else parent_path
         if self._path_within(container_path, dragged_paths):
             return None  # would require nesting a dragged group inside its own current subtree
+        if not self._fits_nesting_cap(container_path, max_dragged_depth):
+            return None
         exclude = {gp[-1] for gp in dragged_paths} if container_path == parent_path else set()
         result = self._resolve_sibling_target(event, parsed, exclude, container_path)
         return (result[0], container_path, result[1], result[2]) if result is not None else None
