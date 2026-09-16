@@ -1,3 +1,4 @@
+import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -18,20 +19,30 @@ _OVERLAY_CLOSE_DELAY_MS = 200  # lets the overlay's own window fully disappear/r
 
 
 def _screenshot_region(region):
-    """pyautogui.screenshot(region=region, allScreens=True), corrected for
-    a quirk in pyautogui 0.9.54's allScreens support: it still crops using
-    `region` as raw pixel offsets into the captured image, which is always
-    0-based even when the real virtual desktop's origin is negative (a
-    monitor positioned above/left of the primary one -- see
+    """pyautogui.screenshot(region=region, allScreens=True) on Windows,
+    corrected for a quirk in pyautogui 0.9.54's allScreens support: it still
+    crops using `region` as raw pixel offsets into the captured image,
+    which is always 0-based even when the real virtual desktop's origin is
+    negative (a monitor positioned above/left of the primary one -- see
     geometry.virtual_screen_bounds). Shifting `region` by the virtual
     screen's own left/top before cropping corrects for that; it's a no-op
     in the overwhelmingly common case where every monitor is at/right-of/
-    below the primary, since the virtual origin is already (0, 0) then."""
+    below the primary, since the virtual origin is already (0, 0) then.
+
+    `allScreens` is a Windows-only pyautogui parameter -- its Linux backend
+    raises TypeError on an unrecognized keyword argument if it's passed
+    there at all, so this is omitted entirely on non-Windows platforms
+    (harmless: geometry.virtual_screen_bounds() itself only ever returns
+    non-None on Windows -- see its own guard -- so `region` is already
+    unshifted here in every other case, single-monitor-only on Linux for
+    now regardless)."""
     bounds = geometry.virtual_screen_bounds()
     virtual_left, virtual_top = (bounds[0], bounds[1]) if bounds else (0, 0)
     left, top, width, height = region
     shifted_region = (left - virtual_left, top - virtual_top, width, height)
-    return pyautogui.screenshot(region=shifted_region, allScreens=True)
+    if sys.platform == "win32":
+        return pyautogui.screenshot(region=shifted_region, allScreens=True)
+    return pyautogui.screenshot(region=shifted_region)
 
 
 class CalibrationMixin:
