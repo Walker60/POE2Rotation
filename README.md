@@ -45,6 +45,54 @@ properly signed and works fine with Secure Boot and driver-signature enforcement
 enabled — no settings need to be changed for it. (If you go looking for "ViGEmBus"
 online, note the upstream project renamed in 2023; functionally unaffected either way.)
 
+## Steam Deck / Linux (experimental)
+
+The app also has a Linux backend (window detection via X11/EWMH, real-controller
+input via `evdev`) intended for running natively on a Steam Deck in **Desktop
+Mode**, alongside Path of Exile 2 running as usual via Proton — the bot itself
+does **not** run under Wine/Proton, just as an ordinary Linux process. This is
+new and **unverified against real hardware** — treat it as a first draft to
+debug on an actual Deck, not a finished, tested feature. If something doesn't
+work, check the specific caveats called out in `poe2bot/focus.py` and
+`poe2bot/controller_input.py`'s module docstrings first.
+
+What you need before running it:
+- **An X11 session**, not Wayland: `steamos-session-select plasma-x11-persistent`.
+  `keyboard`/`mouse`/`mss`/`pyautogui` (hotkey capture, input injection, screen/pixel
+  capture) have no Wayland support at all, on any platform, so this isn't optional.
+  (SteamOS has moved to Wayland-by-default for Desktop Mode; the X11 session is
+  still selectable as of this writing, but Valve's long-term direction is Wayland
+  — if a future SteamOS update drops the X11 desktop session, this whole approach
+  needs revisiting.)
+- **A real, mutable Linux userspace with Tk installed** — SteamOS's own root
+  filesystem is read-only by default. [Distrobox](https://github.com/89luca89/distrobox)
+  (a container that doesn't require Developer Mode's permanent read-write unlock)
+  is the recommended way to get one; install Python 3 + `tk` inside it, with X11
+  GUI passthrough (Distrobox does this by default) and device passthrough for
+  `/dev/uinput` (virtual controller output) and `/dev/input/*` (real controller
+  input).
+- **Permission to read/write those devices** without root: add your user to the
+  `input`/`uinput` groups (or an equivalent udev rule) inside the container —
+  `vgamepad`'s own Linux docs describe the exact steps.
+- `pip install -r requirements.txt` inside that container — `python-xlib` and
+  `evdev` (the two Linux-only additions) are pulled in automatically via
+  environment markers; they're never installed on Windows.
+
+**Virtual-controller output** (a step that presses a button on the emulated
+controller — see "Controller output" above): `vgamepad`, the same library
+`poe2bot/controller.py` already uses on Windows, ships its own native Linux
+backend built on the kernel's `uinput`/`evdev` subsystem — no ViGEmBus, no Wine
+involved, no code changes needed here. This is the single biggest open
+question in the whole Linux port: confirm a virtual pad created this way
+actually shows up as a controller to Proton-hosted PoE2 (not just to the host
+OS) before relying on it — there are reports of Proton not always recognizing
+a `uinput`-created pad. If it doesn't work with stock Proton, a community
+"GE" Proton build (which carries extra controller-support patches) may help.
+
+Recalibrate every rotation's image/pixel conditions fresh on the Deck's own
+display — a template captured on a Windows PC's screen won't match the Deck's
+rendering, the same as moving between any two different screens today.
+
 ## Configuration
 
 Every setting below can also be viewed and changed from **Settings... > Advanced**

@@ -1,3 +1,4 @@
+import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -71,8 +72,9 @@ class SettingsWindow(tk.Toplevel):
              "Instantly stops every running rotation -- a keyboard key name, e.g. f12"),
             ("Controller min tap (ms):", self._min_tap_var,
              "Floor for an instant controller-encoded tap with no Hold configured"),
-            ("Controller index (0-3):", self._controller_index_var,
-             "Which XInput slot is your real, physically-held controller"),
+            ("Controller index:", self._controller_index_var,
+             "Which controller is your real, physically-held one -- an XInput slot (0-3) on "
+             "Windows, or a position in the list of detected gamepads on Linux"),
         )
         for label, var, hint in rows:
             row = ttk.Frame(advanced)
@@ -105,8 +107,14 @@ class SettingsWindow(tk.Toplevel):
             min_tap_ms = None
         try:
             controller_index = int(self._controller_index_var.get())
-            if not (0 <= controller_index <= 3):
-                problems.append("Controller index must be between 0 and 3 (XInput supports exactly 4 slots).")
+            # 0-3 on Windows (XInput supports exactly 4 slots); Linux has no
+            # fixed ceiling (an index into however many gamepads evdev finds),
+            # so only reject a negative index there.
+            max_index = 3 if sys.platform == "win32" else None
+            if controller_index < 0 or (max_index is not None and controller_index > max_index):
+                problems.append(
+                    "Controller index must be between 0 and 3 (XInput supports exactly 4 slots)."
+                    if max_index is not None else "Controller index cannot be negative.")
         except ValueError:
             problems.append("Controller index must be a whole number.")
             controller_index = None
