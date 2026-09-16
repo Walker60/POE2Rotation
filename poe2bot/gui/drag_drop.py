@@ -1,26 +1,35 @@
 from tkinter import ttk
 
-from poe2bot.models import ConditionGroup
+from poe2bot.models import MAX_GROUP_NESTING_DEPTH, ConditionGroup
 
 
 class DragDropMixin:
-    """Drag-and-drop reordering (and, for steps, reparenting into/out of a
-    Condition Group) in the step Treeview. Mixed into App (see
-    poe2bot/gui/app.py) -- calls into StepEditorMixin (self.editing_steps,
-    self._parse_tree_iid, self._steps_list_for, self._location_iid,
-    self._refresh_steps_tree, self._apply_pending_step_edits from App
-    itself) freely.
+    """Drag-and-drop reordering and reparenting in the step Treeview: a step
+    into/out of/between Condition Groups, and (since groups may now nest,
+    see poe2bot/models.py's ConditionGroup) a Condition Group into/out of/
+    between other groups. Mixed into App (see poe2bot/gui/app.py) -- calls
+    into StepEditorMixin (self.editing_steps, self._parse_tree_iid,
+    self._steps_list_for, self._location_iid, self._refresh_steps_tree,
+    self._apply_pending_step_edits from App itself) freely.
 
     Every dragged/hovered row is addressed by StepEditorMixin's
-    (group_idx, step_idx, cond_idx) location tuple -- a group header
-    (step_idx is None), a step (top-level when group_idx is None, else
-    nested in that group), or one of a step's own conditions. A drag set
-    is always one uniform kind (see _is_valid_drag_set): any number of
-    top-level groups, several steps sharing the same current parent
-    (all top-level, or all nested in the same group -- letting a group's
-    worth of steps be dropped somewhere with a *different* parent than
-    they started with, which is what makes cross-group moves possible), or
-    several conditions of the same step.
+    (group_path, step_idx, cond_idx) location tuple -- a group header
+    (step_idx is None), a step (group_path names whichever list -- the top
+    level, or some nested group's own entries -- it currently lives in), or
+    one of a step's own conditions. A drag set is always one uniform kind
+    (see _is_valid_drag_set): any number of Condition Groups sharing the
+    same current parent list, several steps sharing the same current
+    parent list (all top-level, or all nested in the same group -- letting
+    a group's worth of steps be dropped somewhere with a *different*
+    parent than they started with, which is what makes cross-group moves
+    possible), or several conditions of the same step.
+
+    Nesting a group happens the same way a step already nests into a group
+    today: drop it onto another group's own header row -- at any depth,
+    not just among current siblings -- and it becomes that group's first
+    child. Two guards keep this sane: a group can never be dropped into
+    itself or one of its own current descendants (which would create a
+    cycle), and dropping is refused past MAX_GROUP_NESTING_DEPTH.
 
     A plain click (Button-1) on ttk.Treeview unconditionally collapses multi-
     selection to the single clicked row, synchronously, before any B1-Motion
@@ -42,18 +51,24 @@ class DragDropMixin:
         return color or "#4a6984"
 
     def _sorted_locations(self, iids):
-        """Parses every iid into a (group_idx, step_idx, cond_idx) location,
-        sorted with None treated as less than any int -- a raw multi-
-        selection can freely mix rows whose locations have None in
-        different positions (e.g. a top-level step next to one nested in a
-        group) before _is_valid_drag_set has had a chance to reject that
-        mix, and comparing None to an int directly would raise."""
+        """Parses every iid into a (group_path, step_idx, cond_idx) location,
+        sorted with None treated as less than any int for step_idx/cond_idx
+        (group_path is always a tuple of ints -- itself already directly
+        comparable/sortable) -- a raw multi-selection can freely mix rows at
+        different nesting depths before _is_valid_drag_set has had a chance
+        to reject an invalid mix."""
         locations = [p for p in (self._parse_tree_iid(iid) for iid in iids) if p is not None]
-        return sorted(locations, key=lambda p: tuple(-1 if x is None else x for x in p))
+        return sorted(locations, key=lambda p: (p[0], -1 if p[1] is None else p[1], -1 if p[2] is None else p[2]))
 
-    def _top_level_iid(self, index: int) -> str:
-        entry = self.editing_steps[index]
-        return self._location_iid(index, None) if isinstance(entry, ConditionGroup) else self._location_iid(None, index)
+    def _sibling_iid(self, container_path, local_index: int) -> str:
+        """The tree iid of the entry at `local_index` within
+        self._steps_list_for(container_path) -- the generalized counterpart
+        to indexing self.editing_steps directly, used by _resolve_sibling_target
+        to build a highlight/bbox-lookup row for whichever list a drag is
+        currently being resolved against."""
+        entry = self._steps_list_for(container_path)[local_index]
+        return (self._location_iid(container_path + (local_index,), None) if isinstance(entry, ConditionGroup)
+                else self._location_iid(container_path, local_index))
 
     @staticmethod
     def _is_valid_drag_set(candidate) -> bool:
@@ -65,10 +80,28 @@ class DragDropMixin:
         if sum(bool(kind) for kind in (group_entries, cond_entries, step_entries)) > 1:
             return False  # mixed groups + steps + conditions
         if group_entries:
-            return True  # any number of top-level groups, always reorder-only
+            return len({gp[:-1] for gp, _s, _c in group_entries}) == 1  # all groups sharing the same current parent
         if cond_entries:
-            return len({(g, s) for g, s, _c in candidate}) == 1  # all conditions of the same step
-        return len({g for g, _s, _c in candidate}) == 1  # all steps sharing the same current parent
+            return len({(gp, s) for gp, s, _c in candidate}) == 1  # all conditions of the same step
+        return len({gp for gp, _s, _c in candidate}) == 1  # all steps sharing the same current parent
+
+    @staticmethod
+    def _path_within(path, ancestor_candidates) -> bool:
+        """True if `path` is exactly, or nested inside, any path in
+        `ancestor_candidates` -- used to stop a dragged group from being
+        dropped into itself or one of its own current descendants, which
+        would otherwise create a cycle."""
+        return any(len(a) <= len(path) and path[:len(a)] == a for a in ancestor_candidates)
+
+    @classmethod
+    def _group_subtree_depth(cls, group) -> int:
+        """1 (just `group` itself, no ConditionGroup nested inside it) plus
+        the deepest chain of ConditionGroups nested inside it -- used so a
+        drop is refused not just when the dragged group ITSELF would land
+        past MAX_GROUP_NESTING_DEPTH, but also when some group nested
+        inside it would."""
+        nested = [e for e in group.entries if isinstance(e, ConditionGroup)]
+        return 1 + max((cls._group_subtree_depth(e) for e in nested), default=0)
 
     def _on_tree_press(self, event):
         if event.state & 0x0005:  # Shift (0x1) or Control (0x4) held -- leave extend/toggle select alone
@@ -154,7 +187,7 @@ class DragDropMixin:
         target = self._resolve_drop_target(event, candidate)
         if target is None:
             return
-        _highlight_iid, dest_group_idx, target_index, after = target
+        _highlight_iid, dest_container_path, target_index, after = target
         dragging_conditions = candidate[0][2] is not None
         dragging_groups = candidate[0][1] is None
         if dragging_conditions:
@@ -166,34 +199,38 @@ class DragDropMixin:
             self.tree.selection_set(*(self._location_iid(owning_group, owning_step, start + k)
                                        for k in range(len(dragged_indices))))
         elif dragging_groups:
-            dragged_indices = sorted(g for g, _s, _c in candidate)
-            start = self._move_items(self.editing_steps, dragged_indices, self.editing_steps, target_index, after)
+            parent_path = candidate[0][0][:-1]
+            source_list = self._steps_list_for(parent_path)
+            dest_list = self._steps_list_for(dest_container_path)
+            dragged_indices = sorted(gp[-1] for gp, _s, _c in candidate)
+            start = self._move_items(source_list, dragged_indices, dest_list, target_index, after)
             self._refresh_steps_tree()
-            self.tree.selection_set(*(self._location_iid(start + k, None) for k in range(len(dragged_indices))))
+            self.tree.selection_set(*(self._location_iid(dest_container_path + (start + k,), None)
+                                       for k in range(len(dragged_indices))))
         else:
             source_group = candidate[0][0]
             source_list = self._steps_list_for(source_group)
-            dest_list = self._steps_list_for(dest_group_idx)
+            dest_list = self._steps_list_for(dest_container_path)
             dragged_indices = sorted(s for _g, s, _c in candidate)
             start = self._move_items(source_list, dragged_indices, dest_list, target_index, after)
             self._refresh_steps_tree()
-            self.tree.selection_set(*(self._location_iid(dest_group_idx, start + k)
+            self.tree.selection_set(*(self._location_iid(dest_container_path, start + k)
                                        for k in range(len(dragged_indices))))
         self._autosave()
 
     def _resolve_drop_target(self, event, candidate):
-        """Returns (highlight_iid, dest_group_idx, target_index, after) for
-        the given drag candidate (a list of (group_idx, step_idx, cond_idx)
-        locations, all the same kind per _is_valid_drag_set), or None if
-        there's no valid drop here. target_index is an index into the
-        destination list *before* removing the dragged items --
-        self.editing_steps for a group drop or a step drop landing at the
-        top level, some group's own .steps for a step drop landing
-        inside/within a group, or the owning step's .conditions for a
-        condition drop. dest_group_idx is only meaningful for a step drag
-        (which group, if any, the drop lands in); ignored by callers for a
-        group or condition drag, which can only ever land in their own one
-        fixed list."""
+        """Returns (highlight_iid, dest_container_path, target_index, after)
+        for the given drag candidate (a list of (group_path, step_idx,
+        cond_idx) locations, all the same kind per _is_valid_drag_set), or
+        None if there's no valid drop here. target_index is an index into
+        the destination list *before* removing the dragged items --
+        self.editing_steps for a drop landing at the top level, some
+        group's own .entries for a drop landing inside/within a group, or
+        the owning step's .conditions for a condition drop. dest_container_path
+        is only meaningful for a group or step drag (which list, identified
+        by its own group_path, the drop lands in); ignored by callers for a
+        condition drag, which can only ever land in its own one fixed
+        list."""
         dragging_conditions = candidate[0][2] is not None
         dragging_groups = candidate[0][1] is None
         target_row = self.tree.identify_row(event.y)
@@ -203,14 +240,7 @@ class DragDropMixin:
             return self._resolve_condition_drop_target(event, candidate, parsed, target_row)
 
         if dragging_groups:
-            # Groups never nest -- redirect a hover over a nested step (or one
-            # of its conditions) to that step's own top-level group, mirroring
-            # how a condition row redirects to its owning step's row below.
-            if parsed is not None and parsed[0] is not None and parsed[1] is not None:
-                parsed = (parsed[0], None, None)
-            exclude = {g for g, _s, _c in candidate}
-            result = self._resolve_top_level_target(event, parsed, exclude)
-            return (result[0], None, result[1], result[2]) if result is not None else None
+            return self._resolve_group_drop_target(event, candidate, parsed, target_row)
 
         # Dragging steps.
         if parsed is not None and parsed[1] is None:
@@ -221,23 +251,80 @@ class DragDropMixin:
             # now (dropping the first step ever into it) -- there's no
             # existing child row yet to highlight, so fall back to
             # highlighting the group's own row instead of a nonexistent one.
-            dest_group_idx = parsed[0]
-            highlight_iid = (self._location_iid(dest_group_idx, 0)
-                              if self._steps_list_for(dest_group_idx) else target_row)
-            return highlight_iid, dest_group_idx, 0, False
+            dest_group_path = parsed[0]
+            # _sibling_iid (not a bare _location_iid(dest_group_path, 0)) --
+            # whatever's CURRENTLY at index 0 of this group's entries might
+            # itself be a nested ConditionGroup rather than a Step, now that
+            # groups can nest, so the highlighted row's iid must be built
+            # according to what that entry actually is.
+            highlight_iid = (self._sibling_iid(dest_group_path, 0)
+                              if self._steps_list_for(dest_group_path) else target_row)
+            return highlight_iid, dest_group_path, 0, False
         if parsed is not None and parsed[2] is not None:
             # Hovered a condition row -- treat a step and its conditions as one block.
             target_row, parsed = self._location_iid(parsed[0], parsed[1]), (parsed[0], parsed[1], None)
         if parsed is not None:
-            dest_group_idx = parsed[0]
-            if (dest_group_idx, parsed[1]) in {(g, s) for g, s, _c in candidate}:
+            dest_group_path = parsed[0]
+            if (dest_group_path, parsed[1]) in {(g, s) for g, s, _c in candidate}:
                 return None  # dropped on one of the dragged steps itself
             bbox = self.tree.bbox(target_row)
             after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
-            return target_row, dest_group_idx, parsed[1], after
-        exclude = {s for g, s, _c in candidate if g is None}
-        result = self._resolve_top_level_target(event, None, exclude)
-        return (result[0], None, result[1], result[2]) if result is not None else None
+            return target_row, dest_group_path, parsed[1], after
+        source_group = candidate[0][0]
+        exclude = {s for _g, s, _c in candidate}
+        result = self._resolve_sibling_target(event, None, exclude, source_group)
+        return (result[0], source_group, result[1], result[2]) if result is not None else None
+
+    def _resolve_group_drop_target(self, event, candidate, parsed, target_row):
+        """Resolves a drop target while dragging one or more Condition
+        Groups (candidate[*][1] is None), which all share the same current
+        parent list (see _is_valid_drag_set). Hovering a DIFFERENT group's
+        own header row -- one that isn't among the dragged groups and isn't
+        nested inside one of them, and wouldn't push nesting past
+        MAX_GROUP_NESTING_DEPTH -- nests the dragged group(s) as that
+        group's first child(ren), exactly mirroring how a step dragged onto
+        a group's header row already nests into it (see the step-dragging
+        branch above) -- this is true even if the hovered group is a
+        current sibling of the dragged one(s), same as a step dragged onto
+        a sibling group's row already nests rather than just reordering.
+        Hovering the dragged groups' own current parent's header row (or
+        anywhere else that doesn't resolve to a valid nest target) instead
+        reorders the dragged group(s) among their own current siblings."""
+        dragged_paths = {gp for gp, _s, _c in candidate}
+        parent_path = next(iter(dragged_paths))[:-1]
+
+        if parsed is not None and parsed[0] and parsed[1] is not None:
+            # Hovering a step or one of its conditions that itself lives
+            # inside some group -- redirect to that OWNING group's header
+            # row (whatever depth it's at), mirroring how a condition row
+            # redirects to its owning step's row in
+            # _resolve_condition_drop_target. A TOP-LEVEL step/condition
+            # (parsed[0] == ()) has no owning group to redirect to -- left
+            # as-is, it flows through to sibling-target resolution below,
+            # used as a plain reorder anchor within the top-level list,
+            # exactly like hovering a plain step already works for a step
+            # drag.
+            parsed = (parsed[0], None, None)
+
+        if parsed is not None and parsed[1] is None:
+            target_path = parsed[0]
+            if target_path in dragged_paths or self._path_within(target_path, dragged_paths):
+                return None  # dropped on one of the dragged groups itself, or one of their own descendants
+            # No special-case for target_path == parent_path (hovering the
+            # dragged group(s)' own current parent's row): that just falls
+            # out of the same nest-at-front logic below as "reorder to the
+            # front of the list they're already in," mirroring exactly how
+            # a step dragged onto its own current group's header row
+            # already just moves it to the front of that same list.
+            max_dragged_depth = max(self._group_subtree_depth(self._group_at(gp)) for gp in dragged_paths)
+            if len(target_path) + max_dragged_depth <= MAX_GROUP_NESTING_DEPTH:
+                dest_entries = self._steps_list_for(target_path)
+                highlight_iid = self._sibling_iid(target_path, 0) if dest_entries else target_row
+                return highlight_iid, target_path, 0, False
+
+        exclude = {gp[-1] for gp in dragged_paths}
+        result = self._resolve_sibling_target(event, parsed, exclude, parent_path)
+        return (result[0], parent_path, result[1], result[2]) if result is not None else None
 
     def _resolve_condition_drop_target(self, event, candidate, parsed, target_row):
         owning_group, owning_step = candidate[0][0], candidate[0][1]
@@ -264,32 +351,40 @@ class DragDropMixin:
             return last_iid, None, len(conditions) - 1, True
         return None
 
-    def _resolve_top_level_target(self, event, parsed, exclude_indices):
+    def _resolve_sibling_target(self, event, parsed, exclude_indices, container_path):
         """(highlight_iid, target_index, after) for a drop landing among
-        self.editing_steps' own top-level entries -- used by a group drag
-        (which can only ever reorder among top-level entries) and, for the
-        blank-space case, a step drag targeting the top level. `parsed` is
-        whatever _parse_tree_iid returned for the currently-hovered row (or
-        None for blank space above/below every row); `exclude_indices` are
-        top-level indices that are themselves being dragged (never a valid
-        target)."""
+        self._steps_list_for(container_path)'s own entries -- used by a
+        group drag (reordering among its current siblings) and, for the
+        blank-space case, a step drag targeting its own current group (or
+        the top level, when container_path is ()). `parsed` is whatever
+        _parse_tree_iid returned for the currently-hovered row (or None for
+        blank space above/below every row in this list); if it resolves to
+        a row that ISN'T a direct child of container_path, that's treated
+        the same as no row at all -- the caller is responsible for
+        redirecting a nested row to its owning entry's own row first, same
+        as _resolve_condition_drop_target/_resolve_group_drop_target
+        already do before calling this. `exclude_indices` are local indices
+        (within this list) that are themselves being dragged -- never a
+        valid target."""
         if parsed is not None:
-            if parsed[1] is None:
-                top_index = parsed[0]      # a group header -- its own top-level index
-            elif parsed[0] is None:
-                top_index = parsed[1]      # a top-level step -- its own top-level index
+            group_path, step_idx, _cond_idx = parsed
+            if step_idx is None and len(group_path) == len(container_path) + 1 and group_path[:-1] == container_path:
+                local_index = group_path[-1]      # a group among these siblings
+            elif step_idx is not None and group_path == container_path:
+                local_index = step_idx             # a step among these siblings
             else:
-                top_index = None           # a nested row -- caller must redirect before calling this
-            if top_index is None or top_index in exclude_indices:
+                local_index = None                 # belongs to a different list entirely
+            if local_index is None or local_index in exclude_indices:
                 return None
-            row = self._top_level_iid(top_index)
+            row = self._sibling_iid(container_path, local_index)
             bbox = self.tree.bbox(row)
             after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
-            return row, top_index, after
-        if not self.editing_steps:
+            return row, local_index, after
+        entries = self._steps_list_for(container_path)
+        if not entries:
             return None
-        last = len(self.editing_steps) - 1
-        first_row, last_row = self._top_level_iid(0), self._top_level_iid(last)
+        last = len(entries) - 1
+        first_row, last_row = self._sibling_iid(container_path, 0), self._sibling_iid(container_path, last)
         first_bbox, last_bbox = self.tree.bbox(first_row), self.tree.bbox(last_row)
         if first_bbox and event.y < first_bbox[1]:
             return first_row, 0, False

@@ -2,7 +2,7 @@ import math
 import random
 import threading
 import time
-from typing import Optional
+from typing import List, Optional, Tuple, Union
 
 import cv2
 import keyboard
@@ -523,7 +523,10 @@ class RotationRunner:
         self._reset_requested = False
         self._pause_requested = False
         self._paused = threading.Event()
-        self._current_path = (0, None)   # (top_index, nested_index_or_None) -- touched only by _run_once's own thread
+        self._current_path: Tuple[int, ...] = ()   # path of indices from rotation.steps down to whatever
+                                                     # entry is currently executing (through any nested
+                                                     # ConditionGroups) -- () means "not started yet."
+                                                     # Touched only by _run_once/_run_entries' own thread.
         # id(step) -> time.perf_counter() of that step's own last actual fire, for
         # any "timer" Condition gating it (see _check_condition). Survives a Loop
         # wraparound and a pause/resume -- a real cooldown keeps ticking regardless
@@ -550,7 +553,7 @@ class RotationRunner:
         self._reset_requested = False
         self._pause_requested = False
         self._paused.clear()
-        self._current_path = (0, None)
+        self._current_path = ()
         self._thread = threading.Thread(
             target=self._run, name=f"rotation-{self.rotation.name}", daemon=True)
         self._thread.start()
@@ -640,12 +643,12 @@ class RotationRunner:
         self._notify_activity(f"Rotation started ({self.rotation.mode} mode)")
         self._lap_count = 0
         self._lap_started_at = time.perf_counter()
-        resume_index = (0, None)
+        resume_index: Tuple[int, ...] = ()
         try:
             while True:
                 if self._stop_requested:
                     break
-                completed = self._run_once(*resume_index)
+                completed = self._run_once(resume_index)
                 # A genuine stop() always wins over a reset()/pause() that happened to
                 # arrive around the same instant -- all three share the same stop_event
                 # to wake any in-flight cooperative wait instantly, so without this
@@ -658,7 +661,7 @@ class RotationRunner:
                     self._notify_activity("Reset to step 1")
                     self._reset_requested = False
                     self._stop_event.clear()
-                    resume_index = (0, None)
+                    resume_index = ()
                     self._step_last_fired.clear()
                     self._lap_count = 0
                     self._lap_started_at = time.perf_counter()
@@ -678,7 +681,7 @@ class RotationRunner:
                 lap_seconds = time.perf_counter() - self._lap_started_at
                 self._lap_started_at = time.perf_counter()
                 self._notify_activity(f"Lap {self._lap_count} complete ({lap_seconds:.1f}s)")
-                resume_index = (0, None)
+                resume_index = ()
         except Exception as e:
             # Anything escaping here (e.g. an unrecognized key name reaching
             # keyboard.press/send -- validate_rotation only runs at GUI save
@@ -744,36 +747,65 @@ class RotationRunner:
         finally:
             self._notify(STATUS_RUNNING)
 
-    def _run_once(self, start_top: int = 0, start_nested: Optional[int] = None) -> bool:
+    def _run_once(self, resume_path: Tuple[int, ...] = ()) -> bool:
         """Runs one full pass over self.rotation.steps (a Step | ConditionGroup
-        list), starting at top-level index `start_top` -- and, if that entry is
-        a ConditionGroup, at nested index `start_nested` within its own steps
-        (None means "start fresh," i.e. check the group's gate first). Only
-        ever non-None for the *first* top-level entry visited (a resume from
-        pause/reset), never for a group reached normally later in the same
-        pass -- see the `nested_start == 0` gate check below."""
-        for gi in range(start_top, len(self.rotation.steps)):
-            entry = self.rotation.steps[gi]
+        list, possibly with ConditionGroups nested arbitrarily deep inside one
+        another). `resume_path` is () for a fresh pass, or the exact
+        self._current_path a previous pass left behind when interrupted
+        (pause/reset) -- see _run_entries for how it's consumed level by
+        level. Kept as a thin entry point so callers never need to know
+        _run_entries' extra bookkeeping parameters."""
+        return self._run_entries(self.rotation.steps, "", resume_path, ())
+
+    def _run_entries(self, entries: List[Union[Step, ConditionGroup]], group_path_label: str,
+                      resume_path: Tuple[int, ...], path_prefix: Tuple[int, ...]) -> bool:
+        """Runs one full pass over `entries` -- a Step | ConditionGroup list at
+        any nesting depth (self.rotation.steps itself, or one ConditionGroup's
+        own `entries`) -- starting at the position `resume_path` describes
+        relative to THIS level ((): start fresh at index 0). `path_prefix` is
+        this level's own location within the overall self._current_path ((:
+        at the top level). `group_path_label` is this level's ancestor-label
+        chain, joined the same way validate_rotation's _validate_entries does
+        (" > " between nested group labels, ", " right before a leaf Step's
+        own "Step N") -- "" only at the true top level.
+
+        Only the entry index actually being resumed into at this level carries
+        resume info down to its own children (`child_resume` below) -- every
+        other entry visited in this same pass is a fresh visit, exactly like
+        _run_once's previous single-level `gi == start_top` check. A nested
+        ConditionGroup's own gate is rechecked exactly when resuming lands at
+        (or a fresh pass reaches) its own first child -- decided purely by
+        this level's own next path element, applied independently at every
+        depth, never influenced by an ancestor's decision.
+
+        Returns False the instant stop_event fires (mirrors _run_step's own
+        contract) -- every enclosing call, all the way back up to _run_once,
+        unwinds immediately without doing anything else."""
+        start_index = resume_path[0] if resume_path else 0
+        for i in range(start_index, len(entries)):
             if self._stop_event.is_set():
                 return False
+            entry = entries[i]
+            my_path = path_prefix + (i,)
+            child_resume = resume_path[1:] if i == start_index else ()
             if isinstance(entry, ConditionGroup):
-                nested_start = start_nested if gi == start_top and start_nested is not None else 0
-                if nested_start == 0:
-                    self._current_path = (gi, None)
+                this_group_label = (f"{group_path_label} > Condition Group {i + 1}"
+                                     if group_path_label else f"Condition Group {i + 1}")
+                if not child_resume or child_resume[0] == 0:
+                    self._current_path = my_path
                     if not self._wait_for_focus_or_stop():
                         return False
                     if not _group_gate_passes(entry):
                         if not self._stop_event.is_set():
-                            log.info(f"[{self.rotation.name}] condition group {gi + 1}'s condition not met; skipping")
-                            self._notify_activity(f"Condition Group {gi + 1}: condition not met, skipping")
-                        continue
-                for si in range(nested_start, len(entry.steps)):
-                    self._current_path = (gi, si)
-                    if not self._run_step(entry.steps[si], f"Condition Group {gi + 1}, Step {si + 1}"):
-                        return False
+                            log.info(f"[{self.rotation.name}] {this_group_label.lower()}'s condition not met; skipping")
+                            self._notify_activity(f"{this_group_label}: condition not met, skipping")
+                        continue  # next sibling at THIS level, not the rotation's top level
+                if not self._run_entries(entry.entries, this_group_label, child_resume, my_path):
+                    return False
             else:
-                self._current_path = (gi, None)
-                if not self._run_step(entry, f"Step {gi + 1}"):
+                self._current_path = my_path
+                label = f"{group_path_label}, Step {i + 1}" if group_path_label else f"Step {i + 1}"
+                if not self._run_step(entry, label):
                     return False
         return True
 

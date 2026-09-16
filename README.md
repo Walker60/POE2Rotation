@@ -301,8 +301,11 @@ and an **Action**:
 
 There's no Override Hold Time option and no Wait-up-to-ms polling at the
 group level (both stay per-step, on a step's own Conditions) — a group's
-condition is always a single, instant check. Groups never nest inside each
-other; a group holds steps directly.
+condition is always a single, instant check. A group can itself hold another
+group nested inside it (up to 5 levels deep) — each level's own gate must
+pass for anything inside it to run, so a group nested inside another
+effectively ANDs its own condition with every ancestor group's condition
+above it, without re-entering the same check on every inner step.
 
 **Add Condition Group (Image)...**/**Add Condition Group (Pixel)...** (in
 the **Rotation Conditions** section), with no group selected, calibrate a
@@ -327,12 +330,17 @@ Steps end up nested under a group two ways: select the group (or one of its
 own nested steps/conditions) and click **Add Step**/**Add Sleep**, which
 appends into that group instead of the top level; or drag an existing step
 onto the group's row to move it in — dragging a nested step out to the top
-level, or into a different group, works the same way in reverse. Move
-Up/Move Down and a plain drag reorder a nested step within its own group,
-or a group itself among the rotation's other top-level steps/groups, the
-same way Move Up/Move Down and dragging already work for a plain step.
-Removing a non-empty group (Remove Selected) asks for confirmation first,
-since it deletes every step nested inside it along with the group.
+level, or into a different group, works the same way in reverse. A group
+itself is nested inside another group only by dragging it onto that other
+group's own row — there's no "Add Nested Group" button; the Add Condition
+Group buttons always add a brand-new group at the top level, exactly as
+above. Move Up/Move Down and a plain drag reorder a nested step within its
+own group, or a group itself among whichever list it currently lives in
+(the top level, or another group's own nested entries), the same way Move
+Up/Move Down and dragging already work for a plain step. Removing a
+non-empty group (Remove Selected) asks for confirmation first, since it
+deletes everything nested inside it — steps and any further-nested groups,
+at any depth — along with the group.
 
 ## Repeat and Combine Hold (optional, per step)
 
@@ -366,15 +374,23 @@ list on the left) and drag-and-drop, on top of the buttons described above:
   several multi-selected steps sharing the same current group, or lack of
   one) to reposition it, including onto a Condition Group's row (or a step
   already nested in one) to move it into/out of/between groups; drag a
-  Condition Group (or several) to reposition it among the rotation's other
-  top-level steps/groups — groups never nest, so a group drag only ever
-  lands at the top level; drag a condition (or several, multi-selected) to
-  reposition it within its own step. A highlighted row shows where it'll
-  land as you drag. Dragging a mix of groups/steps/conditions together, or
-  conditions from more than one step at once, isn't supported — nothing
-  happens rather than doing something surprising. Move Up/Move Down still
-  work as a click-based alternative, moving a step within its own group (or
-  a group within the top level) the same way dragging does.
+  Condition Group (or several sharing the same current parent) to reorder
+  it among its own current siblings, or onto a *different* group's row to
+  nest it inside that group instead — the same "drop onto a group's row
+  nests into it" rule a step already follows, so this works whether that
+  other group is a current sibling or lives somewhere else in the tree
+  entirely, and a group can be pulled back out to a shallower level the
+  same way, by dragging it onto whichever group should contain it next (or
+  into blank space to land at the top level). Dropping a group onto itself
+  or one of its own current descendants is refused (it would create a
+  cycle), and dropping past 5 levels of nesting is refused too. Drag a
+  condition (or several, multi-selected) to reposition it within its own
+  step. A highlighted row shows where it'll land as you drag. Dragging a
+  mix of groups/steps/conditions together, or conditions from more than one
+  step at once, isn't supported — nothing happens rather than doing
+  something surprising. Move Up/Move Down still work as a click-based
+  alternative, moving a step or a group within whichever list it currently
+  lives in, the same way dragging does.
 - **Copy** copies every currently-selected step (with its conditions) to an
   in-memory clipboard; **Paste** inserts a copy of the clipboard's contents
   after whichever step/condition is selected (or at the end, if nothing is).

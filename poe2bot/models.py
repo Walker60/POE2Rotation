@@ -12,6 +12,7 @@ VALID_CONDITION_MATCH_TYPES = ("image", "pixel", "timer")  # a Condition can als
 VALID_CONDITION_ACTIONS = ("fire", "block", "hold")   # what a Condition does once it matches -- see Condition.action
 VALID_SEARCH_MODES = ("exact", "area")
 MAX_REPEAT_COUNT = 50
+MAX_GROUP_NESTING_DEPTH = 5  # sanity cap on how deep Condition Groups can nest -- see validate_rotation
 
 
 _T = TypeVar("_T")
@@ -201,30 +202,45 @@ class Step:
 class ConditionGroup:
     """A rotation-level gate: `condition` (always match_type "image" or
     "pixel", action "fire" or "block" -- never "timer"/"hold", see
-    validate_rotation) decides once per pass whether every step in `steps`
-    runs at all, exactly like a Step's own fire/block Conditions decide for
-    one step -- just applied to a whole ordered block of steps together.
-    Never nests -- `steps` only ever holds Step objects, never another
-    ConditionGroup."""
+    validate_rotation) decides once per pass whether every entry in
+    `entries` runs at all, exactly like a Step's own fire/block Conditions
+    decide for one step -- just applied to a whole ordered block together.
+    `entries` may itself hold nested ConditionGroups (up to
+    MAX_GROUP_NESTING_DEPTH deep) -- see iter_steps/iter_conditions/
+    validate_rotation for how every consumer recurses to arbitrary depth,
+    and RotationRunner._run_entries for how a nested group's own gate
+    combines (AND) with every ancestor group's gate above it."""
     condition: Condition = field(default_factory=Condition)
-    steps: List[Step] = field(default_factory=list)
+    entries: List[Union[Step, "ConditionGroup"]] = field(default_factory=list)
 
     @staticmethod
     def from_dict(data: dict) -> "ConditionGroup":
+        # "entries" is the current key; a rotation saved before nesting existed
+        # used a flat "steps" key instead (plain Step dicts, none of them tagged
+        # with a "type" key) -- keep reading that too so it still loads with no
+        # migration step, same idea _step_entry_from_dict already relies on for
+        # a rotation saved before ConditionGroup existed at all.
+        raw_entries = data.get("entries")
+        if raw_entries is None:
+            raw_entries = data.get("steps", [])
         return ConditionGroup(
             condition=Condition.from_dict(data.get("condition") or {}),
-            steps=[Step.from_dict(s) for s in data.get("steps", [])])
+            entries=[_step_entry_from_dict(e) for e in raw_entries])
 
 
 def _step_entry_to_dict(entry) -> dict:
-    """Rotation.steps is a heterogeneous Step | ConditionGroup list -- this
-    (and _step_entry_from_dict below) is where that gets an explicit "type"
+    """Rotation.steps (and a ConditionGroup's own `entries`) is a
+    heterogeneous Step | ConditionGroup list -- this (and
+    _step_entry_from_dict below) is where that gets an explicit "type"
     discriminator in the persisted JSON, so a pre-existing rotation file
     (saved before ConditionGroup existed, with no "type" key at all) still
-    loads every entry as a plain Step rather than needing a migration."""
+    loads every entry as a plain Step rather than needing a migration.
+    Recurses for a ConditionGroup's own `entries` (rather than a flat
+    asdict(s) per child) so a nested ConditionGroup gets its own "type"
+    tag too, at any depth."""
     if isinstance(entry, ConditionGroup):
         return {"type": "group", "condition": asdict(entry.condition),
-                "steps": [asdict(s) for s in entry.steps]}
+                "entries": [_step_entry_to_dict(e) for e in entry.entries]}
     return {"type": "step", **asdict(entry)}
 
 
@@ -234,26 +250,28 @@ def _step_entry_from_dict(data: dict):
 
 def iter_steps(entries):
     """Every Step in `entries` (a Rotation.steps-shaped list), including
-    ones nested inside a ConditionGroup -- not the group's own condition
-    itself, see iter_conditions for that. Used anywhere something needs to
-    see every leaf step regardless of grouping (e.g. the Active Device
-    key/alt_key swap, or a Loop rotation's "at least one step with a key"
-    check)."""
+    ones nested inside a ConditionGroup at any depth -- not the group's own
+    condition itself, see iter_conditions for that. Used anywhere something
+    needs to see every leaf step regardless of grouping/nesting (e.g. the
+    Active Device key/alt_key swap, or a Loop rotation's "at least one step
+    with a key" check)."""
     for entry in entries:
-        yield from entry.steps if isinstance(entry, ConditionGroup) else (entry,)
+        if isinstance(entry, ConditionGroup):
+            yield from iter_steps(entry.entries)
+        else:
+            yield entry
 
 
 def iter_conditions(entries):
     """Every Condition anywhere in `entries`: each step's own conditions
-    (top-level or nested inside a group), plus each ConditionGroup's own
-    single gating condition. Used by the calibrated-template GC sweep,
-    which must not delete a template still referenced by a group's own
-    condition."""
+    (at any nesting depth), plus each ConditionGroup's own single gating
+    condition (also at any depth). Used by the calibrated-template GC
+    sweep, which must not delete a template still referenced by a group's
+    own condition."""
     for entry in entries:
         if isinstance(entry, ConditionGroup):
             yield entry.condition
-            for step in entry.steps:
-                yield from step.conditions
+            yield from iter_conditions(entry.entries)
         else:
             yield from entry.conditions
 
@@ -442,16 +460,36 @@ def validate_rotation(rotation: Rotation) -> List[str]:
             "A Loop rotation needs at least one step with a key assigned (or a Sleep step) -- "
             "otherwise it would repeat with no delay between passes.")
 
-    for i, entry in enumerate(rotation.steps, start=1):
-        if isinstance(entry, ConditionGroup):
-            problems.extend(_condition_problems(
-                f"Condition Group {i}", entry.condition, ("fire", "block"), allow_timer=False))
-            for j, step in enumerate(entry.steps, start=1):
-                problems.extend(_step_problems(f"Condition Group {i}, Step {j}", step))
-        else:
-            problems.extend(_step_problems(f"Step {i}", entry))
+    _validate_entries(rotation.steps, "", 0, problems)
 
     return problems
+
+
+def _validate_entries(entries: List[Union[Step, ConditionGroup]], group_path_label: str,
+                       depth: int, problems: List[str]) -> None:
+    """Validates one Step | ConditionGroup list -- rotation.steps itself
+    (group_path_label="", depth=0) or one ConditionGroup's own `entries`
+    (group_path_label=that group's own label, depth=its nesting level) --
+    recursing into any nested ConditionGroup and extending `problems` in
+    place. group_path_label carries the " > "-joined ancestor-group chain
+    (e.g. "Condition Group 2 > Condition Group 1"); it's "" only at the true
+    top level, which is what makes this degrade to the exact
+    "Condition Group N"/"Condition Group N, Step M" labels a single level of
+    nesting always used."""
+    for i, entry in enumerate(entries, start=1):
+        if isinstance(entry, ConditionGroup):
+            this_group_label = (f"{group_path_label} > Condition Group {i}"
+                                 if group_path_label else f"Condition Group {i}")
+            if depth >= MAX_GROUP_NESTING_DEPTH:
+                problems.append(f"{this_group_label}: condition groups cannot nest more than "
+                                 f"{MAX_GROUP_NESTING_DEPTH} levels deep.")
+                continue  # don't descend further -- avoid a cascade of redundant errors
+            problems.extend(_condition_problems(
+                this_group_label, entry.condition, ("fire", "block"), allow_timer=False))
+            _validate_entries(entry.entries, this_group_label, depth + 1, problems)
+        else:
+            label = f"{group_path_label}, Step {i}" if group_path_label else f"Step {i}"
+            problems.extend(_step_problems(label, entry))
 
 
 def _step_problems(label: str, step: Step) -> List[str]:

@@ -784,8 +784,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                    command=self._on_test_match_group_clicked).pack(side="left", padx=(8, 4))
         ttk.Label(group_action_btns,
                   text="(gates a whole block of steps at once -- select it, then Add Step/Add Sleep in"
-                       " Skill Steps, or drag an existing step onto it, to nest steps under it; with a"
-                       " group selected, these buttons recalibrate it instead of adding a new one)",
+                       " Skill Steps, or drag an existing step onto it, to nest steps under it; drag a"
+                       " group onto another group's row to nest it inside; with a group selected, these"
+                       " buttons recalibrate it instead of adding a new one)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         group_name_row = ttk.Frame(self.rotation_conditions_section.body)
@@ -869,10 +870,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return True
-        group_idx, step_idx, _cond_idx = parsed
+        group_path, step_idx, _cond_idx = parsed
         if step_idx is None:
             return True  # a condition group's own header row is selected -- no step form pending
-        existing = self._steps_list_for(group_idx)[step_idx]
+        existing = self._steps_list_for(group_path)[step_idx]
         step = self._read_step_form(
             conditions=existing.conditions, is_new_step=False,
             original_key=existing.key, alt_key=existing.alt_key, enabled=existing.enabled)
@@ -883,7 +884,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # spring back to its default state on every apply, even one with no
         # actual field changes.
         replace_step_fields(existing, step)
-        self._update_step_row((group_idx, step_idx))
+        self._update_step_row((group_path, step_idx))
         return True
 
     # ---- global start/stop --------------------------------------------------

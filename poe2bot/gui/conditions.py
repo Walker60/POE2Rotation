@@ -26,7 +26,7 @@ class ConditionsMixin:
     block of steps rather than one step's own conditions)."""
 
     def _selected_condition_location(self):
-        """(group_idx, step_idx, cond_idx) if exactly one condition row is
+        """(group_path, step_idx, cond_idx) if exactly one condition row is
         currently selected, else None (a step's own row, a condition
         group's own row, nothing, or a multi-selection). Used by the Add
         Image/Pixel/Timer Condition buttons to decide whether they're
@@ -50,8 +50,8 @@ class ConditionsMixin:
         if location is None:
             messagebox.showinfo("No condition selected", "Select a condition in the Skill Steps list first.")
             return
-        group_idx, step_idx, cond_idx = location
-        condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
+        group_path, step_idx, cond_idx = location
+        condition = self._steps_list_for(group_path)[step_idx].conditions[cond_idx]
         if condition.match_type == "timer":
             messagebox.showinfo(
                 "Can't test a Timer condition",
@@ -81,16 +81,16 @@ class ConditionsMixin:
         condition to whichever step is in scope, exactly as before."""
         selected = self._selected_condition_location()
         if selected is not None:
-            group_idx, step_idx, cond_idx = selected
-            old_condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
-            apply = self._replacing_condition_applier(group_idx, step_idx, cond_idx, old_condition)
+            group_path, step_idx, cond_idx = selected
+            old_condition = self._steps_list_for(group_path)[step_idx].conditions[cond_idx]
+            apply = self._replacing_condition_applier(group_path, step_idx, cond_idx, old_condition)
             default_confidence = old_condition.confidence
         else:
             location = self._selected_owning_step_location()
             if location is None:
                 return
-            group_idx, step_idx = location
-            apply = lambda new_condition: self._add_condition(group_idx, step_idx, new_condition)  # noqa: E731
+            group_path, step_idx = location
+            apply = lambda new_condition: self._add_condition(group_path, step_idx, new_condition)  # noqa: E731
             default_confidence = 0.9
 
         if match_type == "pixel":
@@ -112,14 +112,14 @@ class ConditionsMixin:
         # entirely.
         selected = self._selected_condition_location()
         if selected is not None:
-            group_idx, step_idx, cond_idx = selected
-            old_condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
+            group_path, step_idx, cond_idx = selected
+            old_condition = self._steps_list_for(group_path)[step_idx].conditions[cond_idx]
             title, initial = "Edit Timer Condition", (old_condition.timer_seconds or 5.0)
         else:
             location = self._selected_owning_step_location()
             if location is None:
                 return
-            group_idx, step_idx = location
+            group_path, step_idx = location
             old_condition = None
             title, initial = "Add Timer Condition", 5.0
         seconds = messagebox.askfloat(
@@ -129,14 +129,14 @@ class ConditionsMixin:
             return
         new_condition = Condition(match_type="timer", timer_seconds=seconds)
         if old_condition is not None:
-            self._replacing_condition_applier(group_idx, step_idx, selected[2], old_condition)(new_condition)
+            self._replacing_condition_applier(group_path, step_idx, selected[2], old_condition)(new_condition)
         else:
-            self._add_condition(group_idx, step_idx, new_condition)
+            self._add_condition(group_path, step_idx, new_condition)
 
-    def _replacing_condition_applier(self, group_idx, step_idx: int, cond_idx: int, old_condition: Condition):
+    def _replacing_condition_applier(self, group_path, step_idx: int, cond_idx: int, old_condition: Condition):
         """Returns a function that carries old_condition's Name/Action/
         Negate/Timeout/Hold/Delay onto whichever new Condition it's called
-        with, then replaces (group_idx, step_idx, cond_idx) with it,
+        with, then replaces (group_path, step_idx, cond_idx) with it,
         reselects that same row (the tree's own full-rebuild refresh below
         would otherwise leave it looking deselected), and autosaves. Shared
         by _add_or_recalibrate_condition/_on_add_timer_condition_clicked
@@ -148,23 +148,23 @@ class ConditionsMixin:
             new_condition.timeout_ms = old_condition.timeout_ms
             new_condition.hold_ms = old_condition.hold_ms
             new_condition.delay_ms = old_condition.delay_ms
-            self._steps_list_for(group_idx)[step_idx].conditions[cond_idx] = new_condition
+            self._steps_list_for(group_path)[step_idx].conditions[cond_idx] = new_condition
             self._refresh_steps_tree()
-            self.tree.selection_set(self._location_iid(group_idx, step_idx, cond_idx))
+            self.tree.selection_set(self._location_iid(group_path, step_idx, cond_idx))
             self._populate_condition_form(new_condition)
             self._autosave()
         return apply
 
-    def _add_condition(self, group_idx, step_idx: int, condition: Condition):
+    def _add_condition(self, group_path, step_idx: int, condition: Condition):
         """Appends `condition` (default action="fire", exactly today's plain
         gating behavior) and selects its new row, so the Action/Timeout/
         Hold/Delay editor is immediately showing it -- picking Block or
         Change Key Hold Amount, or a wait timeout, is a follow-up step now
         that those are no longer separate calibration flows of their own."""
-        conditions = self._steps_list_for(group_idx)[step_idx].conditions
+        conditions = self._steps_list_for(group_path)[step_idx].conditions
         conditions.append(condition)
         self._refresh_steps_tree()
-        self.tree.selection_set(self._location_iid(group_idx, step_idx, len(conditions) - 1))
+        self.tree.selection_set(self._location_iid(group_path, step_idx, len(conditions) - 1))
         self._autosave()
 
     # ---- the per-condition editor (Name/Action/Negate/Timeout/Hold/Delay) ----
@@ -230,7 +230,7 @@ class ConditionsMixin:
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None or parsed[2] is None:
             return True
-        group_idx, step_idx, cond_idx = parsed
+        group_path, step_idx, cond_idx = parsed
         action = _CONDITION_ACTION_BY_LABEL.get(self.condition_action_var.get(), "fire")
         try:
             timeout_ms = int(self.condition_timeout_var.get() or 0)
@@ -250,14 +250,14 @@ class ConditionsMixin:
             return False
         self.condition_form_error_var.set("")
         self.condition_form_error_label.pack_forget()
-        condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
+        condition = self._steps_list_for(group_path)[step_idx].conditions[cond_idx]
         condition.name = self.condition_name_var.get().strip()
         condition.negate = self.condition_negate_var.get()
         condition.action = action
         condition.timeout_ms = timeout_ms
         condition.hold_ms = hold_ms
         condition.delay_ms = delay_ms
-        self._update_condition_row(group_idx, step_idx, cond_idx)
+        self._update_condition_row(group_path, step_idx, cond_idx)
         return True
 
     def _on_tree_double_click(self, _event):
@@ -278,14 +278,14 @@ class ConditionsMixin:
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return
-        group_idx, step_idx, cond_idx = parsed
+        group_path, step_idx, cond_idx = parsed
         if step_idx is None:
-            self._on_group_row_double_click(group_idx)
+            self._on_group_row_double_click(group_path)
             return
         if cond_idx is None:
             return
-        condition = self._steps_list_for(group_idx)[step_idx].conditions[cond_idx]
-        replace = self._replacing_condition_applier(group_idx, step_idx, cond_idx, condition)
+        condition = self._steps_list_for(group_path)[step_idx].conditions[cond_idx]
+        replace = self._replacing_condition_applier(group_path, step_idx, cond_idx, condition)
 
         if condition.match_type == "timer":
             seconds = messagebox.askfloat(
@@ -319,8 +319,8 @@ class ConditionsMixin:
         location = self._selected_owning_step_location()
         if location is None:
             return
-        group_idx, step_idx = location
-        conditions = self._steps_list_for(group_idx)[step_idx].conditions
+        group_path, step_idx = location
+        conditions = self._steps_list_for(group_path)[step_idx].conditions
         if not conditions:
             messagebox.showinfo("No conditions to copy", "This step has no conditions to copy.")
             return
@@ -342,8 +342,8 @@ class ConditionsMixin:
         if not step_locations:
             messagebox.showinfo("No step selected", "Select at least one step to paste conditions onto.")
             return
-        for group_idx, step_idx in step_locations:
-            self._steps_list_for(group_idx)[step_idx].conditions.extend(copy.deepcopy(self._condition_clipboard))
+        for group_path, step_idx in step_locations:
+            self._steps_list_for(group_path)[step_idx].conditions.extend(copy.deepcopy(self._condition_clipboard))
         self._refresh_steps_tree()
         self._autosave()
 
