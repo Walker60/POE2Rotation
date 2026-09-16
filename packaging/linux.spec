@@ -36,7 +36,13 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    # PIL._tkinter_finder: a small internal Pillow module PIL.ImageTk (used
+    # by poe2bot/gui/overlays.py to display the calibration overlay's
+    # captured-screen background) imports to locate the exact _tkinter
+    # binary matching the running Tcl/Tk -- PyInstaller's own Pillow hook
+    # doesn't pick this up on its own, a well-known gap for anything using
+    # ImageTk specifically (plain PIL.Image alone doesn't need it).
+    hiddenimports=["PIL._tkinter_finder"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
