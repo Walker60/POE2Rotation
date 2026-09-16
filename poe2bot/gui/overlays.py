@@ -1,6 +1,37 @@
+import sys
 import tkinter as tk
 
 from poe2bot.gui import geometry
+
+
+def _disable_compositor_bypass(window: tk.Toplevel):
+    """Linux only: explicitly tells the compositor (KWin, as used by
+    SteamOS Desktop Mode, included) NOT to skip compositing this window, via
+    the _NET_WM_BYPASS_COMPOSITOR EWMH property. Several compositors
+    automatically bypass compositing entirely -- direct scanout, no alpha
+    blending -- for any window whose geometry exactly matches a screen's
+    full resolution, as a performance optimization aimed at fullscreen
+    games; this overlay is deliberately that exact shape (see
+    _FullscreenPickerOverlay), which defeats its requested -alpha
+    transparency completely on those compositors -- it renders fully
+    opaque gray instead of see-through, even though the identical code
+    renders correctly translucent on Windows (whose equivalent, DWM, has
+    no such fullscreen-bypass heuristic).
+
+    Best-effort and silent: does nothing if python-xlib isn't installed, or
+    if anything else about this fails, since a fully-opaque overlay is a
+    visual regression, not a functional one -- capture/calibration still
+    works, it's just harder to see exactly what you're clicking on."""
+    if sys.platform == "win32":
+        return
+    try:
+        from Xlib import Xatom, display
+        d = display.Display()
+        xwindow = d.create_resource_object("window", window.winfo_id())
+        xwindow.change_property(d.intern_atom("_NET_WM_BYPASS_COMPOSITOR"), Xatom.CARDINAL, 32, [0])
+        d.flush()
+    except Exception:
+        pass
 
 
 class _FullscreenPickerOverlay(tk.Toplevel):
@@ -39,6 +70,7 @@ class _FullscreenPickerOverlay(tk.Toplevel):
         self.attributes("-alpha", 0.25)
         self.attributes("-topmost", True)
         self.configure(bg="gray")
+        _disable_compositor_bypass(self)
 
         self.canvas = tk.Canvas(self, cursor="cross", bg="gray", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
