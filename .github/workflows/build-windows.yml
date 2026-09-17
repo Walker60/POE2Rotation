@@ -42,26 +42,43 @@ jobs:
         with:
           python-version: "3.13"
 
+      # vgamepad has no prebuilt wheel on PyPI (only an sdist -- see
+      # requirements.txt's own vgamepad comment), so pip always runs its
+      # setup.py to prepare metadata. On Windows, THE PUBLISHED PyPI 0.1.0
+      # release's setup.py unconditionally calls `msiexec /i <path>.msi`
+      # (no /quiet or /qn flag) to install the ViGEmBus driver whenever it
+      # doesn't detect an existing install -- which pops a real GUI
+      # installer wizard and blocks forever waiting for someone to click
+      # through it. Nobody's there to on a CI runner (this is a real,
+      # confirmed hang, not a hypothetical -- it timed out this workflow's
+      # very first run), so instead a no-op msiexec stub placed ahead of
+      # the real one on PATH absorbs that call harmlessly -- this build
+      # only needs vgamepad's PYTHON PACKAGE and its bundled ViGEmClient.dll
+      # (collected into the bundle by packaging/windows.spec, see its own
+      # comment) present on disk; the driver itself is never loaded/needed
+      # at build time. (An unreleased, newer vgamepad on GitHub adds a
+      # VGAMEPAD_SKIP_VIGEMBUS_INSTALL env var for exactly this -- kept
+      # below for whenever that reaches PyPI -- but it doesn't exist in the
+      # 0.1.0 code that's actually installed today, so it alone doesn't
+      # help yet.)
+      - name: Stub out msiexec so vgamepad's install can't pop a blocking GUI installer
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/fake-bin"
+          printf '@echo off\r\nexit /b 0\r\n' > "$RUNNER_TEMP/fake-bin/msiexec.bat"
+          echo "$RUNNER_TEMP/fake-bin" >> "$GITHUB_PATH"
+
       - name: Install Python dependencies
-        # VGAMEPAD_SKIP_VIGEMBUS_INSTALL: vgamepad's own install step normally
-        # tries to install the ViGEmBus kernel driver, which needs an
-        # interactive elevation prompt that a CI runner can never satisfy --
-        # this build only needs vgamepad's Python package and its bundled
-        # ViGEmClient.dll (collected into the bundle by packaging/windows.spec,
-        # see its own comment) present on disk, never actually loaded/installed
-        # here. pyinstaller-hooks-contrib -- specifically its hook-certifi.py
+        # pyinstaller-hooks-contrib -- specifically its hook-certifi.py
         # (collect_data_files('certifi')) -- bundles certifi's own CA bundle
         # file correctly so poe2bot/updater.py's HTTPS calls can verify
         # certificates at runtime; PyInstaller has no built-in hook for
         # certifi on its own.
         #
-        # timeout-minutes: vgamepad has no prebuilt wheel on PyPI, so pip
-        # builds it from its sdist -- which runs its setup.py, including a
-        # registry probe for an existing ViGEmBus install. That's normally
-        # quick, but this step's own runtime is otherwise a poor signal if
-        # anything about that ever regresses (a hung subprocess would
-        # otherwise just silently eat the whole job's time budget rather
-        # than failing with a readable error).
+        # timeout-minutes: a safety net in case the msiexec stub above ever
+        # stops working (e.g. vgamepad changes how it invokes the
+        # installer) -- so a regression here fails with a readable error
+        # instead of silently eating the whole job's time budget again.
         timeout-minutes: 10
         shell: bash
         env:
