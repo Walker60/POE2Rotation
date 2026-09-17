@@ -28,11 +28,18 @@ _enable_dpi_awareness()
 
 from tkinter import messagebox
 
+from poe2bot import updater
 from poe2bot.gui import App
 from poe2bot.log_setup import get_logger
 
 
 def main():
+    # Best-effort backstop for a poe2bot.old directory a previous update's
+    # own cleanup didn't finish removing -- see updater.cleanup_stale_update()'s
+    # docstring. A no-op on every ordinary startup (not running frozen at
+    # all, or nothing left over), so it's safe to call unconditionally
+    # before the app itself starts.
+    updater.cleanup_stale_update()
     try:
         log = get_logger()
     except OSError as e:

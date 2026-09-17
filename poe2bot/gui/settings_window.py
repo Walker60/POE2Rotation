@@ -83,9 +83,10 @@ class SettingsWindow(tk.Toplevel):
         geometry.size_window_to_contents(self)
 
     def _build_updates_section(self, container):
-        """Linux/Steam Deck only (see updater.IS_SUPPORTED) -- Windows has
-        no update mechanism yet, so this section doesn't exist there at
-        all, rather than showing a button that can't do anything."""
+        """Frozen/PyInstaller builds only (see updater.IS_SUPPORTED) -- a
+        plain `python main.py` run has no build artifact to replace itself
+        with, so this section doesn't exist there at all, rather than
+        showing a button that can't do anything."""
         updates_frame = ttk.LabelFrame(container, text="Updates", padding=8)
         updates_frame.pack(fill="x", pady=(8, 0))
         ttk.Label(updates_frame, text=f"Current version: {updater.current_version()}",

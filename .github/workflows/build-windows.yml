@@ -1,0 +1,139 @@
+name: Build Windows bundle
+
+# Builds a self-contained Windows (x86_64) bundle via PyInstaller -- a full
+# Python + Tcl/Tk + every dependency in one folder, needing nothing else
+# pre-installed on the machine that runs it. This is what
+# poe2bot/updater.py's self-update mechanism downloads and installs, and
+# what makes IS_SUPPORTED true on Windows at all -- see
+# packaging/windows.spec's header comment and .github/workflows/build-steamdeck.yml
+# for the equivalent Linux/Steam Deck pipeline this mirrors.
+
+on:
+  push:
+    branches: [main, steam-deck-linux-support]
+    paths:
+      - "poe2bot/**"
+      - "main.py"
+      - "requirements.txt"
+      - "packaging/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch: {}
+
+# contents: write is for softprops/action-gh-release (below), so it can create/
+# update the rolling release using the default GITHUB_TOKEN, with no extra secret
+# to manage. actions: write is for the "Trim old workflow runs" step at the end,
+# which needs it to delete this workflow's own past runs via the GitHub API.
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the version (short commit SHA) being built
+        id: version
+        shell: bash
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python dependencies
+        # VGAMEPAD_SKIP_VIGEMBUS_INSTALL: vgamepad's own install step normally
+        # tries to install the ViGEmBus kernel driver, which needs an
+        # interactive elevation prompt that a CI runner can never satisfy --
+        # this build only needs vgamepad's Python package and its bundled
+        # ViGEmClient.dll (collected into the bundle by packaging/windows.spec,
+        # see its own comment) present on disk, never actually loaded/installed
+        # here. pyinstaller-hooks-contrib -- specifically its hook-certifi.py
+        # (collect_data_files('certifi')) -- bundles certifi's own CA bundle
+        # file correctly so poe2bot/updater.py's HTTPS calls can verify
+        # certificates at runtime; PyInstaller has no built-in hook for
+        # certifi on its own.
+        #
+        # timeout-minutes: vgamepad has no prebuilt wheel on PyPI, so pip
+        # builds it from its sdist -- which runs its setup.py, including a
+        # registry probe for an existing ViGEmBus install. That's normally
+        # quick, but this step's own runtime is otherwise a poor signal if
+        # anything about that ever regresses (a hung subprocess would
+        # otherwise just silently eat the whole job's time budget rather
+        # than failing with a readable error).
+        timeout-minutes: 10
+        shell: bash
+        env:
+          VGAMEPAD_SKIP_VIGEMBUS_INSTALL: "true"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Verify tkinter actually works in this environment
+        shell: bash
+        run: python -c "import tkinter; print('tkinter OK, Tk version', tkinter.TkVersion)"
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: pyinstaller packaging/windows.spec --distpath dist --workpath build --noconfirm
+
+      # Read by poe2bot/updater.py's current_version() at runtime -- this is
+      # the ONLY versioning scheme this project has (a git short SHA, not a
+      # semantic version), matched against the rolling release's own body
+      # below by the in-app "Check for Updates" button.
+      - name: Write the VERSION file
+        shell: bash
+        run: echo "${{ steps.version.outputs.sha }}" > dist/poe2bot/VERSION
+
+      - name: Archive the bundle
+        shell: pwsh
+        run: Compress-Archive -Path dist/poe2bot -DestinationPath dist/poe2bot-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: poe2bot-windows-x86_64
+          path: dist/poe2bot-windows-x86_64.zip
+          retention-days: 30
+
+      # A single ROLLING release (same tag every time -- this action updates
+      # an existing release in place, replacing its assets, rather than
+      # creating a new one per push) is what poe2bot/updater.py's in-app
+      # "Check for Updates" button reads: unlike a plain Actions artifact
+      # (only downloadable by someone logged into GitHub, no public URL,
+      # 30-day retention), a Release's assets have permanent, unauthenticated
+      # download URLs, which is what makes an automated in-app updater
+      # possible at all. Deliberately a "-prerelease" (this is a rolling dev
+      # build for fast iteration, not a vetted stable release) so it never
+      # shows up as this repo's "Latest release" on GitHub's own UI. A
+      # separate tag from build-steamdeck.yml's own "steamdeck-latest" --
+      # see poe2bot/updater.py's _RELEASE_TAG -- since the two platforms'
+      # bundles are never interchangeable.
+      - name: Publish/update the rolling windows-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-latest
+          name: "Windows build ${{ steps.version.outputs.sha }}"
+          body: "${{ steps.version.outputs.sha }}"
+          prerelease: true
+          files: dist/poe2bot-windows-x86_64.zip
+
+      # This workflow runs on every push to main/steam-deck-linux-support (see
+      # `on:` above), and the release it publishes is a single ROLLING one, not
+      # per-run -- so past runs have no lasting value once a newer one exists,
+      # only clutter on the Actions tab. `if: always()` so a run that fails
+      # earlier still gets trimmed instead of piling up too. gh CLI is
+      # preinstalled on GitHub-hosted runners; GH_TOKEN needs this workflow's
+      # own `actions: write` permission (see top of file) to delete runs.
+      - name: Trim old workflow runs (keep the latest 2)
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --repo "${{ github.repository }}" --workflow build-windows.yml \
+            --json databaseId --limit 100 --jq '.[2:][].databaseId' |
+          while read -r run_id; do
+            gh run delete "$run_id" --repo "${{ github.repository }}" || true
+          done

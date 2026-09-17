@@ -45,6 +45,33 @@ properly signed and works fine with Secure Boot and driver-signature enforcement
 enabled — no settings need to be changed for it. (If you go looking for "ViGEmBus"
 online, note the upstream project renamed in 2023; functionally unaffected either way.)
 
+## Pre-built Windows executable and auto-update
+
+Besides running from source (`python main.py` above), every push to this repo's
+`main`/`steam-deck-linux-support` branches also runs
+[`.github/workflows/build-windows.yml`](.github/workflows/build-windows.yml), which
+builds a self-contained Windows bundle (a full Python + Tcl/Tk + every dependency, via
+PyInstaller — see `packaging/windows.spec`) needing nothing else installed on the
+target machine. Grab it once from the workflow's Actions artifact
+(`poe2bot-windows-x86_64`) or the `windows-latest` GitHub Release, extract it anywhere,
+and run the `poe2bot.exe` inside it directly.
+
+After that, use **Settings → Check for Updates** inside the app instead of downloading
+by hand again: it checks the same rolling release, and if the git commit SHA it was
+built from differs from the one currently running, downloads and installs the new
+build in place, then offers to restart into it. This mirrors the Steam Deck build's own
+self-update mechanism below, with one Windows-specific wrinkle: a running .exe's own
+folder can't reliably be renamed/replaced out from under itself the way it can on
+Linux, so clicking "restart now" hands the actual swap off to a short-lived helper
+script that waits for the app to fully close first, rather than swapping immediately
+the way the Linux build does — functionally the same end result, just deferred a few
+seconds until after the app exits.
+
+This is a first build pipeline (and this Windows self-update mechanism specifically is
+newer than the Linux one it's modeled on), not a polished release channel — see the
+Steam Deck section right below for the fuller story on what "rolling release" and
+"version" mean here, both of which apply identically to the Windows build.
+
 ## Steam Deck / Linux (experimental)
 
 The app also has a Linux backend (window detection via X11/EWMH, real-controller
