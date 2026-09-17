@@ -29,6 +29,14 @@ GAME_PROCESS_NAME = os.environ.get("POE2BOT_TARGET_PROCESS", "PathOfExileSteam.e
 # to a rotation.
 PANIC_KEY = os.environ.get("POE2BOT_PANIC_KEY", "f12")
 
+# Whether a rotation must wait for the game window to have OS focus before firing
+# (see poe2bot/executor.py's RotationRunner._wait_for_focus_or_stop) -- the default,
+# safe behavior, so casts never fire into whatever window happens to be focused
+# instead of the game. Turning this off is for testing against a target that never
+# takes OS focus itself (e.g. driving another always-on-top tool), or a setup where
+# the focus check itself is unreliable -- see focus.py's Windows/X11 backends.
+REQUIRE_GAME_FOCUS = os.environ.get("POE2BOT_REQUIRE_GAME_FOCUS", "1") != "0"
+
 # A virtual controller's button report has no OS-level input queue the way a real
 # keyboard tap's discrete KEYDOWN/KEYUP messages do -- a true zero-duration press+
 # release risks the game's next input poll never observing the transition at all.

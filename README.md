@@ -151,14 +151,23 @@ Either way, a real USB/Bluetooth controller plugged into the Deck doesn't
 have this problem at all — it shows up as a normal gamepad to `evdev`
 regardless of Steam.
 
-Choosing which button a *step* should press is a separate, unaffected path:
-the step editor's **Map Controller Button** lets you click a button's name
-from a list instead of physically pressing it, so it works immediately no
-matter what `evdev` can currently see. Pick **Settings... > Controller >
-Controller type: Steam Deck** first so that list shows Deck-style labels
-(View/Menu, L1/R1/L2/R2) instead of Xbox ones (Back/Start, LB/RB/LT/RT) —
-purely cosmetic, since every button still presses the same spot on the
-emulated Xbox 360 controller either way.
+Both **choosing which button a step should press** (the step editor's **Map
+Controller Button**) and **entering which button should trigger/cancel/
+reset/pause a rotation** (each hotkey row's own **Map...**, next to its
+"Bind...") work no matter what `evdev` can currently see — click a button's
+name from a list instead of physically pressing it. Pick **Settings...
+> Controller > Controller type: Steam Deck** first so that list shows
+Deck-style labels (View/Menu, L1/R1/L2/R2) instead of Xbox ones (Back/Start,
+LB/RB/LT/RT) — purely cosmetic, since every button still presses (or is
+compared against) the same spot either way.
+
+For a step's Key field, that's the whole story — nothing else needs to see
+the Deck's own controls at all, since it's the bot's own *virtual* controller
+being pressed. For a hotkey/cancel/reset/pause bind, Map... only fills in
+the field's *value*; the Deck's own buttons still can't *trigger* it while
+you're actually playing until `evdev` can see them for real, i.e. until one
+of the two fixes above is in place — Map... just means you no longer need a
+working physical capture merely to set the binding up ahead of time.
 
 ## Configuration
 
@@ -180,6 +189,13 @@ new value is remembered in `app_state.json` and takes effect immediately.
 - `POE2BOT_CONTROLLER_INDEX` — which XInput slot (0-3) is your real, physically-held
   controller (default `0`). Change this if a real controller plugged in alongside the
   bot's own virtual one ends up enumerated on a different slot.
+- `POE2BOT_REQUIRE_GAME_FOCUS` — whether a rotation must wait for the game window to
+  have OS focus before it'll fire at all (default `1`/on). Set to `0` to fire
+  regardless of what's focused — only for testing against a target that never takes
+  OS focus itself, or if the focus check itself is unreliable on your setup; leaving
+  this on is what stops a cast from firing into whatever window you're actually
+  looking at instead of the game. Unlike the four settings above, this one lives at
+  **Settings... > Safety** (a plain checkbox, applied immediately), not **Advanced**.
 
 **Settings... > Windows** also has **Show Hotkey Map...** (a snapshot table of every
 rotation's Hotkey/Cancel/Reset/Pause keys across every folder, flagging any key used

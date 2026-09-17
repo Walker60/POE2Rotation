@@ -22,12 +22,21 @@ class ControllerMapWindow(tk.Toplevel):
     with the encoded value the moment any button is clicked, and the window
     closes itself immediately after -- there's nothing else to configure
     here, unlike a capture flow there's no "waiting for input" state to
-    show.
+    show. Used both by the step editor's own Map Controller Button (a
+    step's Key field) and by each rotation-level hotkey/cancel/reset/pause
+    row's "Map..." button (poe2bot/gui/hotkeys_ui.py) -- callers who
+    disabled other UI before opening this (the hotkeys rows do, to keep a
+    physical Bind... and this mutually exclusive-looking; the step editor
+    doesn't need to) pass `on_close`, called when the window goes away for
+    ANY reason -- a pick (after `on_select`) or Cancel/the window's own
+    close button alike -- so that re-enabling isn't skipped just because
+    the user backed out instead of picking something.
     """
 
-    def __init__(self, master, controller_type: str, on_select):
+    def __init__(self, master, controller_type: str, on_select, on_close=None):
         super().__init__(master)
         self._on_select = on_select
+        self._on_close = on_close
         self.title(f"Map Controller Button — {CONTROLLER_TYPE_LABELS[controller_type]}")
         self.resizable(False, False)
         bg = ttk.Style().lookup("TFrame", "background")
@@ -36,7 +45,7 @@ class ControllerMapWindow(tk.Toplevel):
 
         container = ttk.Frame(self, padding=12)
         container.pack(fill="both", expand=True)
-        ttk.Label(container, text="Click the button this step should press.",
+        ttk.Label(container, text="Click the button to use.",
                   foreground="gray").pack(anchor="w", pady=(0, 8))
 
         groups_row = ttk.Frame(container)
@@ -49,15 +58,23 @@ class ControllerMapWindow(tk.Toplevel):
                            command=lambda n=name: self._choose(n)).grid(
                     row=row, column=col, padx=2, pady=2)
 
-        ttk.Button(container, text="Cancel", command=self.destroy).pack(pady=(10, 0))
+        ttk.Button(container, text="Cancel", command=self._cancel).pack(pady=(10, 0))
         geometry.size_window_to_contents(self)
         # Modal -- this is a one-shot picker, not a window meant to sit open
         # alongside the rest of the editor the way Settings/Activity/Hotkey
         # Map do.
         self.transient(master)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.grab_set()
         self.focus_force()
 
     def _choose(self, name: str):
         self._on_select(encode_controller_key(name))
         self.destroy()
+        if self._on_close:
+            self._on_close()
+
+    def _cancel(self):
+        self.destroy()
+        if self._on_close:
+            self._on_close()

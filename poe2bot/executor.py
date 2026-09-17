@@ -902,6 +902,8 @@ class RotationRunner:
         return True
 
     def _wait_for_focus_or_stop(self) -> bool:
+        if not config.REQUIRE_GAME_FOCUS:
+            return True
         notified_waiting = False
         while not is_game_focused():
             if not notified_waiting:

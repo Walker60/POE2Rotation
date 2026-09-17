@@ -1,6 +1,7 @@
 import threading
 
 from poe2bot.gui import dialogs as messagebox
+from poe2bot.gui.controller_map_window import ControllerMapWindow
 from poe2bot.hotkeys import display_name
 
 
@@ -18,6 +19,14 @@ class HotkeysMixin:
     "__pause_capture__") and dispatches to the corresponding
     _on_*_captured method below. That dispatch table lives in app.py, not
     here, so a change to these sentinel names must be kept in sync there.
+
+    Each row's "Map..." button is the same click-to-choose controller
+    button picker the step editor's Map Controller Button uses (see
+    poe2bot/gui/controller_map_window.py and _on_map_key_clicked below) --
+    an alternative to the "Bind..." physical-press capture above, for
+    exactly the same reason the step editor needed one: a Steam Deck's own
+    built-in controls can't be physically captured unless poe2bot is
+    launched through Steam (see README's Steam Deck section).
     """
 
     # ---- hotkey binding ----------------------------------------------------
@@ -25,18 +34,23 @@ class HotkeysMixin:
     def _set_bind_buttons_enabled(self, enabled: bool):
         """capture_next_key()/capture_next_mouse_button() are blocking calls
         sharing one lock (HotkeyManager._capture_lock) and only one can
-        meaningfully be in flight at a time -- disabling all five buttons,
+        meaningfully be in flight at a time -- disabling all nine buttons,
         not just the one clicked, makes that exclusivity visible rather than
         letting a second click silently queue up behind the first with no
-        feedback. The four _KEY_BIND_SPECS buttons are looped rather than
-        named individually so adding a new bindable key only means adding a
-        spec entry, not also remembering to list its button here. (The step
-        editor's Map Controller Button isn't included -- it opens its own
-        modal window instead of contending for this same lock; see
-        StepEditorMixin._on_map_step_key_clicked.)"""
+        feedback. The four _KEY_BIND_SPECS buttons (bind AND map) are looped
+        rather than named individually so adding a new bindable key only
+        means adding a spec entry, not also remembering to list its buttons
+        here. (The step editor's Map Controller Button isn't included -- it
+        opens its own modal window instead of contending for this same
+        lock; see StepEditorMixin._on_map_step_key_clicked. Each row's own
+        "Map..." button here is included even though it's the same kind of
+        modal picker, purely so the row reads as a single, consistently
+        disabled unit while any capture is in flight -- see
+        _on_map_key_clicked.)"""
         state = "normal" if enabled else "disabled"
         for spec in self._KEY_BIND_SPECS.values():
             getattr(self, spec["button_attr"]).config(state=state)
+            getattr(self, spec["map_button_attr"]).config(state=state)
         self.capture_step_mouse_btn.config(state=state)
 
     def _on_bind_hotkey_clicked(self):
@@ -100,18 +114,31 @@ class HotkeysMixin:
     # sharing-confirmation dialog above.
 
     _KEY_BIND_SPECS = {
-        "hotkey": dict(button_attr="bind_hotkey_btn", label_var_attr="hotkey_label_var",
-                       pending_attr="pending_hotkey", sentinel="__capture__",
-                       bound_label="Bind Hotkey..."),
-        "cancel": dict(button_attr="bind_cancel_btn", label_var_attr="cancel_key_label_var",
-                       pending_attr="pending_cancel_key", sentinel="__cancel_capture__",
-                       bound_label="Bind Cancel Key..."),
-        "reset": dict(button_attr="bind_reset_btn", label_var_attr="reset_key_label_var",
-                      pending_attr="pending_reset_key", sentinel="__reset_capture__",
-                      bound_label="Bind Reset Key..."),
-        "pause": dict(button_attr="bind_pause_btn", label_var_attr="pause_key_label_var",
-                      pending_attr="pending_pause_key", sentinel="__pause_capture__",
-                      bound_label="Bind Pause Key..."),
+        "hotkey": dict(button_attr="bind_hotkey_btn", map_button_attr="map_hotkey_btn",
+                       label_var_attr="hotkey_label_var", pending_attr="pending_hotkey",
+                       sentinel="__capture__", bound_label="Bind Hotkey..."),
+        "cancel": dict(button_attr="bind_cancel_btn", map_button_attr="map_cancel_btn",
+                       label_var_attr="cancel_key_label_var", pending_attr="pending_cancel_key",
+                       sentinel="__cancel_capture__", bound_label="Bind Cancel Key..."),
+        "reset": dict(button_attr="bind_reset_btn", map_button_attr="map_reset_btn",
+                      label_var_attr="reset_key_label_var", pending_attr="pending_reset_key",
+                      sentinel="__reset_capture__", bound_label="Bind Reset Key..."),
+        "pause": dict(button_attr="bind_pause_btn", map_button_attr="map_pause_btn",
+                      label_var_attr="pause_key_label_var", pending_attr="pending_pause_key",
+                      sentinel="__pause_capture__", bound_label="Bind Pause Key..."),
+    }
+
+    # kind -> name of the method that applies a chosen value to that kind's own
+    # pending_attr/label/autosave -- reused as-is by _on_map_key_clicked below, so
+    # a controller button picked via the map window goes through exactly the same
+    # path a physical capture's sentinel dispatches to in app.py (including
+    # "hotkey"'s own sharing-conflict confirmation, which the other three don't
+    # need -- see _on_hotkey_captured).
+    _MAP_CAPTURE_HANDLERS = {
+        "hotkey": "_on_hotkey_captured",
+        "cancel": "_on_cancel_key_captured",
+        "reset": "_on_reset_key_captured",
+        "pause": "_on_pause_key_captured",
     }
 
     def _on_bind_key_clicked(self, kind: str):
@@ -122,6 +149,26 @@ class HotkeysMixin:
     def _capture_key_worker(self, kind: str):
         key = self.hotkey_manager.capture_next_key()
         self.status_queue.put((self._KEY_BIND_SPECS[kind]["sentinel"], key))
+
+    def _on_map_key_clicked(self, kind: str):
+        """The "Map..." button next to each row's "Bind...": opens the same
+        click-to-choose controller button picker the step editor's Map
+        Controller Button uses, applying whatever's picked through this
+        kind's own *_captured handler (see _MAP_CAPTURE_HANDLERS) exactly as
+        if it had been physically captured. Unlike _on_bind_key_clicked,
+        this doesn't touch HotkeyManager._capture_lock at all -- the map
+        window is its own modal (grab_set), needing no worker thread or
+        status_queue hop -- but the row is still disabled first for the
+        same one-capture-at-a-time clarity as a physical Bind (see
+        _set_bind_buttons_enabled), in case one is already in flight, and
+        re-enabled via on_close whether the user picked a button or backed
+        out -- the picked-a-button path also gets re-enabled by its own
+        *_captured handler, so on_close's call is redundant (not harmful)
+        in that case, but it's the only one that fires at all on Cancel."""
+        self._set_bind_buttons_enabled(False)
+        handler = getattr(self, self._MAP_CAPTURE_HANDLERS[kind])
+        ControllerMapWindow(self, self.controller_type, handler,
+                             on_close=lambda: self._set_bind_buttons_enabled(True))
 
     def _on_key_captured(self, kind: str, key: str):
         spec = self._KEY_BIND_SPECS[kind]

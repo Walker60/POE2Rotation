@@ -10,12 +10,13 @@ from poe2bot.gui.controller_layouts import CONTROLLER_TYPE_LABELS
 
 class SettingsWindow(tk.Toplevel):
     """App-wide settings that don't belong to any one rotation: which input
-    device is active, the light/dark theme, the four env-var-backed values
-    poe2bot/config.py otherwise only reads at startup, and shortcuts to the
-    Activity/Hotkey Map windows and the logs folder. `master` is the App
-    instance -- every control here just drives an existing App method/
-    variable rather than owning any state of its own, so closing and
-    reopening this window loses nothing."""
+    device is active, whether the game needs OS focus to fire at all, the
+    controller-type label preference, the light/dark theme, the four
+    env-var-backed values poe2bot/config.py otherwise only reads at
+    startup, and shortcuts to the Activity/Hotkey Map windows and the logs
+    folder. `master` is the App instance -- every control here just drives
+    an existing App method/variable rather than owning any state of its
+    own, so closing and reopening this window loses nothing."""
 
     def __init__(self, master):
         super().__init__(master)
@@ -36,6 +37,16 @@ class SettingsWindow(tk.Toplevel):
         ttk.Radiobutton(device_frame, text="Controller", variable=master.active_device_var,
                         value="controller", command=master._on_active_device_changed).pack(anchor="w")
 
+        safety_frame = ttk.LabelFrame(container, text="Safety", padding=8)
+        safety_frame.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(safety_frame, text="Require game window focus to fire",
+                         variable=master.require_game_focus_var,
+                         command=master._on_require_game_focus_changed).pack(anchor="w")
+        ttk.Label(safety_frame, foreground="gray", wraplength=320, justify="left",
+                  text="Off lets every rotation fire no matter what window is focused -- only turn "
+                       "this off for testing against a target that never takes OS focus itself, or "
+                       "if the focus check is unreliable on your setup.").pack(anchor="w", pady=(4, 0))
+
         controller_frame = ttk.LabelFrame(container, text="Controller", padding=8)
         controller_frame.pack(fill="x", pady=(8, 0))
         ttk.Label(controller_frame, text="Controller type:").pack(anchor="w")
@@ -45,8 +56,9 @@ class SettingsWindow(tk.Toplevel):
         controller_type_combo.pack(fill="x", pady=(2, 0))
         controller_type_combo.bind("<<ComboboxSelected>>", master._on_controller_type_changed)
         ttk.Label(controller_frame, foreground="gray", wraplength=320, justify="left",
-                  text="Which labels/layout \"Map Controller Button\" (in the step editor) shows -- "
-                       "doesn't change which controller is actually read.").pack(anchor="w", pady=(4, 0))
+                  text="Which labels/layout every controller button map (the step editor's \"Map "
+                       "Controller Button\" and each hotkey row's \"Map...\") shows -- doesn't change "
+                       "which controller is actually read.").pack(anchor="w", pady=(4, 0))
 
         appearance_frame = ttk.LabelFrame(container, text="Appearance", padding=8)
         appearance_frame.pack(fill="x", pady=(8, 0))

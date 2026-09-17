@@ -26,10 +26,13 @@ on:
       - ".github/workflows/build-steamdeck.yml"
   workflow_dispatch: {}
 
-# Needed so softprops/action-gh-release (below) can create/update the rolling
-# release using the default GITHUB_TOKEN, with no extra secret to manage.
+# contents: write is for softprops/action-gh-release (below), so it can create/
+# update the rolling release using the default GITHUB_TOKEN, with no extra secret
+# to manage. actions: write is for the "Trim old workflow runs" step at the end,
+# which needs it to delete this workflow's own past runs via the GitHub API.
 permissions:
   contents: write
+  actions: write
 
 jobs:
   build-linux:
@@ -112,3 +115,21 @@ jobs:
           body: "${{ steps.version.outputs.sha }}"
           prerelease: true
           files: dist/poe2bot-steamdeck-linux-x86_64.tar.gz
+
+      # This workflow runs on every push to main/steam-deck-linux-support (see
+      # `on:` above), and the release it publishes is a single ROLLING one, not
+      # per-run -- so past runs have no lasting value once a newer one exists,
+      # only clutter on the Actions tab. `if: always()` so a run that fails
+      # earlier still gets trimmed instead of piling up too. gh CLI is
+      # preinstalled on GitHub-hosted runners; GH_TOKEN needs this workflow's
+      # own `actions: write` permission (see top of file) to delete runs.
+      - name: Trim old workflow runs (keep the latest 2)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --repo "${{ github.repository }}" --workflow build-steamdeck.yml \
+            --json databaseId --limit 100 --jq '.[2:][].databaseId' |
+          while read -r run_id; do
+            gh run delete "$run_id" --repo "${{ github.repository }}" || true
+          done

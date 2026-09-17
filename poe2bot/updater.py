@@ -50,6 +50,18 @@ _DOWNLOAD_TIMEOUT_S = 120
 # against a compromised repo (which could just as easily change _REPO above).
 _ALLOWED_DOWNLOAD_HOSTS = ("github.com", "objects.githubusercontent.com")
 
+# Everything that lives alongside the executable (see poe2bot/config.py's
+# BASE_DIR comment for why) that's the USER's own data -- rotations,
+# settings, calibration templates, the undo-slot trash, logs -- as opposed
+# to the executable and its bundled libraries, which always come from the
+# freshly downloaded build and must never be carried over. packaging/
+# linux.spec's `datas=[]` means none of these ever ship inside the build
+# itself, so a fresh extract never collides with what's copied in below.
+# Named directly (not imported from config.py) since this always operates
+# on the OLD install's own directory, whatever that happens to be, rather
+# than on config.BASE_DIR specifically.
+_USER_DATA_ENTRIES = ("rotations", "templates", "trash", "logs", "app_state.json")
+
 
 class UpdateCheckFailed(Exception):
     """Raised by check_for_update()/download_and_install() for any network,
@@ -120,6 +132,24 @@ def check_for_update() -> "UpdateInfo | None":
     return UpdateInfo(version=remote_version, download_url=download_url, published_at=data.get("published_at", ""))
 
 
+def _copy_user_data(old_dir: str, new_dir: str) -> None:
+    """Copies (never moves) every _USER_DATA_ENTRIES path that exists in
+    old_dir into new_dir, so the freshly extracted build -- which never
+    ships any of them, see _USER_DATA_ENTRIES's comment -- ends up with the
+    user's actual rotations/settings/templates instead of starting empty.
+    Deliberately a COPY, not a move: old_dir (still the live installation
+    at the point this runs, before the rename swap below) is left fully
+    intact, so a crash between this and the final cleanup can never lose
+    the only copy of the user's data -- it's only ever removed once
+    everything else has already succeeded."""
+    for name in _USER_DATA_ENTRIES:
+        src = os.path.join(old_dir, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, os.path.join(new_dir, name), dirs_exist_ok=True)
+        elif os.path.isfile(src):
+            shutil.copy2(src, os.path.join(new_dir, name))
+
+
 def download_and_install(update_info: "UpdateInfo", progress_callback=None) -> None:
     """Downloads update_info's bundle and swaps it in for the currently
     running installation, by directory RENAME rather than overwriting files
@@ -134,7 +164,20 @@ def download_and_install(update_info: "UpdateInfo", progress_callback=None) -> N
     the installation is left as either fully the old version or fully the
     new one, never a half-swapped mix, since the only cross-directory
     operation (the sibling-directory rename pair below) is two single
-    os.rename calls, each atomic on its own."""
+    os.rename calls, each atomic on its own.
+
+    The old install directory is deleted outright once the swap succeeds,
+    rather than left sitting there renamed (poe2bot.old) until the NEXT
+    update happens to clean it up -- it used to be, and that meant every
+    update left a full extra copy of the previous build's bundle (Python +
+    Tcl/Tk + every dependency) permanently occupying disk space between
+    updates. The user's own data (rotations/settings/templates/etc. -- see
+    _USER_DATA_ENTRIES) is copied into the new build FIRST (via
+    _copy_user_data, while the old install is still fully intact) so that
+    deleting it afterward can never lose anything -- a bare "swap then
+    delete" without that copy step would otherwise wipe out every saved
+    rotation on the very first update, since a freshly extracted build
+    never contains any of it."""
     install_dir = os.path.dirname(os.path.abspath(sys.executable))  # .../poe2bot/ (the running bundle's own folder)
     parent_dir = os.path.dirname(install_dir)
     new_dir = os.path.join(parent_dir, "poe2bot.new")
@@ -170,9 +213,16 @@ def download_and_install(update_info: "UpdateInfo", progress_callback=None) -> N
         # different filesystems, which a bare os.rename can't cross --
         # shutil.move falls back to copy+delete in that case.
         shutil.move(extracted_app_dir, new_dir)
+        _copy_user_data(install_dir, new_dir)
 
     os.rename(install_dir, old_dir)
     os.rename(new_dir, install_dir)
+    # Safe only now: new_dir (now living at install_dir) already has its own
+    # copy of everything _USER_DATA_ENTRIES names, so old_dir holds nothing
+    # that isn't also preserved above -- ignore_errors=True matches the
+    # stale-leftover cleanup above, since a failed delete here means only
+    # "still there next launch," not a failed update.
+    shutil.rmtree(old_dir, ignore_errors=True)
 
 
 def _safe_extract(tar: "tarfile.TarFile", dest_dir: str) -> None:

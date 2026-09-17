@@ -46,7 +46,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         theme.apply_theme(self._theme, root=self)
         self._sync_root_background()
 
-        # Any of these four saved (non-None) overrides config.py's own env-var-or-
+        # Any of these five saved (non-None) overrides config.py's own env-var-or-
         # builtin default -- applied to the shared config module itself (not just
         # kept as an App attribute) so every other module that reads config.XXX
         # fresh (focus.py, executor.py, controller_input.py) picks it up too,
@@ -58,10 +58,15 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             else state["controller_min_tap_ms"])
         self.controller_index = (
             config.CONTROLLER_INDEX if state["controller_index"] is None else state["controller_index"])
+        # `is None`, not `or` -- False is a real, meaningful saved value here (unlike
+        # game_process_name/panic_key above, where only a truthy string is ever valid).
+        self.require_game_focus = (
+            config.REQUIRE_GAME_FOCUS if state["require_game_focus"] is None else state["require_game_focus"])
         config.GAME_PROCESS_NAME = self.game_process_name
         config.PANIC_KEY = self.panic_key
         config.CONTROLLER_MIN_TAP_MS = self.controller_min_tap_ms
         config.CONTROLLER_INDEX = self.controller_index
+        config.REQUIRE_GAME_FOCUS = self.require_game_focus
 
         self.status_queue = queue.Queue()
         self.activity_queue = queue.Queue()
@@ -145,7 +150,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         app_state.save_state(
             self.active_folder, self.active_device, self.controller_type, self._theme,
             self.game_process_name, self.panic_key,
-            self.controller_min_tap_ms, self.controller_index)
+            self.controller_min_tap_ms, self.controller_index, self.require_game_focus)
 
     def _load_rotations_from_disk(self):
         for name, rotation in storage.load_all_rotations().items():
@@ -281,6 +286,18 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self._persist_app_state()
         self._refresh_rotation_tree()
 
+    def _on_require_game_focus_changed(self):
+        """Live -- config.REQUIRE_GAME_FOCUS is read fresh by
+        RotationRunner._wait_for_focus_or_stop() on every step/group, so a
+        rotation already running picks this up on its very next check, no
+        restart/re-bind needed."""
+        new_value = self.require_game_focus_var.get()
+        if new_value == self.require_game_focus:
+            return
+        self.require_game_focus = new_value
+        config.REQUIRE_GAME_FOCUS = new_value
+        self._persist_app_state()
+
     def _on_controller_type_changed(self, _event=None):
         """Purely cosmetic -- picks which labels/layout the step editor's
         Map Controller Button window shows (see controller_layouts.py), not
@@ -372,6 +389,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # "Controller type" Combobox, but owned here so it (and therefore
         # self.controller_type) survives Settings being closed and reopened.
         self.controller_type_var = tk.StringVar(value=CONTROLLER_TYPE_LABELS[self.controller_type])
+        # Same reasoning again -- bound to SettingsWindow's "Require game focus"
+        # Checkbutton.
+        self.require_game_focus_var = tk.BooleanVar(value=self.require_game_focus)
         ttk.Button(bottom, text="Settings...", command=self._on_show_settings_clicked).pack(side="right")
 
     def _build_rotation_list_panel(self):
@@ -533,28 +553,36 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         keys_frame = ttk.Frame(self.hotkeys_section.body)
         keys_frame.pack(fill="x")
         key_bind_rows = (
-            ("Hotkey:", self.hotkey_label_var, "bind_hotkey_btn",
+            ("Hotkey:", self.hotkey_label_var, "hotkey",
              self._on_bind_hotkey_clicked, self._on_unbind_clicked),
-            ("Cancel Key:", self.cancel_key_label_var, "bind_cancel_btn",
+            ("Cancel Key:", self.cancel_key_label_var, "cancel",
              self._on_bind_cancel_clicked, self._on_clear_cancel_key),
-            ("Reset Key:", self.reset_key_label_var, "bind_reset_btn",
+            ("Reset Key:", self.reset_key_label_var, "reset",
              self._on_bind_reset_clicked, self._on_clear_reset_key),
-            ("Pause Key:", self.pause_key_label_var, "bind_pause_btn",
+            ("Pause Key:", self.pause_key_label_var, "pause",
              self._on_bind_pause_clicked, self._on_clear_pause_key),
         )
-        for row_i, (label, var, btn_attr, bind_cmd, unbind_cmd) in enumerate(key_bind_rows):
+        for row_i, (label, var, kind, bind_cmd, unbind_cmd) in enumerate(key_bind_rows):
+            spec = self._KEY_BIND_SPECS[kind]
             ttk.Label(keys_frame, text=label).grid(row=row_i, column=0, sticky="w", padx=(0, 2), pady=4)
             ttk.Label(keys_frame, textvariable=var, width=10).grid(
                 row=row_i, column=1, padx=(0, 2), pady=4, sticky="w")
             btn = ttk.Button(keys_frame, text="Bind...", width=10, command=bind_cmd)
             btn.grid(row=row_i, column=2, padx=(0, 2), pady=4)
-            setattr(self, btn_attr, btn)
+            setattr(self, spec["button_attr"], btn)
+            # "Map..." picks a controller button by clicking its name (see
+            # ControllerMapWindow) instead of physically pressing it -- the
+            # only reliable way to bind a Steam Deck's own built-in controls.
+            map_btn = ttk.Button(keys_frame, text="Map...", width=8,
+                                  command=lambda k=kind: self._on_map_key_clicked(k))
+            map_btn.grid(row=row_i, column=3, padx=(0, 2), pady=4)
+            setattr(self, spec["map_button_attr"], map_btn)
             ttk.Button(keys_frame, text="Unbind", style=theme.DANGER_BUTTON_STYLE,
-                       command=unbind_cmd).grid(row=row_i, column=3, padx=(0, 0), pady=4, sticky="w")
+                       command=unbind_cmd).grid(row=row_i, column=4, padx=(0, 0), pady=4, sticky="w")
         ttk.Label(keys_frame,
                   text="Cancel = e.g. your dodge key, stops instantly. Reset restarts from step 1. "
                        "Pause freezes in place.",
-                  foreground="gray").grid(row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+                  foreground="gray").grid(row=4, column=0, columnspan=5, sticky="w", pady=(2, 0))
 
         reset_delay_row = ttk.Frame(self.hotkeys_section.body)
         reset_delay_row.pack(fill="x", pady=(8, 0))
