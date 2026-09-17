@@ -1,5 +1,24 @@
-import ctypes
-from ctypes import wintypes
+"""Finds/queries the target game window: which process it is, whether it
+currently has OS focus, and its client-area rect in absolute screen pixels.
+
+Two platform backends live side by side in this one module (selected once,
+at import time, via _IS_WINDOWS) rather than as separate files, so every
+caller (executor.py, gui/calibration.py) keeps importing exactly the same
+three functions (reset_process_cache/is_game_focused/game_window_client_rect)
+regardless of platform:
+
+- Windows: raw ctypes.windll.user32 calls -- unchanged from before Linux
+  support existed, see the Win32 section below for the original rationale
+  comments.
+- Linux (Steam Deck, X11 session only -- see README's Steam Deck section):
+  python-xlib + EWMH conventions (_NET_ACTIVE_WINDOW/_NET_CLIENT_LIST/
+  _NET_WM_PID/_NET_WM_STATE), which is the direct X11 analogue of
+  EnumWindows+GetWindowThreadProcessId+GetClientRect+ClientToScreen. This
+  is UNVERIFIED against a real Proton-hosted game window -- see the Steam
+  Deck section of README.md for what to check first.
+"""
+import sys
+import threading
 
 import psutil
 
@@ -8,50 +27,80 @@ from poe2bot.log_setup import get_logger
 
 log = get_logger()
 
-# GetForegroundWindow/GetWindowThreadProcessId MUST have explicit restype/argtypes.
-# Without them, ctypes assumes a plain 32-bit signed `int` return, but HWND is a
-# pointer-sized handle -- on 64-bit Windows, any handle whose value has its high bit
-# set gets misread as a *negative* Python int, which then corrupts the PID lookup in
-# GetWindowThreadProcessId and makes is_game_focused() intermittently return False
-# even while the target window genuinely is in the foreground.
-_get_foreground_window = ctypes.windll.user32.GetForegroundWindow
-_get_foreground_window.restype = wintypes.HWND
-_get_foreground_window.argtypes = []
+_IS_WINDOWS = sys.platform == "win32"
 
-_get_window_thread_process_id = ctypes.windll.user32.GetWindowThreadProcessId
-_get_window_thread_process_id.restype = wintypes.DWORD
-_get_window_thread_process_id.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+if _IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
 
-_is_window_visible = ctypes.windll.user32.IsWindowVisible
-_is_window_visible.restype = wintypes.BOOL
-_is_window_visible.argtypes = [wintypes.HWND]
+    # GetForegroundWindow/GetWindowThreadProcessId MUST have explicit restype/argtypes.
+    # Without them, ctypes assumes a plain 32-bit signed `int` return, but HWND is a
+    # pointer-sized handle -- on 64-bit Windows, any handle whose value has its high bit
+    # set gets misread as a *negative* Python int, which then corrupts the PID lookup in
+    # GetWindowThreadProcessId and makes is_game_focused() intermittently return False
+    # even while the target window genuinely is in the foreground.
+    _get_foreground_window = ctypes.windll.user32.GetForegroundWindow
+    _get_foreground_window.restype = wintypes.HWND
+    _get_foreground_window.argtypes = []
 
-_is_iconic = ctypes.windll.user32.IsIconic
-_is_iconic.restype = wintypes.BOOL
-_is_iconic.argtypes = [wintypes.HWND]
+    _get_window_thread_process_id = ctypes.windll.user32.GetWindowThreadProcessId
+    _get_window_thread_process_id.restype = wintypes.DWORD
+    _get_window_thread_process_id.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 
-_get_client_rect = ctypes.windll.user32.GetClientRect
-_get_client_rect.restype = wintypes.BOOL
-_get_client_rect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    _is_window_visible = ctypes.windll.user32.IsWindowVisible
+    _is_window_visible.restype = wintypes.BOOL
+    _is_window_visible.argtypes = [wintypes.HWND]
 
-# GetClientRect alone only gives the client area's SIZE, always relative to its own
-# (0, 0) -- ClientToScreen is what maps that origin to an absolute virtual-desktop
-# position, which is what a calibrated pixel_pos/region is actually expressed in (see
-# game_window_client_rect). Needed so a calibration done on a secondary monitor (or
-# any window not sitting at the desktop's own (0, 0)) rescales correctly instead of
-# silently assuming the window's client area starts at the desktop origin.
-_client_to_screen = ctypes.windll.user32.ClientToScreen
-_client_to_screen.restype = wintypes.BOOL
-_client_to_screen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    _is_iconic = ctypes.windll.user32.IsIconic
+    _is_iconic.restype = wintypes.BOOL
+    _is_iconic.argtypes = [wintypes.HWND]
 
-_WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-_enum_windows = ctypes.windll.user32.EnumWindows
-_enum_windows.restype = wintypes.BOOL
-_enum_windows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+    _get_client_rect = ctypes.windll.user32.GetClientRect
+    _get_client_rect.restype = wintypes.BOOL
+    _get_client_rect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+
+    # GetClientRect alone only gives the client area's SIZE, always relative to its own
+    # (0, 0) -- ClientToScreen is what maps that origin to an absolute virtual-desktop
+    # position, which is what a calibrated pixel_pos/region is actually expressed in (see
+    # game_window_client_rect). Needed so a calibration done on a secondary monitor (or
+    # any window not sitting at the desktop's own (0, 0)) rescales correctly instead of
+    # silently assuming the window's client area starts at the desktop origin.
+    _client_to_screen = ctypes.windll.user32.ClientToScreen
+    _client_to_screen.restype = wintypes.BOOL
+    _client_to_screen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+
+    _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    _enum_windows = ctypes.windll.user32.EnumWindows
+    _enum_windows.restype = wintypes.BOOL
+    _enum_windows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+else:
+    # Soft/lazy: python-xlib is a Linux-only extra (see requirements.txt),
+    # never installed/importable on Windows, and this whole module must
+    # still import cleanly even if it's missing on Linux too -- callers
+    # degrade to "not focused"/None (via _x11_available()'s one-time
+    # warning) rather than crashing the app at startup.
+    try:
+        from Xlib import X, display
+        from Xlib.error import XError
+    except ImportError as e:
+        X = None
+        display = None
+        XError = Exception
+        _xlib_import_error = e
+    else:
+        _xlib_import_error = None
+
+    # One Xlib Display connection per thread, created lazily -- Xlib connections
+    # aren't safe to share across threads without extra locking, and this module
+    # is polled concurrently from the GUI thread and from every running
+    # RotationRunner's own thread (see executor.py) -- mirrors executor.py's
+    # _screen_capture()'s "one mss instance per thread" pattern.
+    _thread_local = threading.local()
 
 _cached_pid = None
 _warned_no_process = False
 _warned_no_window = False
+_warned_no_xlib = False
 
 
 def reset_process_cache():
@@ -90,6 +139,10 @@ def is_game_focused() -> bool:
         return False
     _warned_no_process = False
 
+    return _is_game_focused_win32(pid) if _IS_WINDOWS else _is_game_focused_x11(pid)
+
+
+def _is_game_focused_win32(pid) -> bool:
     hwnd = _get_foreground_window()
     fg_pid = wintypes.DWORD(0)
     _get_window_thread_process_id(hwnd, ctypes.byref(fg_pid))
@@ -97,6 +150,25 @@ def is_game_focused() -> bool:
     if not focused:
         log.debug(f"foreground window belongs to pid={fg_pid.value}, game pid={pid} -- not focused")
     return focused
+
+
+def _is_game_focused_x11(pid) -> bool:
+    if not _x11_available():
+        return False
+    try:
+        d = _x_display()
+        active = _x11_active_window(d)
+        if active is None:
+            return False
+        focused_pid = _x11_window_pid(d, active)
+        if focused_pid != pid:
+            log.debug(f"foreground window belongs to pid={focused_pid}, game pid={pid} -- not focused")
+            return False
+        return True
+    except Exception as e:
+        log.debug(f"X11 focus check failed ({type(e).__name__}: {e}); will reconnect on next check")
+        _thread_local.display = None
+        return False
 
 
 def _client_rect_if_valid(hwnd, pid):
@@ -164,9 +236,24 @@ def game_window_client_rect():
     if not pid:
         return None
 
+    rect = _game_window_client_rect_win32(pid) if _IS_WINDOWS else _game_window_client_rect_x11(pid)
+
+    if rect is None:
+        if not _warned_no_window:
+            log.warning(
+                f"game process '{config.GAME_PROCESS_NAME}' found (pid={pid}) but no suitably-sized "
+                f"visible window -- calibrated conditions won't be rescaled for this screen until "
+                f"one is found (expected while the game is still loading, otherwise check it isn't "
+                f"minimized)")
+            _warned_no_window = True
+    else:
+        _warned_no_window = False
+    return rect
+
+
+def _game_window_client_rect_win32(pid):
     focused = _client_rect_if_valid(_get_foreground_window(), pid)
     if focused is not None:
-        _warned_no_window = False
         return focused
 
     best = None
@@ -179,14 +266,134 @@ def game_window_client_rect():
         return True
 
     _enum_windows(_WNDENUMPROC(callback), 0)
-    if best is None:
-        if not _warned_no_window:
-            log.warning(
-                f"game process '{config.GAME_PROCESS_NAME}' found (pid={pid}) but no suitably-sized "
-                f"visible window -- calibrated conditions won't be rescaled for this screen until "
-                f"one is found (expected while the game is still loading, otherwise check it isn't "
-                f"minimized)")
-            _warned_no_window = True
-    else:
-        _warned_no_window = False
     return best
+
+
+# ---- Linux/X11 backend -----------------------------------------------------
+# EWMH (Extended Window Manager Hints) equivalents of the Win32 calls above:
+# _NET_ACTIVE_WINDOW/_NET_CLIENT_LIST replace GetForegroundWindow/EnumWindows,
+# _NET_WM_PID replaces GetWindowThreadProcessId, get_geometry()+
+# translate_coords() together replace GetClientRect+ClientToScreen, and
+# _NET_WM_STATE's "hidden" bit (plus the raw map_state) replaces IsIconic/
+# IsWindowVisible. Requires an EWMH-compliant window manager (KDE Plasma, as
+# used by SteamOS Desktop Mode, qualifies) and an actual X11 session --
+# there is no Wayland equivalent implemented here (see README's Steam Deck
+# section for why: global window queries like this are deliberately
+# restricted for unprivileged apps under Wayland).
+
+def _x11_available() -> bool:
+    global _warned_no_xlib
+    if display is None:
+        if not _warned_no_xlib:
+            log.warning(
+                "python-xlib is not installed -- game window detection is disabled. "
+                "Install it with `pip install python-xlib` (see README's Steam Deck section). "
+                f"Import error: {_xlib_import_error}")
+            _warned_no_xlib = True
+        return False
+    return True
+
+
+def _x_display():
+    d = getattr(_thread_local, "display", None)
+    if d is None:
+        d = display.Display()
+        _thread_local.display = d
+    return d
+
+
+def _x11_get_property(d, window, atom_name):
+    try:
+        prop = window.get_full_property(d.intern_atom(atom_name), X.AnyPropertyType)
+    except XError:
+        return None
+    return prop.value if prop else None
+
+
+def _x11_window_pid(d, window):
+    value = _x11_get_property(d, window, "_NET_WM_PID")
+    return value[0] if value else None
+
+
+def _x11_window_is_hidden(d, window) -> bool:
+    """True if the window manager currently reports this window as
+    "hidden" (its _NET_WM_STATE_HIDDEN bit is set) -- the EWMH equivalent
+    of IsIconic. Most modern window managers, minimizing a window sets
+    this state rather than unmapping it, so map_state alone (see
+    _x11_window_is_viewable) wouldn't catch it."""
+    value = _x11_get_property(d, window, "_NET_WM_STATE")
+    if not value:
+        return False
+    return d.intern_atom("_NET_WM_STATE_HIDDEN") in value
+
+
+def _x11_window_is_viewable(window) -> bool:
+    try:
+        return window.get_attributes().map_state == X.IsViewable
+    except XError:
+        return False
+
+
+def _x11_active_window(d):
+    root = d.screen().root
+    value = _x11_get_property(d, root, "_NET_ACTIVE_WINDOW")
+    if not value or not value[0]:
+        return None
+    return d.create_resource_object("window", value[0])
+
+
+def _x11_client_list(d):
+    root = d.screen().root
+    value = _x11_get_property(d, root, "_NET_CLIENT_LIST")
+    if not value:
+        return []
+    return [d.create_resource_object("window", xid) for xid in value]
+
+
+def _client_rect_if_valid_x11(d, window, pid):
+    """X11 counterpart to _client_rect_if_valid -- same contract (None
+    unless `window` is a visible, non-minimized, sanely-sized top-level
+    window actually owned by `pid`), built from EWMH properties + raw X11
+    geometry instead of Win32 calls."""
+    if window is None:
+        return None
+    if not _x11_window_is_viewable(window) or _x11_window_is_hidden(d, window):
+        return None
+    if _x11_window_pid(d, window) != pid:
+        return None
+    try:
+        geom = window.get_geometry()
+    except XError:
+        return None
+    width, height = geom.width, geom.height
+    if width <= 0 or height <= 0:
+        return None
+    try:
+        # translate_coords maps a point in THIS window's own coordinate
+        # space into the root window's space -- i.e. exactly this window's
+        # absolute on-screen origin, the X11 analogue of ClientToScreen.
+        coords = window.translate_coords(d.screen().root, 0, 0)
+    except XError:
+        return None
+    return coords.x, coords.y, width, height
+
+
+def _game_window_client_rect_x11(pid):
+    if not _x11_available():
+        return None
+    try:
+        d = _x_display()
+        focused = _client_rect_if_valid_x11(d, _x11_active_window(d), pid)
+        if focused is not None:
+            return focused
+
+        best = None
+        for window in _x11_client_list(d):
+            rect = _client_rect_if_valid_x11(d, window, pid)
+            if rect is not None and (best is None or rect[2] * rect[3] > best[2] * best[3]):
+                best = rect
+        return best
+    except Exception as e:
+        log.debug(f"X11 window-rect lookup failed ({type(e).__name__}: {e}); will reconnect on next check")
+        _thread_local.display = None
+        return None

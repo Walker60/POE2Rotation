@@ -45,6 +45,130 @@ properly signed and works fine with Secure Boot and driver-signature enforcement
 enabled — no settings need to be changed for it. (If you go looking for "ViGEmBus"
 online, note the upstream project renamed in 2023; functionally unaffected either way.)
 
+## Steam Deck / Linux (experimental)
+
+The app also has a Linux backend (window detection via X11/EWMH, real-controller
+input via `evdev`) intended for running natively on a Steam Deck in **Desktop
+Mode**, alongside Path of Exile 2 running as usual via Proton — the bot itself
+does **not** run under Wine/Proton, just as an ordinary Linux process. This is
+new and **unverified against real hardware** — treat it as a first draft to
+debug on an actual Deck, not a finished, tested feature. If something doesn't
+work, check the specific caveats called out in `poe2bot/focus.py` and
+`poe2bot/controller_input.py`'s module docstrings first.
+
+### Getting it onto the Deck
+
+**Option A (recommended): the pre-built bundle.** Every push to this repo's
+`main`/`steam-deck-linux-support` branches runs
+[`.github/workflows/build-steamdeck.yml`](.github/workflows/build-steamdeck.yml),
+which builds a self-contained folder (a full Python + Tcl/Tk + every
+dependency, via PyInstaller — see `packaging/linux.spec`) on a Linux runner.
+**The very first time**, download it from the workflow's Actions artifact
+(`poe2bot-steamdeck-linux-x86_64.tar.gz` — requires being logged into GitHub
+in a browser, since Actions artifacts have no public download link), extract
+it anywhere on the Deck, and run the `poe2bot` executable inside it directly
+— no `pip`, `pacman`, or Distrobox needed just to get Python/the dependencies
+in place. **After that**, use **Settings → Check for Updates** inside the
+app itself instead of repeating this by hand: it checks a rolling GitHub
+Release the same workflow publishes (which, unlike a plain Actions artifact,
+has a permanent public download link) and, if the SHA it was built from
+differs from the one currently running, downloads and installs the new
+build in place, then offers to restart into it — no browser, no manual
+download/extract needed for every iteration. This is a first build pipeline
+(and a first self-update mechanism), not yet confirmed to actually run
+correctly on real Deck hardware — see the rest of this section for what
+still has to be true regardless of how you got the app onto the Deck, and
+report back what breaks.
+
+**Option B: install everything yourself**, e.g. inside
+[Distrobox](https://github.com/89luca89/distrobox) (a container that doesn't
+require Developer Mode's permanent read-write unlock, recommended since
+SteamOS's own root filesystem is read-only) — install Python 3 + `tk`
+inside it, then `pip install -r requirements.txt` (`python-xlib` and
+`evdev`, the two Linux-only additions, are pulled in automatically via
+environment markers; they're never installed on Windows).
+
+### What has to be true either way
+
+- **An X11 session**, not Wayland: `steamos-session-select plasma-x11-persistent`.
+  `keyboard`/`mouse`/`mss` (hotkey capture, input injection, screen/pixel capture)
+  have no Wayland support at all, on any platform, so this isn't optional.
+  (SteamOS has moved to Wayland-by-default for Desktop Mode; the X11 session is
+  still selectable as of this writing, but Valve's long-term direction is Wayland
+  — if a future SteamOS update drops the X11 desktop session, this whole approach
+  needs revisiting.)
+- **Permission to read/write `/dev/uinput` (virtual controller output) and
+  `/dev/input/*` (real controller input) without root** — add your user to the
+  `input`/`uinput` groups (or an equivalent udev rule); `vgamepad`'s own Linux
+  docs describe the exact steps. If running inside a container (Option B, or
+  if you choose to run Option A's bundle inside one too), it also needs device
+  passthrough for both of those.
+
+**Virtual-controller output** (a step that presses a button on the emulated
+controller — see "Controller output" above): `vgamepad`, the same library
+`poe2bot/controller.py` already uses on Windows, ships its own native Linux
+backend built on the kernel's `uinput`/`evdev` subsystem — no ViGEmBus, no Wine
+involved, no code changes needed here. This is the single biggest open
+question in the whole Linux port: confirm a virtual pad created this way
+actually shows up as a controller to Proton-hosted PoE2 (not just to the host
+OS) before relying on it — there are reports of Proton not always recognizing
+a `uinput`-created pad. If it doesn't work with stock Proton, a community
+"GE" Proton build (which carries extra controller-support patches) may help.
+
+Recalibrate every rotation's image/pixel conditions fresh on the Deck's own
+display — a template captured on a Windows PC's screen won't match the Deck's
+rendering, the same as moving between any two different screens today.
+
+**The Deck's own built-in controls (buttons/sticks/trackpads) won't show up
+for a physical-press capture (e.g. a rotation's "Bind Hotkey...") out of the
+box.** They're normally owned by **Steam Input**, which only creates a
+generic virtual gamepad for a game Steam is actively running/targeting — a
+plain terminal-launched app in Desktop Mode never gets one, so `evdev`
+genuinely has nothing gamepad-like to find (this isn't a bug; if it happens,
+poe2bot's log will list every `/dev/input` device it actually saw, none of
+them recognized as a gamepad — check `logs/poe2bot.log` for that dump if you
+want to confirm this is what's happening on your setup before trying the fix
+below). This also means the Deck's own controls can't actually *trigger* a
+rotation while playing until one of the two fixes below is in place, even
+after a hotkey is bound to one of their buttons. Two ways to make the Deck's
+own controls visible as a real evdev gamepad:
+
+- **Add poe2bot as a non-Steam shortcut and launch it through Steam** (Desktop
+  Mode → Steam → Games → "Add a Non-Steam Game" → point it at the `poe2bot`
+  executable) — launching it this way, rather than directly from a terminal,
+  is what gets Steam Input to engage and expose a virtual Xbox 360 controller
+  the same way it does for an actual game; `evdev` should then find it like
+  any other gamepad. Unconfirmed against real hardware yet — if Steam Input
+  doesn't engage for a plain utility app this way, or the virtual pad it
+  creates isn't visible system-wide to a process Steam didn't itself launch,
+  this needs another approach.
+- **[Handheld Daemon (HHD)](https://github.com/hhd-dev/hhd)**, a community
+  project that exposes the Deck's built-in controls as a normal evdev gamepad
+  independent of Steam/Steam Input entirely — the more robust option if the
+  above doesn't pan out, at the cost of installing another piece of software.
+
+Either way, a real USB/Bluetooth controller plugged into the Deck doesn't
+have this problem at all — it shows up as a normal gamepad to `evdev`
+regardless of Steam.
+
+Both **choosing which button a step should press** (the step editor's **Map
+Controller Button**) and **entering which button should trigger/cancel/
+reset/pause a rotation** (each hotkey row's own **Map...**, next to its
+"Bind...") work no matter what `evdev` can currently see — click a button's
+name from a list instead of physically pressing it. Pick **Settings...
+> Controller > Controller type: Steam Deck** first so that list shows
+Deck-style labels (View/Menu, L1/R1/L2/R2) instead of Xbox ones (Back/Start,
+LB/RB/LT/RT) — purely cosmetic, since every button still presses (or is
+compared against) the same spot either way.
+
+For a step's Key field, that's the whole story — nothing else needs to see
+the Deck's own controls at all, since it's the bot's own *virtual* controller
+being pressed. For a hotkey/cancel/reset/pause bind, Map... only fills in
+the field's *value*; the Deck's own buttons still can't *trigger* it while
+you're actually playing until `evdev` can see them for real, i.e. until one
+of the two fixes above is in place — Map... just means you no longer need a
+working physical capture merely to set the binding up ahead of time.
+
 ## Configuration
 
 Every setting below can also be viewed and changed from **Settings... > Advanced**
@@ -65,6 +189,13 @@ new value is remembered in `app_state.json` and takes effect immediately.
 - `POE2BOT_CONTROLLER_INDEX` — which XInput slot (0-3) is your real, physically-held
   controller (default `0`). Change this if a real controller plugged in alongside the
   bot's own virtual one ends up enumerated on a different slot.
+- `POE2BOT_REQUIRE_GAME_FOCUS` — whether a rotation must wait for the game window to
+  have OS focus before it'll fire at all (default `1`/on). Set to `0` to fire
+  regardless of what's focused — only for testing against a target that never takes
+  OS focus itself, or if the focus check itself is unreliable on your setup; leaving
+  this on is what stops a cast from firing into whatever window you're actually
+  looking at instead of the game. Unlike the four settings above, this one lives at
+  **Settings... > Safety** (a plain checkbox, applied immediately), not **Advanced**.
 
 **Settings... > Windows** also has **Show Hotkey Map...** (a snapshot table of every
 rotation's Hotkey/Cancel/Reset/Pause keys across every folder, flagging any key used
@@ -173,13 +304,19 @@ matching algorithm than exact mode (normalized cross-correlation, not mean
 pixel difference), so a Confidence value tuned for exact mode is only a
 starting point after switching to area mode; expect to retune it.
 
-**Screenshots go through `mss`, not `pyautogui`.** On Windows, `pyautogui`
-(and even Pillow's own `ImageGrab.grab()` used directly) always captures the
-*entire* screen internally and crops it down afterward, no matter how small
-the requested region is — for a check running many times a second, that's a
-real, avoidable cost that scales with your monitor's resolution. `mss`
-captures only the requested rectangle directly, so this is what actually makes
-repeated checks fast rather than just a smaller region or a cheaper threshold.
+**Screenshots go through `mss`, not `pyautogui`/Pillow's `ImageGrab`** — for
+both runtime condition checks and the calibration flow itself. Pillow's own
+`ImageGrab.grab()` (what `pyautogui.screenshot()` uses underneath) always
+captures the *entire* screen internally and crops it down afterward, no
+matter how small the requested region is — for a check running many times a
+second, that's a real, avoidable cost that scales with your monitor's
+resolution; `mss` captures only the requested rectangle directly, so this is
+what actually makes repeated checks fast rather than just a smaller region or
+a cheaper threshold. It's also the only one of the two that works everywhere
+this app runs at all: Pillow's Linux `ImageGrab` backend shells out to an
+external `gnome-screenshot` binary, which doesn't exist on KDE Plasma (Steam
+Deck Desktop Mode) — `mss` needs nothing beyond the X11 connection it already
+requires.
 
 ## Moving a rotation to a different screen
 

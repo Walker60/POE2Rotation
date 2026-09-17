@@ -190,12 +190,22 @@ def _close_screen_capture():
         _thread_local.sct = None
 
 
-def _capture_region(region) -> Image.Image:
+def capture_region(region) -> Image.Image:
     """Screenshot exactly `region` (left, top, width, height) -- and only that
-    region. pyautogui/Pillow's own screen grab always captures the *entire*
-    screen on Windows and crops afterward regardless of region size; mss
-    captures just the requested rectangle directly via BitBlt, which is what
-    actually matters for a check that runs in a tight polling loop."""
+    region -- in absolute virtual-desktop pixels. pyautogui/Pillow's own
+    screen grab always captures the *entire* screen on Windows and crops
+    afterward regardless of region size; mss captures just the requested
+    rectangle directly via BitBlt (X11's XGetImage on Linux -- no shelling
+    out to an external screenshot tool the way Pillow's own Linux
+    ImageGrab backend does), which is what actually matters for a check
+    that runs in a tight polling loop. No virtual-desktop-origin
+    correction needed here (contrast poe2bot/gui/calibration.py's old
+    pyautogui-based capture, before it switched to this same function) --
+    mss's own monitor dict already takes absolute coordinates directly,
+    multi-monitor included, with no separate "capture every screen" mode
+    to opt into. Public (no leading underscore): also used directly by
+    poe2bot/gui/calibration.py's calibration screenshots, not just this
+    module's own runtime match-checking."""
     left, top, width, height = region
     monitor = {"left": left, "top": top, "width": width, "height": height}
     shot = _screen_capture().grab(monitor)
@@ -408,7 +418,7 @@ def _image_matches_exact(template_filename, region, confidence: float, label: st
     """
     try:
         template = _load_template_image_resized(template_filename, (region[2], region[3]))
-        screenshot = _capture_region(region).convert("L")
+        screenshot = capture_region(region).convert("L")
         if screenshot.size != template.size:
             log.error(
                 f"match check for '{label}': captured region {screenshot.size} doesn't "
@@ -449,7 +459,7 @@ def _image_matches_area(template_filename, search_region, confidence: float, lab
     try:
         template_array = (_load_template_array_resized(template_filename, tuple(template_size))
                            if template_size else _load_template_array(template_filename))
-        screenshot = _capture_region(search_region).convert("L")
+        screenshot = capture_region(search_region).convert("L")
         template_h, template_w = template_array.shape
         if screenshot.width < template_w or screenshot.height < template_h:
             log.error(
@@ -892,6 +902,8 @@ class RotationRunner:
         return True
 
     def _wait_for_focus_or_stop(self) -> bool:
+        if not config.REQUIRE_GAME_FOCUS:
+            return True
         notified_waiting = False
         while not is_game_focused():
             if not notified_waiting:

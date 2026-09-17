@@ -2,9 +2,28 @@ keyboard>=0.13.5
 mouse>=0.7.1
 mss>=9.0.1
 numpy>=1.24
-opencv-python>=4.8
+# -headless (not plain opencv-python): the app only ever calls
+# cv2.matchTemplate/cv2.minMaxLoc (see executor.py's area-search matching),
+# never any GUI window function, so there's no reason to pull in a build
+# linked against system GL/GTK libraries that may not be present on a given
+# Linux box (or inside a minimal container/CI runner) -- this variant has no
+# such runtime dependency, on either platform.
+opencv-python-headless>=4.8
+# Used by poe2bot/updater.py (Linux/Steam Deck self-update, see README's
+# Steam Deck section) to verify HTTPS certificates against a known-good CA
+# bundle instead of the OS's own -- a PyInstaller bundle carries the CA
+# paths its OpenSSL was built against, which may not exist on whatever
+# machine actually runs it.
+certifi
 psutil>=5.9
-pyautogui>=0.9.54
 Pillow>=10.0
 sv-ttk>=2.6.0
 vgamepad>=0.1.0
+
+# Linux-only (Steam Deck / SteamOS Desktop Mode) -- see README's Steam Deck
+# section. Never installed on Windows: python-xlib replaces focus.py's Win32
+# window-detection calls, evdev replaces controller_input.py's XInput
+# polling. keyboard/mouse/mss/vgamepad above already ship their own Linux
+# backends and need no separate package here.
+python-xlib>=0.33; sys_platform == "linux"
+evdev>=1.6; sys_platform == "linux"

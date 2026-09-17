@@ -1,0 +1,135 @@
+name: Build Steam Deck bundle
+
+# Builds a self-contained Linux (x86_64) bundle via PyInstaller -- a full
+# Python + Tcl/Tk + every dependency in one folder, meant to be copied onto
+# a Steam Deck (SteamOS Desktop Mode) and run directly with no pip/pacman/
+# Distrobox setup on the Deck itself. See README's Steam Deck section and
+# packaging/linux.spec's header comment for the full context -- this is a
+# first build pipeline, not yet verified against real Deck hardware.
+#
+# Runs on ubuntu-22.04 deliberately, not ubuntu-latest: PyInstaller bundles
+# whatever Tcl/Tk and shared libraries the BUILD machine has, and glibc's
+# backward-compatible-only model means a binary built against an OLDER
+# glibc runs fine on a system with a NEWER one (SteamOS, being Arch-based
+# and thus generally ahead of a given Ubuntu LTS's glibc) but not the
+# reverse -- pinning an older, still-supported LTS runner is what actually
+# maximizes compatibility with the target here, not newer/latest.
+
+on:
+  push:
+    branches: [main, steam-deck-linux-support]
+    paths:
+      - "poe2bot/**"
+      - "main.py"
+      - "requirements.txt"
+      - "packaging/**"
+      - ".github/workflows/build-steamdeck.yml"
+  workflow_dispatch: {}
+
+# contents: write is for softprops/action-gh-release (below), so it can create/
+# update the rolling release using the default GITHUB_TOKEN, with no extra secret
+# to manage. actions: write is for the "Trim old workflow runs" step at the end,
+# which needs it to delete this workflow's own past runs via the GitHub API.
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the version (short commit SHA) being built
+        id: version
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The system python3 (not actions/setup-python's own build) so that
+      # apt's python3-tk is guaranteed to be the SAME Python tkinter links
+      # against -- a venv created from it inherits a working tkinter for
+      # free, since a venv references the base install's stdlib rather than
+      # copying it.
+      - name: Install system Python, Tk, and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-venv python3-dev python3-tk tk-dev
+
+      - name: Create virtual environment
+        run: python3 -m venv .venv
+
+      - name: Install Python dependencies
+        run: |
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          # pyinstaller-hooks-contrib -- specifically for its hook-certifi.py
+          # (collect_data_files('certifi')), which bundles certifi's own CA
+          # bundle file correctly so poe2bot/updater.py's HTTPS calls can
+          # verify certificates at runtime; PyInstaller has no built-in hook
+          # for certifi on its own.
+          pip install pyinstaller pyinstaller-hooks-contrib
+
+      - name: Verify tkinter actually works in this environment
+        run: |
+          source .venv/bin/activate
+          python -c "import tkinter; print('tkinter OK, Tk version', tkinter.TkVersion)"
+
+      - name: Build with PyInstaller
+        run: |
+          source .venv/bin/activate
+          pyinstaller packaging/linux.spec --distpath dist --workpath build --noconfirm
+
+      # Read by poe2bot/updater.py's current_version() at runtime -- this is
+      # the ONLY versioning scheme this project has (a git short SHA, not a
+      # semantic version), matched against the rolling release's own body
+      # below by the in-app "Check for Updates" button.
+      - name: Write the VERSION file
+        run: echo "${{ steps.version.outputs.sha }}" > dist/poe2bot/VERSION
+
+      - name: Archive the bundle
+        run: |
+          cd dist
+          tar -czf poe2bot-steamdeck-linux-x86_64.tar.gz poe2bot
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: poe2bot-steamdeck-linux-x86_64
+          path: dist/poe2bot-steamdeck-linux-x86_64.tar.gz
+          retention-days: 30
+
+      # A single ROLLING release (same tag every time -- this action updates
+      # an existing release in place, replacing its assets, rather than
+      # creating a new one per push) is what poe2bot/updater.py's in-app
+      # "Check for Updates" button reads: unlike a plain Actions artifact
+      # (only downloadable by someone logged into GitHub, no public URL,
+      # 30-day retention), a Release's assets have permanent, unauthenticated
+      # download URLs, which is what makes an automated in-app updater
+      # possible at all. Deliberately a "-prerelease" (this is a rolling dev
+      # build for fast iteration, not a vetted stable release) so it never
+      # shows up as this repo's "Latest release" on GitHub's own UI.
+      - name: Publish/update the rolling steamdeck-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: steamdeck-latest
+          name: "Steam Deck build ${{ steps.version.outputs.sha }}"
+          body: "${{ steps.version.outputs.sha }}"
+          prerelease: true
+          files: dist/poe2bot-steamdeck-linux-x86_64.tar.gz
+
+      # This workflow runs on every push to main/steam-deck-linux-support (see
+      # `on:` above), and the release it publishes is a single ROLLING one, not
+      # per-run -- so past runs have no lasting value once a newer one exists,
+      # only clutter on the Actions tab. `if: always()` so a run that fails
+      # earlier still gets trimmed instead of piling up too. gh CLI is
+      # preinstalled on GitHub-hosted runners; GH_TOKEN needs this workflow's
+      # own `actions: write` permission (see top of file) to delete runs.
+      - name: Trim old workflow runs (keep the latest 2)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list --repo "${{ github.repository }}" --workflow build-steamdeck.yml \
+            --json databaseId --limit 100 --jq '.[2:][].databaseId' |
+          while read -r run_id; do
+            gh run delete "$run_id" --repo "${{ github.repository }}" || true
+          done
