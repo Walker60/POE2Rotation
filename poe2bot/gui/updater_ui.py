@@ -7,12 +7,13 @@ from poe2bot.gui import dialogs as messagebox
 
 
 class UpdaterMixin:
-    """The Settings window's "Updates" section (Linux/Steam Deck only --
-    see poe2bot/updater.py's IS_SUPPORTED, and SettingsWindow, which hides
-    this section entirely when that's False): checking for a newer build,
-    downloading and installing it, and restarting into it. Mixed into App
-    (see poe2bot/gui/app.py) -- the actual check/download runs on a
-    background thread, hopping results back to the Tk thread via
+    """The Settings window's "Updates" section (frozen/PyInstaller builds
+    only -- see poe2bot/updater.py's IS_SUPPORTED, and SettingsWindow, which
+    hides this section entirely when that's False -- works the same way on
+    both the Linux/Steam Deck build and the Windows build): checking for a
+    newer build, downloading and installing it, and restarting into it.
+    Mixed into App (see poe2bot/gui/app.py) -- the actual check/download
+    runs on a background thread, hopping results back to the Tk thread via
     self.status_queue exactly the way HotkeysMixin's/StepEditorMixin's own
     capture flows already do (see app.py's _CAPTURE_SENTINEL_HANDLERS)."""
 
