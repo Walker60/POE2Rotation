@@ -139,8 +139,28 @@ involved, no code changes needed here. This is the single biggest open
 question in the whole Linux port: confirm a virtual pad created this way
 actually shows up as a controller to Proton-hosted PoE2 (not just to the host
 OS) before relying on it — there are reports of Proton not always recognizing
-a `uinput`-created pad. If it doesn't work with stock Proton, a community
-"GE" Proton build (which carries extra controller-support patches) may help.
+a `uinput`-created pad. `poe2bot/controller.py`'s `warm_up()` creates the pad
+right at app startup (silently, before you ever press anything) instead of
+waiting for a rotation's first controller-encoded press, specifically so it
+already exists before PoE2 and Steam Input start looking for controllers —
+both typically enumerate joysticks once at their own startup and may never
+notice one that only appears later as a hot-plug event. If a button still
+isn't recognized in-game after that:
+
+- Confirm the pad exists *at all* at the OS level first: `cat
+  /proc/bus/input/devices` (look for an "Xbox 360"-style entry) or `evtest`/
+  `jstest` right after launching poe2bot. If it's missing here, this is a
+  `/dev/uinput` permissions problem (see above), not a Proton/Steam Input one.
+- If it's present at the OS level but PoE2 still doesn't react, check
+  whether **Steam Input** is the layer swallowing it: Steam Input generally
+  only manages devices it saw when Steam itself started, so try restarting
+  Steam (or the whole Deck) with poe2bot's virtual pad already present, or
+  temporarily disabling Steam Input for PoE2's non-Steam shortcut (Properties
+  → Controller) to see if input reaches the game at all with Steam Input out
+  of the way entirely.
+- If it's present but the *game* still doesn't react even with Steam Input
+  out of the way, a community "GE" Proton build (which carries extra
+  controller-support patches over stock Proton) may help.
 
 Recalibrate every rotation's image/pixel conditions fresh on the Deck's own
 display — a template captured on a Windows PC's screen won't match the Deck's

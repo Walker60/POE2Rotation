@@ -13,7 +13,12 @@ driver and raises if that driver isn't installed/running, which would
 break every keyboard-only user who has never touched a controller-encoded
 step. _get_pad() defers the import to first real use.
 """
+import sys
 import threading
+
+from poe2bot.log_setup import get_logger
+
+log = get_logger()
 
 CONTROLLER_PREFIX = "controller:"
 
@@ -90,6 +95,28 @@ def _get_pad():
                     f"driver installer. Details: {e}") from e
             _vg, _pad = vg, pad
     return _pad
+
+
+def warm_up():
+    """Best-effort, silent early creation of the virtual controller --
+    call once at app startup, Linux only. On the Steam Deck, PoE2 (via
+    Proton) and Steam Input typically enumerate joysticks once, at their
+    own startup, and treat anything that appears afterward as a hot-plug
+    event they may never notice -- so a pad that isn't created until a
+    rotation's first controller-encoded press can go completely unseen by
+    the game even though poe2bot fired it correctly. Creating it here
+    instead gives it a chance to already be present by the time PoE2/Steam
+    Input go looking for controllers. Never called on Windows: ViGEmBus
+    has no such enumeration-order issue, and unlike Linux this would show
+    every keyboard-only user a driver-missing failure on every single
+    startup instead of only if/when they ever press a controller-encoded
+    step."""
+    if sys.platform == "win32":
+        return
+    try:
+        _get_pad()
+    except Exception as e:
+        log.info("Controller warm-up skipped, will retry on first real press: %s", e)
 
 
 def press(name: str):

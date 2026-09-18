@@ -1,5 +1,6 @@
 import os
 import queue
+import threading
 import time
 import tkinter as tk
 from tkinter import ttk
@@ -67,6 +68,12 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         config.CONTROLLER_MIN_TAP_MS = self.controller_min_tap_ms
         config.CONTROLLER_INDEX = self.controller_index
         config.REQUIRE_GAME_FOCUS = self.require_game_focus
+
+        # Linux only (a no-op on Windows) -- see controller.warm_up's docstring
+        # for why this needs to happen this early rather than waiting for a
+        # rotation's first controller-encoded press. Threaded so a slow/failed
+        # uinput setup never delays the window actually appearing.
+        threading.Thread(target=controller.warm_up, daemon=True).start()
 
         self.status_queue = queue.Queue()
         self.activity_queue = queue.Queue()
