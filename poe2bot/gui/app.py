@@ -886,7 +886,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.tree.tag_configure("drop_target", background=self._drop_target_color())
         self._persist_app_state()
         if self.settings_window is not None and self.settings_window.winfo_exists():
-            self.settings_window.refresh_theme_label()
+            self.settings_window.refresh_theme()
         if self.activity_window is not None and self.activity_window.winfo_exists():
             self.activity_window.refresh_theme()
 

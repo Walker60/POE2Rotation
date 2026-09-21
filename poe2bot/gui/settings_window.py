@@ -22,13 +22,13 @@ class SettingsWindow(tk.Toplevel):
         super().__init__(master)
         self._master = master
         self.title("Settings")
-        self.resizable(False, False)
+        self._canvas = None  # set below -- a plain tk.Canvas, kept in sync with the
+                              # theme by hand the same way App._sync_root_background does
         bg = ttk.Style().lookup("TFrame", "background")
         if bg:
             self.configure(bg=bg)
 
-        container = ttk.Frame(self, padding=12)
-        container.pack(fill="both", expand=True)
+        container = self._build_scroll_area()
 
         device_frame = ttk.LabelFrame(container, text="Active Device", padding=8)
         device_frame.pack(fill="x")
@@ -64,7 +64,7 @@ class SettingsWindow(tk.Toplevel):
         appearance_frame.pack(fill="x", pady=(8, 0))
         self._theme_btn = ttk.Button(appearance_frame, command=master._toggle_theme)
         self._theme_btn.pack(fill="x")
-        self.refresh_theme_label()
+        self.refresh_theme()
 
         window_frame = ttk.LabelFrame(container, text="Windows", padding=8)
         window_frame.pack(fill="x", pady=(8, 0))
@@ -80,7 +80,68 @@ class SettingsWindow(tk.Toplevel):
 
         self._build_advanced_section(container)
 
-        geometry.size_window_to_contents(self)
+        # A bare Canvas's own natural size has nothing to do with the size of
+        # the item drawn inside it -- without this, size_window_to_contents
+        # below would have nothing meaningful to measure and always fall back
+        # to min_width/min_height, opening far smaller than the actual content
+        # even on a big monitor with plenty of room to show all of it at once.
+        container.update_idletasks()
+        self._canvas.configure(width=container.winfo_reqwidth(), height=container.winfo_reqheight())
+        geometry.size_window_to_contents(self, min_width=380, min_height=300)
+
+    def _build_scroll_area(self) -> ttk.Frame:
+        """Wraps every section below in a Canvas + Scrollbar (the standard Tk
+        way to make an arbitrary stack of widgets scrollable, since ttk has
+        no native scrollable frame -- same pattern as App's own step-editor
+        scroll area, poe2bot/gui/app.py's _build_editor_scroll_area) so a
+        window now resizable can be shrunk below its natural content height
+        -- e.g. to fit the Steam Deck's small display -- without clipping
+        anything. Returns the frame every section packs into, same as the
+        plain `container` this replaced."""
+        bg = ttk.Style().lookup("TFrame", "background")
+        scroll_frame = ttk.Frame(self)
+        scroll_frame.pack(fill="both", expand=True)
+        canvas = tk.Canvas(scroll_frame, highlightthickness=0, bd=0, bg=bg)
+        self._canvas = canvas
+        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        container = ttk.Frame(canvas, padding=12)
+        scroll_window = canvas.create_window((0, 0), window=container, anchor="nw")
+
+        def _on_container_configure(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        container.bind("<Configure>", _on_container_configure)
+
+        def _on_canvas_configure(event):
+            # Keeps container (and everything packed fill="x" inside it) the
+            # same width as the visible canvas, instead of shrink-wrapping to
+            # its widest child.
+            canvas.itemconfigure(scroll_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _on_mousewheel_linux(event):
+            canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
+
+        def _bind_wheel(_event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Button-4>", _on_mousewheel_linux)
+            canvas.bind_all("<Button-5>", _on_mousewheel_linux)
+
+        def _unbind_wheel(_event):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+        # Bound/unbound on hover (not for the window's lifetime) so scrolling over
+        # some other scrollable widget inside here isn't hijacked by this canvas.
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
+        return container
 
     def _build_updates_section(self, container):
         """Frozen/PyInstaller builds only (see updater.IS_SUPPORTED) -- a
@@ -97,7 +158,7 @@ class SettingsWindow(tk.Toplevel):
 
     def set_update_button_state(self, state: str, text: str):
         """Called from UpdaterMixin (poe2bot/gui/updater_ui.py) as a check/
-        download progresses -- kept as a method (like refresh_theme_label)
+        download progresses -- kept as a method (like refresh_theme)
         rather than having that mixin reach into self._update_btn directly,
         since this window is created once and reused via deiconify(), so
         whatever's mid-flight when it's hidden needs a stable handle to
@@ -180,11 +241,18 @@ class SettingsWindow(tk.Toplevel):
         self._master._on_advanced_settings_changed(process_name, panic_key, min_tap_ms, controller_index)
         messagebox.showinfo("Settings saved", "Advanced settings applied.", parent=self)
 
-    def refresh_theme_label(self):
-        """Reflects the *current* theme rather than a static "Toggle..."
-        label -- called once at construction and again from
+    def refresh_theme(self):
+        """Reflects the *current* theme -- both the "Switch to .../Dark Mode"
+        button label and the plain tk.Canvas backing the scroll area (sv_ttk
+        never restyles plain tk widgets on its own, same idea as App's own
+        _sync_root_background) -- called once at construction and again from
         App._toggle_theme() (this window is created once and reused via
-        deiconify(), so a label baked in only at construction would go
-        stale after the first toggle)."""
+        deiconify(), so state baked in only at construction would go stale
+        after the first toggle)."""
         other = "Light" if self._master._theme == "dark" else "Dark"
         self._theme_btn.configure(text=f"Switch to {other} Mode")
+        bg = ttk.Style().lookup("TFrame", "background")
+        if bg:
+            self.configure(bg=bg)
+            if self._canvas is not None:
+                self._canvas.configure(bg=bg)
