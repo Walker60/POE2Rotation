@@ -550,6 +550,11 @@ class RotationRunner:
         # Meaningless (never touched) for "once" mode.
         self._lap_count = 0
         self._lap_started_at = None
+        # True from start() until end_hold() (see its docstring) -- a "once" mode
+        # rotation whose trigger is still physically held reads this as license to
+        # keep looping past its normal single pass, exactly like a "loop" rotation
+        # does unconditionally. Meaningless for "loop" mode, which never consults it.
+        self._hold_active = False
 
     @property
     def is_running(self) -> bool:
@@ -564,6 +569,7 @@ class RotationRunner:
         self._pause_requested = False
         self._paused.clear()
         self._current_path = ()
+        self._hold_active = True
         self._thread = threading.Thread(
             target=self._run, name=f"rotation-{self.rotation.name}", daemon=True)
         self._thread.start()
@@ -571,6 +577,17 @@ class RotationRunner:
     def stop(self):
         self._stop_requested = True
         self._stop_event.set()
+
+    def end_hold(self):
+        """Marks this rotation's trigger hotkey as physically released -- see
+        _run's own loop-continuation check and trigger_released's docstring.
+        A "once" mode rotation currently mid-hold finishes whatever pass is
+        already in progress (never interrupted mid-step just because the key
+        came up -- there's nothing to cooperatively wake, unlike stop()/
+        reset()/pause()) and then stops at its next lap-boundary check, same
+        as a plain tap-and-release always has. Harmless no-op if called while
+        not running, and never consulted at all by a "loop" mode rotation."""
+        self._hold_active = False
 
     def reset(self):
         """Immediately abandon whatever step is currently in progress, then
@@ -632,10 +649,19 @@ class RotationRunner:
         if self.on_activity:
             self.on_activity(self.rotation.name, message)
 
+    def _is_fireless(self) -> bool:
+        """True if every step in this rotation is either keyless or disabled
+        -- meaning a full pass produces no wait of any kind and would repeat
+        with zero delay if allowed to loop. Shared by _run's startup guard
+        (for "loop" mode) and its hold-continuation check (for a "once" mode
+        rotation still being held past its first pass, see end_hold's
+        docstring) -- both need to refuse spinning a CPU core with no delay
+        anywhere, whichever reason it's about to repeat for."""
+        return (not self.rotation.steps
+                or all(step.key is None or not step.enabled for step in iter_steps(self.rotation.steps)))
+
     def _run(self):
-        if self.rotation.mode == "loop" and (
-                not self.rotation.steps
-                or all(step.key is None or not step.enabled for step in iter_steps(self.rotation.steps))):
+        if self.rotation.mode == "loop" and self._is_fireless():
             # Same condition validate_rotation now rejects at save time -- kept
             # here too since a rotation can reach the runtime without ever
             # passing through it (a pre-existing file saved before that check
@@ -685,7 +711,15 @@ class RotationRunner:
                     if self._do_pause():
                         continue
                     break  # a genuine stop() arrived while paused
-                if not completed or self.rotation.mode != "loop":
+                # A "loop" rotation always continues; a "once" rotation only continues
+                # while its trigger is still being held down (see end_hold()) -- so
+                # holding a "once" rotation's hotkey makes it repeat exactly like a
+                # "loop" one, until release lets this check fall through and stop it.
+                # _is_fireless() guards the hold case the same way the startup guard
+                # above already guards "loop" mode -- a fireless rotation just runs
+                # its one normal pass and stops, hold or not, rather than spinning.
+                should_repeat = self.rotation.mode == "loop" or (self._hold_active and not self._is_fireless())
+                if not completed or not should_repeat:
                     break
                 self._lap_count += 1
                 lap_seconds = time.perf_counter() - self._lap_started_at
@@ -1081,7 +1115,24 @@ class RotationManager:
             runner.start()
         elif runner.rotation.mode == "loop":
             runner.stop()
-        # running + mode == "once": ignore, no overlapping duplicate runs
+        # running + mode == "once": ignore, no overlapping duplicate runs -- but note
+        # this is also where an OS key-repeat's extra key-down events land while the
+        # trigger hotkey is held, which is exactly what keeps a hold in progress (see
+        # trigger_released below) from being mistaken for a fresh press.
+
+    def trigger_released(self, name: str):
+        """Called when a rotation's trigger hotkey is physically released --
+        the counterpart to trigger()'s key-down. A "once" mode rotation that's
+        still running treats a *held* trigger like a "loop" rotation, repeating
+        for as long as the key stays down (see RotationRunner.end_hold's
+        docstring); this is what tells it the hold has ended, so it finishes
+        whatever pass is already in progress and then stops, same as it always
+        has for a normal tap-and-release. No-op if nothing is running, or for
+        a "loop" mode rotation (which starts/stops purely by repeated presses,
+        never by being held)."""
+        runner = self._runners.get(name)
+        if runner is not None:
+            runner.end_hold()
 
     def cancel(self, name: str):
         """Immediately stop `name` if it's running. Unlike trigger(), never

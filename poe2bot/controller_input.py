@@ -136,12 +136,15 @@ class ControllerReader:
     Linux) on its own daemon thread, dispatching a callback once per
     button-down *transition*, never once per poll/event -- so a held button
     behaves like keyboard.KEY_DOWN, firing once per physical press rather
-    than repeatedly while held."""
+    than repeatedly while held. on_button_up mirrors this for the matching
+    release transition (keyboard.KEY_UP's analogue) -- e.g. so a rotation's
+    trigger binding can tell a held button apart from a released one."""
 
     def __init__(self, index=None):
         self._index = config.CONTROLLER_INDEX if index is None else index
         self._lock = threading.Lock()
         self._down_subscribers = {}   # button_name -> list[callback]
+        self._up_subscribers = {}     # button_name -> list[callback], fired once per release transition
         self._any_subscribers = []    # list[callback(button_name)] -- for capture flows
         self._warned_disconnected = False
         if _IS_WINDOWS:
@@ -185,6 +188,16 @@ class ControllerReader:
             if subs and callback in subs:
                 subs.remove(callback)
 
+    def on_button_up(self, button_name: str, callback):
+        with self._lock:
+            self._up_subscribers.setdefault(button_name, []).append(callback)
+
+    def off_button_up(self, button_name: str, callback):
+        with self._lock:
+            subs = self._up_subscribers.get(button_name)
+            if subs and callback in subs:
+                subs.remove(callback)
+
     def on_any_button_down(self, callback):
         with self._lock:
             self._any_subscribers.append(callback)
@@ -218,14 +231,19 @@ class ControllerReader:
         mechanics above so it can be exercised directly with synthetic
         values in tests -- no real XInput/hardware needed to verify it."""
         newly_pressed = mask & ~self._prev_mask
+        newly_released = self._prev_mask & ~mask
         self._prev_mask = mask
         for name, bit in _BUTTON_BITS.items():
             if newly_pressed & bit:
                 self._dispatch(name)
+            if newly_released & bit:
+                self._dispatch_up(name)
         for name, raw in (("lt", left_trigger), ("rt", right_trigger)):
             pressed = raw >= TRIGGER_THRESHOLD
             if pressed and not self._prev_trigger[name]:
                 self._dispatch(name)
+            elif not pressed and self._prev_trigger[name]:
+                self._dispatch_up(name)
             self._prev_trigger[name] = pressed
 
     # ---- Linux/evdev backend -------------------------------------------------
@@ -349,7 +367,7 @@ class ControllerReader:
             if event.value == 1:      # key down
                 self._note_pressed(button)
             elif event.value == 0:    # key up
-                self._held.discard(button)
+                self._note_released(button)
         elif event.type == ecodes.EV_ABS:
             if event.code in _HAT_AXIS_TO_BUTTONS:
                 self._handle_hat_axis(event.code, event.value)
@@ -363,7 +381,7 @@ class ControllerReader:
                      # value repeatedly while held; must not re-release+re-press
         side_map = _HAT_AXIS_TO_BUTTONS[code]
         if previous != 0:
-            self._held.discard(side_map.get(previous))
+            self._note_released(side_map.get(previous))
         if value != 0 and value in side_map:
             self._note_pressed(side_map[value])
         self._hat_state[code] = value
@@ -375,21 +393,41 @@ class ControllerReader:
         if pressed:
             self._note_pressed(name)
         else:
-            self._held.discard(name)
+            self._note_released(name)
 
     def _note_pressed(self, button_name: str):
         if button_name not in self._held:
             self._held.add(button_name)
             self._dispatch(button_name)
 
+    def _note_released(self, button_name):
+        if button_name is None:
+            return
+        if button_name in self._held:
+            self._held.discard(button_name)
+            self._dispatch_up(button_name)
+
     # ---- shared ---------------------------------------------------------------
 
     def _handle_disconnected(self):
+        """Also fires an "up" dispatch for anything that was actively held at
+        the moment the controller drops out (unplugged, battery died, etc.)
+        -- otherwise a rotation held-triggered by one of its buttons would
+        have no way to ever learn it was "released" and would loop forever
+        with no physical button left to lift."""
         if _IS_WINDOWS:
             if self._prev_mask or any(self._prev_trigger.values()):
+                for name, bit in _BUTTON_BITS.items():
+                    if self._prev_mask & bit:
+                        self._dispatch_up(name)
+                for name, pressed in self._prev_trigger.items():
+                    if pressed:
+                        self._dispatch_up(name)
                 self._prev_mask = 0
                 self._prev_trigger = {"lt": False, "rt": False}
         else:
+            for name in list(self._held):
+                self._dispatch_up(name)
             self._held = set()
             self._hat_state = {}
         if not self._warned_disconnected:
@@ -411,6 +449,12 @@ class ControllerReader:
             cb()
         for cb in any_callbacks:
             cb(button_name)
+
+    def _dispatch_up(self, button_name: str):
+        with self._lock:
+            callbacks = list(self._up_subscribers.get(button_name, ()))
+        for cb in callbacks:
+            cb()
 
 
 _singleton = None

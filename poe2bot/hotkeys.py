@@ -171,41 +171,69 @@ class HotkeyManager:
                 handlers, rotation_name, action_key,
                 lambda n=rotation_name: action_fn(n))
 
-    def _register_action_key(self, handlers: dict, rotation_name: str, action_key: str, callback):
+    def _register_action_key(self, handlers: dict, rotation_name: str, action_key: str, on_down, on_up=None):
         """Shared machinery behind bind()/set_cancel_key()/set_reset_key()/
         set_pause_key(): all need a many-rotations-to-one-key registration, so
         all wrap keyboard.hook()/mouse.on_button() directly rather than
-        keyboard.add_hotkey(), which assumes one callback per key combo."""
+        keyboard.add_hotkey(), which assumes one callback per key combo.
+
+        `on_up` is optional and, today, only ever passed for a trigger key
+        (see RotationManager.trigger_released's docstring for why a rotation
+        needs to know when its trigger is physically released, not just
+        pressed) -- cancel/reset/pause have no use for a release, so their
+        registrations simply leave it as None."""
         if is_mouse_hotkey(action_key):
             button = mouse_button_of(action_key)
-            handler = mouse.on_button(callback, buttons=(button,), types=(mouse.DOWN,))
-            handlers[rotation_name] = ("mouse", handler)
+            down_handler = mouse.on_button(on_down, buttons=(button,), types=(mouse.DOWN,))
+            up_handler = mouse.on_button(on_up, buttons=(button,), types=(mouse.UP,)) if on_up else None
+            handlers[rotation_name] = ("mouse", down_handler, up_handler)
         elif is_controller_key(action_key):
             button = controller_button_of(action_key)
+            reader = get_controller_reader()
 
-            def on_controller_button(cb=callback):
+            def on_controller_down(cb=on_down):
                 cb()
-            get_controller_reader().on_button_down(button, on_controller_button)
-            handlers[rotation_name] = ("controller", (button, on_controller_button))
+            reader.on_button_down(button, on_controller_down)
+            up_handler = None
+            if on_up:
+                def on_controller_up(cb=on_up):
+                    cb()
+                reader.on_button_up(button, on_controller_up)
+                up_handler = (button, on_controller_up)
+            handlers[rotation_name] = ("controller", (button, on_controller_down), up_handler)
         else:
-            def on_key_event(event, cb=callback, key=action_key):
+            def on_key_event(event, cb=on_down, key=action_key):
                 if event.event_type == keyboard.KEY_DOWN and event.name == key:
                     cb()
             keyboard.hook(on_key_event)
-            handlers[rotation_name] = ("keyboard", on_key_event)
+            up_handler = None
+            if on_up:
+                def on_key_up_event(event, cb=on_up, key=action_key):
+                    if event.event_type == keyboard.KEY_UP and event.name == key:
+                        cb()
+                keyboard.hook(on_key_up_event)
+                up_handler = on_key_up_event
+            handlers[rotation_name] = ("keyboard", on_key_event, up_handler)
 
     def _unregister_action_key(self, handlers: dict, rotation_name: str):
         entry = handlers.pop(rotation_name, None)
         if entry is None:
             return
-        kind, handler = entry
+        kind, down_handler, up_handler = entry
         if kind == "mouse":
-            mouse.unhook(handler)
+            mouse.unhook(down_handler)
+            if up_handler is not None:
+                mouse.unhook(up_handler)
         elif kind == "controller":
-            button, callback = handler
+            button, callback = down_handler
             get_controller_reader().off_button_down(button, callback)
+            if up_handler is not None:
+                up_button, up_callback = up_handler
+                get_controller_reader().off_button_up(up_button, up_callback)
         else:
-            keyboard.unhook(handler)
+            keyboard.unhook(down_handler)
+            if up_handler is not None:
+                keyboard.unhook(up_handler)
 
     def _register_panic_key(self):
         # Always a keyboard key (config.PANIC_KEY, default 'f12') -- kept keyboard-only
@@ -226,7 +254,8 @@ class HotkeyManager:
         if self._enabled:
             self._register_action_key(
                 self._trigger_handlers, rotation_name, hotkey,
-                lambda n=rotation_name: self._rotation_manager.trigger(n))
+                lambda n=rotation_name: self._rotation_manager.trigger(n),
+                lambda n=rotation_name: self._rotation_manager.trigger_released(n))
         log.info(f"bound '{hotkey}' -> '{rotation_name}'")
 
     def unbind(self, rotation_name: str):
@@ -242,28 +271,33 @@ class HotkeyManager:
             self.bind(new_hotkey, rotation_name)
 
     def _action_key_specs(self):
-        """(keys dict, handlers dict, action_fn) for every rotation-scoped
-        hotkey action -- trigger, cancel, reset, pause -- in the order
-        enable_all() has always registered them. Shared by enable_all() and
-        _suspend_all_action_keys() so both stay in sync by construction
-        instead of by separately-maintained loops."""
+        """(keys dict, handlers dict, action_fn, release_fn) for every
+        rotation-scoped hotkey action -- trigger, cancel, reset, pause -- in
+        the order enable_all() has always registered them. Shared by
+        enable_all() and _suspend_all_action_keys() so both stay in sync by
+        construction instead of by separately-maintained loops. release_fn is
+        None for cancel/reset/pause, which have no use for a release event --
+        only a trigger key needs to tell a held rotation apart from a
+        released one (see RotationManager.trigger_released)."""
         return (
-            (self._trigger_keys, self._trigger_handlers, self._rotation_manager.trigger),
-            (self._cancel_keys, self._cancel_handlers, self._rotation_manager.cancel),
-            (self._reset_keys, self._reset_handlers, self._rotation_manager.reset),
-            (self._pause_keys, self._pause_handlers, self._rotation_manager.pause),
+            (self._trigger_keys, self._trigger_handlers,
+             self._rotation_manager.trigger, self._rotation_manager.trigger_released),
+            (self._cancel_keys, self._cancel_handlers, self._rotation_manager.cancel, None),
+            (self._reset_keys, self._reset_handlers, self._rotation_manager.reset, None),
+            (self._pause_keys, self._pause_handlers, self._rotation_manager.pause, None),
         )
 
     def enable_all(self):
         if self._enabled:
             return
         self._register_panic_key()
-        for keys, handlers, action_fn in self._action_key_specs():
+        for keys, handlers, action_fn, release_fn in self._action_key_specs():
             for rotation_name, key in keys.items():
                 if key:
                     self._register_action_key(
                         handlers, rotation_name, key,
-                        lambda n=rotation_name, fn=action_fn: fn(n))
+                        lambda n=rotation_name, fn=action_fn: fn(n),
+                        (lambda n=rotation_name, fn=release_fn: fn(n)) if release_fn else None)
         self._enabled = True
 
     def disable_all(self):
@@ -291,19 +325,20 @@ class HotkeyManager:
         registries, so callers must hold self._capture_lock around this too,
         not just each other."""
         if self._enabled:
-            for keys, handlers, _ in self._action_key_specs():
+            for keys, handlers, _, _ in self._action_key_specs():
                 for rotation_name in list(keys.keys()):
                     self._unregister_action_key(handlers, rotation_name)
         try:
             yield
         finally:
             if self._enabled:
-                for keys, handlers, action_fn in self._action_key_specs():
+                for keys, handlers, action_fn, release_fn in self._action_key_specs():
                     for rotation_name, key in keys.items():
                         if key:
                             self._register_action_key(
                                 handlers, rotation_name, key,
-                                lambda n=rotation_name, fn=action_fn: fn(n))
+                                lambda n=rotation_name, fn=action_fn: fn(n),
+                                (lambda n=rotation_name, fn=release_fn: fn(n)) if release_fn else None)
 
     def _attach_keyboard_capture(self, on_value):
         """Register a one-shot keyboard key-down listener that reports the
