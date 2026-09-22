@@ -30,6 +30,7 @@ from poe2bot.gui.condition_groups import ConditionGroupsMixin, GROUP_CONDITION_A
 from poe2bot.gui.hotkeys_ui import HotkeysMixin
 from poe2bot.gui.autosave import AutosaveMixin
 from poe2bot.gui.updater_ui import UpdaterMixin
+from poe2bot.gui.controller_driver_ui import ControllerDriverMixin
 from poe2bot.gui.widgets import CollapsibleSection
 from poe2bot.gui.constants import STATUS_COLORS
 
@@ -37,7 +38,8 @@ log = get_logger()
 
 
 class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
-          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, HotkeysMixin, AutosaveMixin, UpdaterMixin):
+          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, HotkeysMixin, AutosaveMixin, UpdaterMixin,
+          ControllerDriverMixin):
     def __init__(self):
         super().__init__()
         self.title("POE2 Rotation Bot")
@@ -1051,6 +1053,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         "__update_install_progress__": "_on_update_install_progress",
         "__update_install_failed__": "_on_update_install_failed",
         "__update_install_done__": "_on_update_install_done",
+        # ControllerDriverMixin (poe2bot/gui/controller_driver_ui.py) -- Windows only.
+        "__vigembus_install_failed__": "_on_vigembus_install_failed",
+        "__vigembus_install_done__": "_on_vigembus_install_done",
     }
 
     def _poll_status_queue(self):

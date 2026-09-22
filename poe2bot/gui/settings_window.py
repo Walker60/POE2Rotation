@@ -59,6 +59,17 @@ class SettingsWindow(tk.Toplevel):
                   text="Which labels/layout every controller button map (the step editor's \"Map "
                        "Controller Button\" and each hotkey row's \"Map...\") shows -- doesn't change "
                        "which controller is actually read.").pack(anchor="w", pady=(4, 0))
+        if sys.platform == "win32":
+            self._vigembus_btn = ttk.Button(
+                controller_frame, text="Install ViGEmBus Driver...",
+                command=master._on_install_vigembus_clicked)
+            self._vigembus_btn.pack(fill="x", pady=(8, 0))
+            ttk.Label(controller_frame, foreground="gray", wraplength=320, justify="left",
+                      text="Needed for a step to press a virtual controller button -- a "
+                           "from-source run already installs this as a side effect of `pip install "
+                           "-r requirements.txt`; this button covers the packaged .exe build, which "
+                           "has no such install step of its own. Safe to click even if it's already "
+                           "installed.").pack(anchor="w", pady=(4, 0))
 
         appearance_frame = ttk.LabelFrame(container, text="Appearance", padding=8)
         appearance_frame.pack(fill="x", pady=(8, 0))
@@ -164,6 +175,14 @@ class SettingsWindow(tk.Toplevel):
         whatever's mid-flight when it's hidden needs a stable handle to
         keep updating."""
         self._update_btn.config(state=state, text=text)
+
+    def set_vigembus_button_state(self, state: str, text: str):
+        """Same idea as set_update_button_state above, for ControllerDriverMixin
+        (poe2bot/gui/controller_driver_ui.py)'s "Install ViGEmBus Driver..."
+        button -- which only exists at all on Windows, see this window's own
+        Controller section."""
+        if sys.platform == "win32":
+            self._vigembus_btn.config(state=state, text=text)
 
     def _build_advanced_section(self, container):
         """The four settings poe2bot/config.py otherwise only reads from

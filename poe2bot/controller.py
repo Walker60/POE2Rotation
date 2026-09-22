@@ -12,9 +12,22 @@ else in this codebase) -- merely importing it connects to the ViGEmBus
 driver and raises if that driver isn't installed/running, which would
 break every keyboard-only user who has never touched a controller-encoded
 step. _get_pad() defers the import to first real use.
+
+On Windows, `pip install -r requirements.txt` (a from-source run) installs
+the ViGEmBus driver itself as a side effect, via vgamepad's own post-install
+hook (see README's Controller output section) -- but the packaged Windows
+.exe build never goes through `pip install` on the end user's machine at
+all, so that never happens there. find_vigembus_installer()/install_vigembus()
+below exist so the app can offer the same one-time driver install itself
+(see gui/updater_ui.py's sibling UpdaterMixin for the analogous "Settings
+button -> background thread -> result dialog" pattern this follows).
 """
+import importlib.util
+import platform
+import subprocess
 import sys
 import threading
+from pathlib import Path
 
 from poe2bot.log_setup import get_logger
 
@@ -70,6 +83,82 @@ _pad = None
 _vg = None  # the imported vgamepad module, stashed once import succeeds
 
 
+def find_vigembus_installer() -> "Path | None":
+    """Locates the ViGEmBus driver installer .msi vgamepad ships alongside
+    itself (win/vigem/install/<x64|x86>/ViGEmBusSetup_<arch>.msi), without
+    ever importing vgamepad -- importing it is exactly the thing that raises
+    when the driver isn't installed (see _get_pad() above), so it can't be
+    used to locate its own fix. None on non-Windows (there's no separate
+    driver to install there -- vgamepad's Linux backend talks to the kernel's
+    uinput directly), or if it can't be found either way below.
+
+    Two distinct places to look, since vgamepad's code and its data files
+    (this .msi included) don't necessarily live under the same root:
+    - Frozen (the packaged Windows build): packaging/windows.spec's
+      collect_data_files("vgamepad") preserves vgamepad's own internal
+      layout under a "vgamepad/" prefix, rooted at sys._MEIPASS -- the
+      directory PyInstaller actually extracts/exposes bundled data files
+      under at runtime, regardless of its onedir layout version.
+    - From source: vgamepad's own pip-installed package directory, found via
+      importlib.util.find_spec (which only locates a module on disk --
+      unlike an actual `import`, it never executes the package's code)."""
+    if sys.platform != "win32":
+        return None
+    arch = "x64" if platform.architecture()[0] == "64bit" else "x86"
+    tail = Path("win") / "vigem" / "install" / arch / f"ViGEmBusSetup_{arch}.msi"
+
+    candidates = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "vgamepad" / tail)
+    else:
+        spec = importlib.util.find_spec("vgamepad")
+        if spec and spec.submodule_search_locations:
+            candidates.append(Path(list(spec.submodule_search_locations)[0]) / tail)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def install_vigembus():
+    """Runs vgamepad's bundled ViGEmBus installer -- the same .msi a
+    from-source `pip install -r requirements.txt` already runs automatically
+    as a post-install step (see README's Controller output section), for
+    when that never happened (the packaged Windows build, which has no pip
+    step on the end user's machine at all -- see gui/updater_ui.py's sibling
+    UpdaterMixin for how Settings surfaces this).
+
+    BLOCKING -- msiexec doesn't return until the whole install finishes,
+    including the UAC consent prompt Windows Installer shows on its own for
+    a driver package (the exact one-time prompt README's Controller output
+    section already documents for the from-source path); always call this
+    from a background thread, never the Tk thread. Safe to re-run even if
+    ViGEmBus is already installed -- Windows Installer just detects the
+    existing install and no-ops (or offers a repair).
+
+    Raises RuntimeError (never lets a raw subprocess/OSError escape) if the
+    installer can't be located at all, or if msiexec itself reports failure
+    -- 3010 ("success, reboot required") counts as success, everything else
+    non-zero doesn't."""
+    installer = find_vigembus_installer()
+    if installer is None:
+        raise RuntimeError(
+            "Could not find vgamepad's bundled ViGEmBus installer. Installing it manually from "
+            "https://github.com/ViGEm/ViGEmBus/releases (or reinstalling/redownloading poe2bot) "
+            "should fix this.")
+    try:
+        result = subprocess.run(["msiexec", "/i", str(installer), "/qn"], capture_output=True, text=True)
+    except OSError as e:
+        raise RuntimeError(f"Could not launch msiexec: {e}") from e
+    if result.returncode not in (0, 3010):
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            f"msiexec exited with code {result.returncode}" + (f": {detail}" if detail else ""))
+
+
 def _get_pad():
     """Lazily creates the one shared virtual controller for this process.
     Deliberately never cached as a permanent failure -- a user who installs
@@ -83,9 +172,22 @@ def _get_pad():
             try:
                 import vgamepad as vg
             except Exception as e:
+                # The single most common cause by far (vgamepad's own package
+                # is always present -- it's a hard requirements.txt dependency,
+                # bundled into the frozen build too) is a missing/not-running
+                # ViGEmBus driver: importing vgamepad on Windows eagerly
+                # connects to it (see vgamepad's own VBus.__init__), so a
+                # missing driver surfaces as an import failure here, not at
+                # VX360Gamepad() construction below, however unintuitive that
+                # split reads. install_vigembus() above is the fix on Windows;
+                # a genuinely missing/broken vgamepad package is the only
+                # other realistic cause, on any platform.
+                fix = ("Windows > Settings > Controller > Install ViGEmBus Driver... "
+                       "should fix this (or run it manually from "
+                       "https://github.com/ViGEm/ViGEmBus/releases)." if sys.platform == "win32" else
+                       "Make sure it's installed (pip install vgamepad).")
                 raise ControllerUnavailable(
-                    "vgamepad could not be imported -- install it (pip install vgamepad) "
-                    f"and make sure the ViGEmBus driver it installs is running. Details: {e}") from e
+                    f"vgamepad could not be imported -- {fix} Details: {e}") from e
             try:
                 pad = vg.VX360Gamepad()
             except Exception as e:

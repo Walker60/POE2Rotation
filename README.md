@@ -36,14 +36,24 @@ seem to work at all, try running from an elevated terminal first to rule this ou
 ### Controller output
 
 A step can press a button on a virtual Xbox 360 controller instead of a keyboard key
-(see "Controller-encoded steps" below). This works via `vgamepad`, which — as a side
-effect of `pip install -r requirements.txt` — installs the ViGEmBus driver (a real
-Windows kernel driver, not just a Python package). Expect one UAC/admin prompt during
-that install; it's one-time and unrelated to whether the bot itself needs to run
-elevated (see the keyboard-hook note above — that's a separate concern). The driver is
-properly signed and works fine with Secure Boot and driver-signature enforcement both
-enabled — no settings need to be changed for it. (If you go looking for "ViGEmBus"
-online, note the upstream project renamed in 2023; functionally unaffected either way.)
+(see "Controller-encoded steps" below). This works via `vgamepad`, which needs the
+ViGEmBus driver (a real Windows kernel driver, not just a Python package) installed
+and running. Running from source, `pip install -r requirements.txt` installs it
+automatically as a side effect — expect one UAC/admin prompt during that install; it's
+one-time and unrelated to whether the bot itself needs to run elevated (see the
+keyboard-hook note above — that's a separate concern). The driver is properly signed
+and works fine with Secure Boot and driver-signature enforcement both enabled — no
+settings need to be changed for it. (If you go looking for "ViGEmBus" online, note the
+upstream project renamed in 2023; functionally unaffected either way.)
+
+**Using the pre-built .exe instead?** There's no `pip install` step on your machine at
+all, so that automatic driver install never happens — the first controller-encoded step
+you fire will fail with an error like "vgamepad could not be imported ... Details:
+VIGEM_ERROR_BUS_NOT_FOUND" (ViGEmBus's own error code for "the driver isn't installed").
+Fix it from inside the app instead: **Settings → Controller → Install ViGEmBus
+Driver...** (also a one-time UAC/admin prompt) — it runs the very same installer
+`vgamepad` ships with itself, just without needing a separate `pip install` to trigger
+it. Safe to click even if you're not sure whether it's already installed.
 
 ## Pre-built Windows executable and auto-update
 
