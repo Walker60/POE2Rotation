@@ -200,21 +200,30 @@ def _get_pad():
 
 
 def warm_up():
-    """Best-effort, silent early creation of the virtual controller --
-    call once at app startup, Linux only. On the Steam Deck, PoE2 (via
-    Proton) and Steam Input typically enumerate joysticks once, at their
-    own startup, and treat anything that appears afterward as a hot-plug
-    event they may never notice -- so a pad that isn't created until a
-    rotation's first controller-encoded press can go completely unseen by
-    the game even though poe2bot fired it correctly. Creating it here
-    instead gives it a chance to already be present by the time PoE2/Steam
-    Input go looking for controllers. Never called on Windows: ViGEmBus
-    has no such enumeration-order issue, and unlike Linux this would show
-    every keyboard-only user a driver-missing failure on every single
-    startup instead of only if/when they ever press a controller-encoded
-    step."""
-    if sys.platform == "win32":
-        return
+    """Best-effort, silent early creation of the virtual controller -- see
+    gui/app.py's own call site for exactly when this gets called on each
+    platform, and why.
+
+    On the Steam Deck, PoE2 (via Proton) and Steam Input typically
+    enumerate joysticks once, at their own startup, and treat anything that
+    appears afterward as a hot-plug event they may never notice -- so a pad
+    that isn't created until a rotation's first controller-encoded press
+    can go completely unseen by the game even though poe2bot fired it
+    correctly. Creating it here instead gives it a chance to already be
+    present by the time PoE2/Steam Input go looking for controllers.
+
+    Windows/XInput hot-plug detection is normally far more reliable than
+    that, but the exact same class of problem reappears whenever Steam
+    Input is active for the game on desktop Windows too -- Steam Input
+    itself only detects controllers present at ITS OWN startup, the same
+    as Proton/Steam Input on the Deck, and a virtual pad created after the
+    game (and Steam) already launched can go unseen the same way. Unlike
+    Linux, this is never called unconditionally on Windows, though -- app.py
+    only calls it there once the user has actually switched Active Device
+    to Controller, so a keyboard-only Windows user is never handed an
+    unasked-for virtual Xbox controller device (and, if ViGEmBus isn't
+    installed yet, an unasked-for driver dependency) just for starting the
+    app."""
     try:
         _get_pad()
     except Exception as e:

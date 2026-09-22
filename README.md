@@ -55,6 +55,29 @@ Driver...** (also a one-time UAC/admin prompt) — it runs the very same install
 `vgamepad` ships with itself, just without needing a separate `pip install` to trigger
 it. Safe to click even if you're not sure whether it's already installed.
 
+**Virtual controller created, ViGEmBus running, but PoE2 still doesn't react to a
+controller-encoded step?** The most likely cause on desktop Windows (this isn't Steam
+Deck-specific) is **Steam Input**: if it's enabled for PoE2 (Steam → Settings →
+Controller → General Controller Settings, or PoE2's own Properties → Controller), Steam
+intercepts every XInput controller system-wide and only forwards what it detected at
+its own startup to the actual game — the same class of problem as the Steam Deck's own
+Steam Input section below, just Windows's version of it. Two ways to fix it:
+
+- **Disable Steam Input for PoE2 specifically** (PoE2 → Properties → Controller →
+  disable/override Steam Input for this game) so PoE2 reads the virtual controller
+  directly — it has native XInput controller support, so this needs nothing else.
+- Or make sure the virtual controller already exists *before* PoE2 (and Steam) start:
+  poe2bot creates it as soon as the app opens if **Active Device** is already set to
+  **Controller** (Settings → Active Device), rather than waiting for a rotation's first
+  controller-encoded press — see `poe2bot/controller.py`'s `warm_up()`. Switching *into*
+  Controller mode mid-session (Settings, or a rotation's own device toggle) does the
+  same thing on the spot, for exactly this "game/Steam Input already running" case.
+
+Either way, first confirm the virtual controller works at the OS level at all —
+Control Panel → Devices and Printers → "Set up USB game controllers" (`joy.cpl`) should
+show it reacting to a fired button — before assuming it's a PoE2/Steam Input problem
+rather than a ViGEmBus one.
+
 ## Pre-built Windows executable and auto-update
 
 Besides running from source (`python main.py` above), every push to this repo's

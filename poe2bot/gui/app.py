@@ -1,5 +1,6 @@
 import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -71,12 +72,6 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         config.CONTROLLER_INDEX = self.controller_index
         config.REQUIRE_GAME_FOCUS = self.require_game_focus
 
-        # Linux only (a no-op on Windows) -- see controller.warm_up's docstring
-        # for why this needs to happen this early rather than waiting for a
-        # rotation's first controller-encoded press. Threaded so a slow/failed
-        # uinput setup never delays the window actually appearing.
-        threading.Thread(target=controller.warm_up, daemon=True).start()
-
         self.status_queue = queue.Queue()
         self.activity_queue = queue.Queue()
         self.activity_window = None  # ActivityWindow, created lazily on first STATUS_RUNNING
@@ -93,6 +88,15 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.active_folder = state["active_folder"]  # None = "(All Folders)" -- no scoping restriction
         self.active_device = state["active_device"]  # "keyboard" or "controller"
         self.controller_type = state["controller_type"]  # "xbox" or "steam_deck" -- see controller_layouts.py
+
+        # See controller.warm_up's own docstring for the hot-plug-timing problem this
+        # avoids. Always attempted on Linux (harmless/silent if it fails); on Windows,
+        # only once Active Device is already Controller, so a keyboard-only user is
+        # never handed an unasked-for virtual Xbox controller device (or ViGEmBus
+        # dependency) just for starting the app. Threaded so a slow/failed setup never
+        # delays the window actually appearing.
+        if sys.platform != "win32" or self.active_device == "controller":
+            threading.Thread(target=controller.warm_up, daemon=True).start()
 
         self.rotations = {}          # name -> Rotation, mirrors what's on disk
         self.editing_original_name = None    # name of rotation being edited, or None if new/unsaved
@@ -294,6 +298,13 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             self._load_rotation_into_form(self.rotations[self.editing_original_name])
         self._persist_app_state()
         self._refresh_rotation_tree()
+        # Same hot-plug-timing reasoning as __init__'s own warm_up() call (see
+        # controller.warm_up's docstring) -- switching into Controller mode mid-session,
+        # with the game already running, is exactly the scenario that call at startup
+        # can't cover on its own. _get_pad() is already cached, so this is an instant
+        # no-op if __init__ (Linux, or Windows already in Controller mode) got there first.
+        if self.active_device == "controller" and sys.platform == "win32":
+            threading.Thread(target=controller.warm_up, daemon=True).start()
 
     def _on_require_game_focus_changed(self):
         """Live -- config.REQUIRE_GAME_FOCUS is read fresh by
