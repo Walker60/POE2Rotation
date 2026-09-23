@@ -249,6 +249,26 @@ bind" mode) and fire a controller-encoded step via the step editor's **Test
 Run** button (not a physical Deck button) while it's listening — whichever
 controller reacts is poe2bot's.
 
+**Confirmed full working sequence on real Deck hardware** — this exact order
+matters:
+
+1. Launch PoE2 (through Steam) and log all the way in (character select or
+   further) **before** starting poe2bot.
+2. Start poe2bot (as a Steam shortcut — see below for why that matters).
+3. In PoE2's own Controls/Input settings, switch the active controller to
+   poe2bot's pad (see above for how to tell which one is which).
+
+Doing it in this order avoided a further problem entirely: starting poe2bot
+(and so creating its virtual pad) *before* PoE2 had fully logged in made PoE2
+see two controller-shaped devices already active at that early checkpoint and
+drop into local co-op mode — trying to fix that after the fact (e.g.
+disabling Steam Input's synthesized device in Wine via
+`protontricks <PoE2's App ID> winecfg`'s Controllers tab) turned out to be
+unnecessary once poe2bot was simply started *after* login instead. If you
+still land in co-op mode following the order above, that Wine-level disable
+is the next thing to try, but it wasn't needed on the hardware this was
+confirmed against.
+
 If a button still isn't recognized in-game even after confirming you're
 reading from the right controller in PoE2's own settings:
 
