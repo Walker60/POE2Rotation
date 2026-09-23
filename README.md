@@ -193,21 +193,40 @@ a real Xbox 360 controller's identity (BUS_USB, VID 0x045E, PID 0x028E,
 matching what Linux's own `xpad` driver reports for a genuine one) the moment
 it's created — no manual step needed, this applies automatically on Linux.
 
-If a button still isn't recognized in-game after updating to a build with
-this fix:
+**Confirmed on real Deck hardware**: with that identity fix in place, the pad
+shows up correctly (`cat /proc/bus/input/devices` — look for an "Xbox 360
+Controller" entry with `Vendor=045e Product=028e`) and PoE2 genuinely does see
+it, but doesn't necessarily *default* to reading from it. Steam Input creates
+its own virtual gamepad to represent the Deck's built-in controls (a separate
+device, `Vendor=28de Product=11ff`, typically named something like "Microsoft
+X-Box 360 pad 0") — since that one exists continuously from Steam's own
+startup, well before poe2bot ever creates its own pad, PoE2 generally landed
+on IT as "Controller 1", leaving poe2bot's own pad as "Controller 2" (or
+later) in PoE2's own controller-selection setting. **Fix**: in PoE2's own
+Controls/Input settings, switch the controller PoE2 reads from to the other
+detected one (poe2bot's, not Steam's) — a two-second in-game setting change,
+not a poe2bot bug or a Proton/SDL issue. If you're not sure which is which,
+open PoE2's control-remapping screen (put an action into "press a button to
+bind" mode) and fire a controller-encoded step via the step editor's **Test
+Run** button (not a physical Deck button) while it's listening — whichever
+controller reacts is poe2bot's.
+
+If a button still isn't recognized in-game even after confirming you're
+reading from the right controller in PoE2's own settings:
 
 - Confirm the pad exists *at all* at the OS level first: `cat
-  /proc/bus/input/devices` (look for an "Xbox 360"-style entry, now with
+  /proc/bus/input/devices` (look for the "Xbox 360 Controller" entry, now with
   `Vendor=045e Product=028e`) or `evtest`/`jstest` right after launching
   poe2bot. If it's missing here, this is a `/dev/uinput` permissions problem
   (see above), not an SDL/Proton one.
-- If it's present at the OS level but PoE2 still doesn't react, check whether
-  **Steam Input** is the layer swallowing it: Steam Input generally only
-  manages devices it saw when Steam itself started, so try restarting Steam
-  (or the whole Deck) with poe2bot's virtual pad already present, or
-  temporarily disabling Steam Input for PoE2's non-Steam shortcut (Properties
-  → Controller) to see if input reaches the game at all with Steam Input out
-  of the way entirely.
+- If it's present at the OS level but PoE2 still doesn't react at all (not
+  even in the control-remapping screen's "press a button" listening mode),
+  check whether **Steam Input** is the layer swallowing it: Steam Input
+  generally only manages devices it saw when Steam itself started, so try
+  restarting Steam (or the whole Deck) with poe2bot's virtual pad already
+  present, or temporarily disabling Steam Input for PoE2's non-Steam shortcut
+  (Properties → Controller) to see if input reaches the game at all with
+  Steam Input out of the way entirely.
 
 Recalibrate every rotation's image/pixel conditions fresh on the Deck's own
 display — a template captured on a Windows PC's screen won't match the Deck's
