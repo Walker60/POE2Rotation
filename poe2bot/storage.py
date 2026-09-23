@@ -30,6 +30,37 @@ def _folder_parts(folder: str) -> list:
     return parts
 
 
+def folder_dir_for(folder: str) -> str:
+    """The real on-disk directory `folder` (a '/'-separated group path) lives
+    in, under ROTATIONS_DIR -- shared by path_for below and create_folder/
+    list_all_folders, since folders are just directories, not their own
+    tracked entity."""
+    return os.path.join(config.ROTATIONS_DIR, *_folder_parts(folder))
+
+
+def create_folder(folder: str) -> None:
+    """Creates folder's on-disk directory (and any missing parent folders)
+    even if it has no rotations in it yet -- lets the GUI's New Folder button
+    make a folder show up in the tree before anything is saved into it.
+    A no-op if it already exists."""
+    os.makedirs(folder_dir_for(folder), exist_ok=True)
+
+
+def list_all_folders() -> set:
+    """Every folder path that currently exists under ROTATIONS_DIR, at any
+    depth, whether or not it holds any rotation files -- unlike
+    _iter_rotation_files, which only ever surfaces a folder implicitly, by way
+    of a rotation file inside it. Lets the GUI show an empty folder (created
+    via create_folder, or left behind some other way) in the rotation tree."""
+    os.makedirs(config.ROTATIONS_DIR, exist_ok=True)
+    folders = set()
+    for dirpath, _dirnames, _filenames in os.walk(config.ROTATIONS_DIR):
+        rel_dir = os.path.relpath(dirpath, config.ROTATIONS_DIR)
+        if rel_dir != ".":
+            folders.add(rel_dir.replace(os.sep, "/"))
+    return folders
+
+
 def path_for(name: str, folder: str = "") -> str:
     """Where `name` in `folder` actually lives on disk. Public (not `_path_for`)
     because callers outside this module need it too -- e.g. the GUI's save
@@ -37,7 +68,7 @@ def path_for(name: str, folder: str = "") -> str:
     different display names that sanitize to the same file (see _slugify:
     it folds case and punctuation, so "Fire Ball" and "Fire-Ball" collide
     here even though they're clearly different names to a human)."""
-    return os.path.join(config.ROTATIONS_DIR, *_folder_parts(folder), f"{_slugify(name)}.json")
+    return os.path.join(folder_dir_for(folder), f"{_slugify(name)}.json")
 
 
 def _iter_rotation_files():

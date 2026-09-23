@@ -428,7 +428,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
 
     def _build_rotation_list_panel(self):
         """The left-hand column: Active Folder scope combo, the name filter,
-        the rotation/folder tree itself, and the New/Copy/Delete buttons."""
+        the rotation/folder tree itself, and the New Folder/New Rotation/
+        Copy/Delete buttons."""
         left = ttk.Frame(self, padding=8)
         left.pack(side="left", fill="y")
 
@@ -464,10 +465,15 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self.rotation_tree.tag_configure("rotation_disabled", foreground="gray")
         self._folder_nodes = {}   # folder path -> tree item id, rebuilt each _refresh_rotation_tree()
 
-        btns = ttk.Frame(left)
-        btns.pack(fill="x", pady=4)
-        ttk.Button(btns, text="New", command=self._new_rotation).pack(
+        new_btns = ttk.Frame(left)
+        new_btns.pack(fill="x", pady=(4, 2))
+        ttk.Button(new_btns, text="New Folder", command=self._new_folder).pack(
             side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(new_btns, text="New Rotation", command=self._new_rotation).pack(
+            side="left", expand=True, fill="x")
+
+        btns = ttk.Frame(left)
+        btns.pack(fill="x", pady=(0, 4))
         ttk.Button(btns, text="Copy", command=self._copy_rotation).pack(
             side="left", expand=True, fill="x", padx=(0, 4))
         ttk.Button(btns, text="Delete", style=theme.DANGER_BUTTON_STYLE,
@@ -526,15 +532,16 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
     def _build_editor_scroll_area(self, right: ttk.Frame) -> ttk.Frame:
         """The scrollable body every section below (hotkeys, the steps list,
         step fields, conditions) packs into -- together they can add up to
-        more vertical space than the window has, and a Canvas + Scrollbar is
+        more space (vertically, and horizontally on a narrow/small screen --
+        e.g. the Steam Deck) than the window has, and a Canvas + Scrollbars is
         the standard Tk way to make an arbitrary stack of widgets scrollable
         (ttk has no native scrollable frame). Name/Folder/Mode stay outside
         this canvas (built by _build_rotation_form_header) so they're always
         visible. Returns scroll_body, the frame every later section packs
         into."""
         # Everything below (hotkeys, the steps list, step actions/fields, and
-        # conditions) can add up to more vertical space than the window has --
-        # a Canvas + Scrollbar is the standard Tk way to make an arbitrary
+        # conditions) can add up to more space than the window has --
+        # a Canvas + Scrollbars is the standard Tk way to make an arbitrary
         # stack of widgets scrollable (ttk has no native scrollable frame).
         # Name/Folder/Mode above stay outside this canvas so they're always visible.
         scroll_container = ttk.Frame(right)
@@ -545,10 +552,16 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         editor_canvas = tk.Canvas(
             scroll_container, highlightthickness=0, bd=0, bg=ttk.Style().lookup("TFrame", "background"))
         self.editor_canvas = editor_canvas
-        editor_scroll = ttk.Scrollbar(scroll_container, orient="vertical", command=editor_canvas.yview)
-        editor_canvas.configure(yscrollcommand=editor_scroll.set)
+        editor_vscroll = ttk.Scrollbar(scroll_container, orient="vertical", command=editor_canvas.yview)
+        editor_hscroll = ttk.Scrollbar(scroll_container, orient="horizontal", command=editor_canvas.xview)
+        editor_canvas.configure(yscrollcommand=editor_vscroll.set, xscrollcommand=editor_hscroll.set)
+        # Packed in this order (scrollbars claiming their strips of the cavity
+        # before the canvas fills what's left) so they land flush against the
+        # right/bottom edges instead of leaving a gap in that corner -- same
+        # reasoning as _build_bottom_bar's own packing-order comment.
+        editor_vscroll.pack(side="right", fill="y")
+        editor_hscroll.pack(side="bottom", fill="x")
         editor_canvas.pack(side="left", fill="both", expand=True)
-        editor_scroll.pack(side="right", fill="y")
         scroll_body = ttk.Frame(editor_canvas)
         scroll_window = editor_canvas.create_window((0, 0), window=scroll_body, anchor="nw")
 
@@ -557,19 +570,33 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         scroll_body.bind("<Configure>", _on_scroll_body_configure)
 
         def _on_editor_canvas_configure(event):
-            # Keeps scroll_body (and everything packed fill="x" inside it) the
-            # same width as the visible canvas, instead of shrink-wrapping to
-            # its widest child -- otherwise fill="x" rows would have nothing
-            # meaningful to fill against.
-            editor_canvas.itemconfigure(scroll_window, width=event.width)
+            # Stretches scroll_body (and everything packed fill="x" inside it)
+            # to fill the visible canvas width, same as before -- but never
+            # shrinks it below its own natural required width, so on a window
+            # too narrow for its widest row (e.g. the Skill Steps columns) that
+            # row instead overflows off the right edge and becomes reachable
+            # via editor_hscroll/Shift+MouseWheel, rather than being silently
+            # squeezed and clipped.
+            width = max(event.width, scroll_body.winfo_reqwidth())
+            editor_canvas.itemconfigure(scroll_window, width=width)
         editor_canvas.bind("<Configure>", _on_editor_canvas_configure)
 
         def _on_editor_mousewheel(event):
             editor_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _on_editor_shift_mousewheel(event):
+            editor_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
         # Bound/unbound on hover (not bind_all for the app's lifetime) so scrolling
         # over the rotation list or the steps tree's own scrollbar isn't hijacked.
-        editor_canvas.bind("<Enter>", lambda _e: editor_canvas.bind_all("<MouseWheel>", _on_editor_mousewheel))
-        editor_canvas.bind("<Leave>", lambda _e: editor_canvas.unbind_all("<MouseWheel>"))
+        def _bind_editor_wheel(_e):
+            editor_canvas.bind_all("<MouseWheel>", _on_editor_mousewheel)
+            editor_canvas.bind_all("<Shift-MouseWheel>", _on_editor_shift_mousewheel)
+
+        def _unbind_editor_wheel(_e):
+            editor_canvas.unbind_all("<MouseWheel>")
+            editor_canvas.unbind_all("<Shift-MouseWheel>")
+        editor_canvas.bind("<Enter>", _bind_editor_wheel)
+        editor_canvas.bind("<Leave>", _unbind_editor_wheel)
         return scroll_body
 
     def _build_hotkeys_section(self, scroll_body: ttk.Frame):

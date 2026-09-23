@@ -69,6 +69,15 @@ class RotationListMixin:
                 parent_id, tk.END, iid=f"rotation:{name}", text=f"{name}{shared_suffix}",
                 values=(status_text,), tags=tags)
 
+        # Folders with no rotations in them yet (e.g. just created via New
+        # Folder) aren't reachable through the loop above -- it only ever
+        # visits a folder by way of a rotation inside it. Skipped while
+        # filtering: an empty folder can never contain a name match, so it
+        # would only ever clutter a filtered view, never usefully appear in one.
+        if not filter_text:
+            for folder_path in sorted(storage.list_all_folders()):
+                ensure_folder_node(folder_path)
+
         # Keeps the Active Folder combobox's options current with whatever folders
         # actually exist -- called after every rotation-set mutation (add/delete/
         # move/rename/copy), so this is the one place that needs to stay in sync.
@@ -93,6 +102,16 @@ class RotationListMixin:
         selection are ignored), for actions that support multi-select."""
         return [item_id[len("rotation:"):] for item_id in self.rotation_tree.selection()
                 if item_id.startswith("rotation:")]
+
+    def _selected_folder_path(self):
+        """The folder path of the single currently-selected folder node, or
+        None if nothing, a rotation, or more than one item is selected --
+        used by _new_rotation to auto-fill Folder from whatever folder the
+        user was browsing when they clicked New Rotation."""
+        selection = self.rotation_tree.selection()
+        if len(selection) != 1 or not selection[0].startswith("folder:"):
+            return None
+        return selection[0][len("folder:"):]
 
     def _on_select_rotation(self, _event):
         name = self._selected_rotation_name()
@@ -274,10 +293,37 @@ class RotationListMixin:
         # App.__init__). Safe to fix up afterward: nothing between
         # _load_rotation_into_form returning and the reassignment below runs
         # any Tk callback that could observe the transient wrong value.
-        self._load_rotation_into_form(Rotation(name="New Rotation"))
+        # folder defaults to whatever folder was selected in the tree (if
+        # any), so starting a new rotation from inside a folder doesn't
+        # require re-typing/re-picking that same folder by hand.
+        folder = self._selected_folder_path() or ""
+        self._load_rotation_into_form(Rotation(name="New Rotation", folder=folder))
         self.editing_original_name = None
         with self._autosave_suppressed():
             self.rotation_tree.selection_remove(*self.rotation_tree.selection())
+
+    def _new_folder(self):
+        """Creates an on-disk (but still rotation-less) folder and shows it in
+        the tree, so it's there to pick from (or auto-fill from -- see
+        _new_rotation) before anything has actually been saved into it yet."""
+        initial = self._selected_folder_path() or ""
+        new_path = messagebox.askstring(
+            "New Folder", "Folder path:", initialvalue=initial, parent=self)
+        if new_path is None:
+            return
+        new_path = new_path.strip().strip("/")
+        if not new_path:
+            return
+        problem = folder_path_problem(new_path)
+        if problem:
+            messagebox.showerror("Invalid folder", problem)
+            return
+        storage.create_folder(new_path)
+        self._refresh_rotation_tree()
+        item_id = f"folder:{new_path}"
+        if self.rotation_tree.exists(item_id):
+            self.rotation_tree.see(item_id)
+            self.rotation_tree.selection_set(item_id)
 
     def _copy_rotation(self):
         name = self._selected_rotation_name()
