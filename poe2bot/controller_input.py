@@ -25,6 +25,13 @@ lifecycle) is the WRITING half -- emulating a virtual controller via
 vgamepad (ViGEmBus on Windows, uinput/evdev on Linux). The two are never
 assumed to be the same device/slot on purpose -- see poe2bot/config.py's
 CONTROLLER_INDEX.
+
+snapshot() below exists specifically for controller.py's passthrough mode
+(see its own module docstring): a point-in-time read of EVERY button, both
+trigger depths, and both analog sticks at once -- richer than
+on_button_down/up's discrete press/release transitions, which were only
+ever designed for hotkey triggering, not for continuously mirroring a
+real controller's full state onto a virtual one.
 """
 import select
 import sys
@@ -77,6 +84,7 @@ if _IS_WINDOWS:
         "start": 0x0010, "back": 0x0020, "ls": 0x0040, "rs": 0x0080,
         "lb": 0x0100, "rb": 0x0200, "a": 0x1000, "b": 0x2000, "x": 0x4000, "y": 0x8000,
     }
+    _ALL_BUTTON_NAMES = frozenset(_BUTTON_BITS)
 else:
     # Soft/lazy, mirroring poe2bot/focus.py's python-xlib handling: evdev is a
     # Linux-only extra (see requirements.txt), never importable on Windows,
@@ -121,6 +129,17 @@ else:
 
     _TRIGGER_AXES = {ecodes.ABS_Z: "lt", ecodes.ABS_RZ: "rt"} if evdev is not None else {}
 
+    # (side, axis) -- side is "left"/"right", axis is "x"/"y". Only used by
+    # snapshot()'s passthrough support (see module docstring); the
+    # discrete on_button_down/up hotkey path never cared about analog
+    # stick position at all.
+    _STICK_AXES = {
+        ecodes.ABS_X: ("left", "x"), ecodes.ABS_Y: ("left", "y"),
+        ecodes.ABS_RX: ("right", "x"), ecodes.ABS_RY: ("right", "y"),
+    } if evdev is not None else {}
+
+    _ALL_BUTTON_NAMES = frozenset(_KEY_CODE_TO_BUTTON.values())
+
     # A device only needs to report ONE of these to be treated as
     # "gamepad-like" by _candidate_gamepad_paths -- BTN_SOUTH alone (the
     # original, narrower check) would miss a real controller/virtual pad
@@ -129,6 +148,20 @@ else:
         ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_NORTH, ecodes.BTN_WEST,
         ecodes.BTN_GAMEPAD, ecodes.BTN_THUMBL, ecodes.BTN_THUMBR, ecodes.BTN_TRIGGER,
     } if evdev is not None else set()
+
+
+class ControllerSnapshot:
+    """A point-in-time read of a controller's ENTIRE state -- see
+    ControllerReader.snapshot(). Neutral (every button False, both
+    triggers 0, both sticks centered) if nothing is connected."""
+    __slots__ = ("buttons", "lt", "rt", "left_stick", "right_stick")
+
+    def __init__(self, buttons, lt=0, rt=0, left_stick=(0.0, 0.0), right_stick=(0.0, 0.0)):
+        self.buttons = buttons          # dict[str, bool], one entry per _ALL_BUTTON_NAMES
+        self.lt = lt                    # 0-255 (analog depth, not just the on/off TRIGGER_THRESHOLD test)
+        self.rt = rt                    # 0-255
+        self.left_stick = left_stick    # (x, y), each -1.0..1.0 -- positive y = pushed up
+        self.right_stick = right_stick  # (x, y), each -1.0..1.0 -- positive y = pushed up
 
 
 class ControllerReader:
@@ -147,6 +180,13 @@ class ControllerReader:
         self._up_subscribers = {}     # button_name -> list[callback], fired once per release transition
         self._any_subscribers = []    # list[callback(button_name)] -- for capture flows
         self._warned_disconnected = False
+        # trigger_raw/stick_raw (0-255 / -1.0..1.0, see ControllerSnapshot) are new
+        # state snapshot() reads that on_button_down/up never needed -- populated
+        # on both platforms, only ever read/written under self._lock (unlike
+        # _prev_mask/_held/_hat_state below, which stay single-poll-thread-only
+        # and unlocked, exactly as they always have).
+        self._trigger_raw = {"lt": 0, "rt": 0}
+        self._stick_raw = {"left": (0.0, 0.0), "right": (0.0, 0.0)}
         if _IS_WINDOWS:
             self._prev_mask = 0
             self._prev_trigger = {"lt": False, "rt": False}
@@ -154,6 +194,7 @@ class ControllerReader:
             self._held = set()            # button names currently down
             self._hat_state = {}          # ABS_HAT* code -> last nonzero value seen
             self._axis_max = {}           # ABS_Z/ABS_RZ code -> this device's reported max
+            self._stick_range = {}        # ABS_X/Y/RX/RY code -> (min, max) this device reports
             self._device_generation = 0   # bumped by set_index() to force a reopen mid-read_loop
         # Starts polling immediately, for the lifetime of the process -- there's
         # exactly one ControllerReader (see get_controller_reader() below) and
@@ -170,12 +211,15 @@ class ControllerReader:
         stale "held" state left over from the old one)."""
         with self._lock:
             self._index = new_index
+            self._trigger_raw = {"lt": 0, "rt": 0}
+            self._stick_raw = {"left": (0.0, 0.0), "right": (0.0, 0.0)}
             if _IS_WINDOWS:
                 self._prev_mask = 0
                 self._prev_trigger = {"lt": False, "rt": False}
             else:
                 self._held = set()
                 self._hat_state = {}
+                self._stick_range = {}
                 self._device_generation += 1
 
     def on_button_down(self, button_name: str, callback):
@@ -207,6 +251,26 @@ class ControllerReader:
             if callback in self._any_subscribers:
                 self._any_subscribers.remove(callback)
 
+    def snapshot(self) -> ControllerSnapshot:
+        """Thread-safe point-in-time read of this controller's ENTIRE
+        current state -- every digital button, both trigger depths (0-255,
+        not just the on/off TRIGGER_THRESHOLD test on_button_down/up
+        already do), and both analog sticks. For poe2bot/controller.py's
+        passthrough mode (see its own module docstring), which needs
+        continuous analog state on_button_down/up were never designed to
+        expose. Safe to call from any thread, at any rate -- always just a
+        read of whatever the poll thread most recently observed, never a
+        blocking call of its own."""
+        with self._lock:
+            if _IS_WINDOWS:
+                buttons = {name: bool(self._prev_mask & bit) for name, bit in _BUTTON_BITS.items()}
+            else:
+                buttons = {name: (name in self._held) for name in _ALL_BUTTON_NAMES}
+            return ControllerSnapshot(
+                buttons=buttons,
+                lt=self._trigger_raw["lt"], rt=self._trigger_raw["rt"],
+                left_stick=self._stick_raw["left"], right_stick=self._stick_raw["right"])
+
     def _poll_loop(self):
         if _IS_WINDOWS:
             self._poll_loop_xinput()
@@ -223,13 +287,20 @@ class ControllerReader:
                 self._handle_disconnected()
                 continue
             self._warned_disconnected = False
-            self._process_snapshot(state.Gamepad.wButtons, state.Gamepad.bLeftTrigger,
-                                    state.Gamepad.bRightTrigger)
+            gp = state.Gamepad
+            self._process_snapshot(gp.wButtons, gp.bLeftTrigger, gp.bRightTrigger,
+                                    gp.sThumbLX, gp.sThumbLY, gp.sThumbRX, gp.sThumbRY)
 
-    def _process_snapshot(self, mask: int, left_trigger: int, right_trigger: int):
+    def _process_snapshot(self, mask: int, left_trigger: int, right_trigger: int,
+                           lx: int = 0, ly: int = 0, rx: int = 0, ry: int = 0):
         """The actual edge-detection logic, isolated from the ctypes polling
         mechanics above so it can be exercised directly with synthetic
-        values in tests -- no real XInput/hardware needed to verify it."""
+        values in tests -- no real XInput/hardware needed to verify it.
+        lx/ly/rx/ry (each -32768..32767, XInput's own native range and sign
+        convention -- positive y = pushed up) default to 0 so existing
+        button/trigger-only callers (and tests) don't need updating just to
+        keep working; snapshot()'s stick reporting depends on real values
+        actually being passed, though."""
         newly_pressed = mask & ~self._prev_mask
         newly_released = self._prev_mask & ~mask
         self._prev_mask = mask
@@ -245,6 +316,11 @@ class ControllerReader:
             elif not pressed and self._prev_trigger[name]:
                 self._dispatch_up(name)
             self._prev_trigger[name] = pressed
+        with self._lock:
+            self._trigger_raw["lt"] = left_trigger
+            self._trigger_raw["rt"] = right_trigger
+            self._stick_raw["left"] = (lx / 32768.0, ly / 32768.0)
+            self._stick_raw["right"] = (rx / 32768.0, ry / 32768.0)
 
     # ---- Linux/evdev backend -------------------------------------------------
 
@@ -311,6 +387,15 @@ class ControllerReader:
             return None
         abs_caps = dict(device.capabilities(absinfo=True).get(ecodes.EV_ABS, []))
         self._axis_max = {code: (abs_caps[code].max or 255) for code in _TRIGGER_AXES if code in abs_caps}
+        # Unlike the triggers above (always assumed to start at 0), a stick axis'
+        # actual reported range varies by device/driver -- captured here rather
+        # than assumed, same reasoning as _axis_max. Skips an axis reporting
+        # min==max (a broken/absent range) rather than dividing by zero later;
+        # such an axis just reads as permanently centered (0.0) instead.
+        self._stick_range = {
+            code: (abs_caps[code].min, abs_caps[code].max)
+            for code in _STICK_AXES if code in abs_caps and abs_caps[code].max != abs_caps[code].min
+        }
         return device
 
     def _poll_loop_evdev(self):
@@ -356,7 +441,10 @@ class ControllerReader:
                 # The device disappeared (unplugged, or the kernel dropped it) --
                 # drop it and fall back to rescanning on the next iteration.
                 device = None
-                self._held = set()
+                with self._lock:
+                    self._held = set()
+                    self._trigger_raw = {"lt": 0, "rt": 0}
+                    self._stick_raw = {"left": (0.0, 0.0), "right": (0.0, 0.0)}
                 self._hat_state = {}
 
     def _handle_evdev_event(self, event):
@@ -373,6 +461,8 @@ class ControllerReader:
                 self._handle_hat_axis(event.code, event.value)
             elif event.code in _TRIGGER_AXES:
                 self._handle_trigger_axis(event.code, event.value)
+            elif event.code in _STICK_AXES:
+                self._handle_stick_axis(event.code, event.value)
 
     def _handle_hat_axis(self, code, value):
         previous = self._hat_state.get(code, 0)
@@ -389,23 +479,57 @@ class ControllerReader:
     def _handle_trigger_axis(self, code, value):
         name = _TRIGGER_AXES[code]
         axis_max = self._axis_max.get(code, 255)
+        with self._lock:
+            self._trigger_raw[name] = max(0, min(255, round(value * 255 / axis_max))) if axis_max else 0
         pressed = value >= axis_max * (TRIGGER_THRESHOLD / 255)
         if pressed:
             self._note_pressed(name)
         else:
             self._note_released(name)
 
+    def _handle_stick_axis(self, code, value):
+        """Normalizes a raw ABS_X/Y/RX/RY reading to -1.0..1.0 using this
+        device's own reported range (see _open_evdev_device), for
+        snapshot()'s passthrough support -- on_button_down/up never
+        tracked analog stick position at all, only buttons/triggers/hat.
+
+        Y sign flip: evdev/joystick convention is that Y INCREASES
+        downward (pushed down = larger value); XInput/vgamepad's
+        convention (what poe2bot/controller.py's passthrough ultimately
+        writes to, on both platforms) is the opposite, Y increases
+        upward. Inverting Y here is what keeps "stick pushed up" meaning
+        the same thing regardless of which backend read it -- UNVERIFIED
+        against real Deck hardware, like this whole evdev backend; check
+        with a real controller (`evtest`, or simply moving a passthrough-
+        driven character in-game) if up/down ends up backwards."""
+        side, axis = _STICK_AXES[code]
+        axis_min, axis_max = self._stick_range.get(code, (-32768, 32767))
+        span = axis_max - axis_min
+        normalized = max(-1.0, min(1.0, 2.0 * (value - axis_min) / span - 1.0)) if span else 0.0
+        if axis == "y":
+            normalized = -normalized
+        with self._lock:
+            x, y = self._stick_raw[side]
+            self._stick_raw[side] = (normalized, y) if axis == "x" else (x, normalized)
+
     def _note_pressed(self, button_name: str):
-        if button_name not in self._held:
+        # _held mutation locked (for snapshot()'s cross-thread reads); _dispatch
+        # itself takes the same lock again for its own subscriber-list read, so
+        # it must run AFTER this block releases it, not nested inside it.
+        with self._lock:
+            if button_name in self._held:
+                return
             self._held.add(button_name)
-            self._dispatch(button_name)
+        self._dispatch(button_name)
 
     def _note_released(self, button_name):
         if button_name is None:
             return
-        if button_name in self._held:
+        with self._lock:
+            if button_name not in self._held:
+                return
             self._held.discard(button_name)
-            self._dispatch_up(button_name)
+        self._dispatch_up(button_name)
 
     # ---- shared ---------------------------------------------------------------
 
@@ -428,8 +552,12 @@ class ControllerReader:
         else:
             for name in list(self._held):
                 self._dispatch_up(name)
-            self._held = set()
+            with self._lock:
+                self._held = set()
             self._hat_state = {}
+        with self._lock:
+            self._trigger_raw = {"lt": 0, "rt": 0}
+            self._stick_raw = {"left": (0.0, 0.0), "right": (0.0, 0.0)}
         if not self._warned_disconnected:
             if _IS_WINDOWS:
                 log.warning(f"controller index {self._index} not connected -- set "

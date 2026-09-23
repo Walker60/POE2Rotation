@@ -78,6 +78,40 @@ Control Panel → Devices and Printers → "Set up USB game controllers" (`joy.c
 show it reacting to a fired button — before assuming it's a PoE2/Steam Input problem
 rather than a ViGEmBus one.
 
+#### Playing with a real controller while rotations also fire (passthrough)
+
+A game generally only reads from ONE controller at a time — confirmed on a real Steam
+Deck, where PoE2 defaulted to whichever controller existed first (Steam Input's own
+synthesized pad for the Deck's built-in controls) and simply never read a second,
+separately-created one, correct identity or not (see the Steam Deck section below for
+the full story). So if you want to keep actually playing with your real controller —
+moving, aiming, everything — while poe2bot's rotations ALSO press buttons for you, you
+can't just point the game at poe2bot's virtual pad instead; that gives up manual control
+entirely.
+
+**poe2bot handles this automatically once Active Device is set to Controller**: its
+virtual pad continuously mirrors your real controller's *entire* state — both sticks,
+both triggers, every button — merging in whatever a running rotation additionally wants
+pressed (a button/trigger the rotation presses shows as pressed even if you aren't
+physically touching it; one you're physically holding stays pressed even after the
+rotation lets go of its own press). Point PoE2 at poe2bot's virtual pad (see above) and
+it now behaves like your one and only controller: play normally, and rotations fire
+right alongside you. Nothing to configure — this is what Active Device: Controller
+already means, on both Windows and Linux/Steam Deck; see `poe2bot/controller.py`'s
+`set_passthrough_enabled()`.
+
+Two things worth knowing:
+
+- Which physical controller gets mirrored is whatever **Controller index** (Settings →
+  Advanced) already points at — the same "which one is your real, physically-held
+  controller" setting the hotkey-capture side of the app already uses.
+- Analog sticks are pure passthrough (a Step's Key is always a button/trigger name,
+  never a stick axis, so there's no rotation input to merge in for them) — **unverified
+  against real Deck hardware**: the Linux/evdev backend inverts the Y axis to match
+  XInput's up-positive convention (evdev's own convention is down-positive), which is
+  correct for the vast majority of controllers but worth confirming doesn't move the
+  wrong vertical direction on your specific hardware.
+
 ## Pre-built Windows executable and auto-update
 
 Besides running from source (`python main.py` above), every push to this repo's

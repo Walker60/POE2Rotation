@@ -97,6 +97,12 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # delays the window actually appearing.
         if sys.platform != "win32" or self.active_device == "controller":
             threading.Thread(target=controller.warm_up, daemon=True).start()
+        # See controller.py's own module docstring for what passthrough mode is
+        # and why it exists -- both platforms, straight from Active Device's
+        # saved value, so a rotation's own button presses are already merging
+        # with the real controller's live state from the moment the window
+        # opens, not just after the user later flips Active Device by hand.
+        controller.set_passthrough_enabled(self.active_device == "controller")
 
         self.rotations = {}          # name -> Rotation, mirrors what's on disk
         self.editing_original_name = None    # name of rotation being edited, or None if new/unsaved
@@ -307,6 +313,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # no-op if __init__ (Linux, or Windows already in Controller mode) got there first.
         if self.active_device == "controller" and sys.platform == "win32":
             threading.Thread(target=controller.warm_up, daemon=True).start()
+        # See controller.py's own module docstring for passthrough mode -- toggled
+        # live here so switching device mid-session (game already running) takes
+        # effect immediately, the same as the startup call in __init__.
+        controller.set_passthrough_enabled(self.active_device == "controller")
 
     def _on_require_game_focus_changed(self):
         """Live -- config.REQUIRE_GAME_FOCUS is read fresh by

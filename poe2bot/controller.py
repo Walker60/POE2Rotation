@@ -21,6 +21,24 @@ all, so that never happens there. find_vigembus_installer()/install_vigembus()
 below exist so the app can offer the same one-time driver install itself
 (see gui/updater_ui.py's sibling UpdaterMixin for the analogous "Settings
 button -> background thread -> result dialog" pattern this follows).
+
+Passthrough mode (set_passthrough_enabled()): a game generally only reads
+ONE physical/virtual controller at a time (confirmed on a real Steam Deck:
+PoE2 defaults to whichever one existed first -- Steam Input's own synthesized
+pad for the Deck's built-in controller -- and simply never reads a second,
+separately-created one, no matter how correctly identified). So a player who
+wants to keep using their REAL controller to actually play, while poe2bot
+ALSO presses buttons for them, can't just point the game at poe2bot's pad
+instead -- that would give up manual control entirely. Passthrough solves
+this by making poe2bot's own virtual pad the ONLY thing the game needs to
+read: it continuously mirrors the real controller's entire state (via
+poe2bot/controller_input.py's ControllerReader.snapshot() -- buttons,
+triggers, both sticks) onto the virtual one, merging in whatever a running
+rotation additionally wants pressed (see press()/release()) -- OR'd per
+button/trigger, so a rotation's own press never fights a real, simultaneous
+one. Analog sticks are pure passthrough; nothing in this app ever drives
+them programmatically (a Step's `key` is always a button/trigger name, never
+a stick axis), so there's no merge question there at all.
 """
 import importlib.util
 import platform
@@ -29,6 +47,7 @@ import sys
 import threading
 from pathlib import Path
 
+from poe2bot import controller_input
 from poe2bot.log_setup import get_logger
 
 log = get_logger()
@@ -81,6 +100,15 @@ _pad_lock = threading.Lock()
 _init_lock = threading.Lock()
 _pad = None
 _vg = None  # the imported vgamepad module, stashed once import succeeds
+
+# ---- passthrough mode (see module docstring) --------------------------------
+_bot_wants = {}                       # name -> True, only present while a running rotation
+                                       # currently wants that button/trigger pressed
+_passthrough_enabled = False
+_passthrough_thread = None
+_passthrough_stop = threading.Event()
+_PASSTHROUGH_POLL_S = 0.015           # matches controller_input.POLL_INTERVAL_S -- no point
+                                       # polling faster than the real controller's own source data changes
 
 
 def find_vigembus_installer() -> "Path | None":
@@ -287,24 +315,110 @@ def warm_up():
 
 def press(name: str):
     """Press and flush a controller button/trigger. `name` is the bare
-    button name (e.g. "a", "lt"), not the "controller:"-prefixed form."""
-    pad = _get_pad()
+    button name (e.g. "a", "lt"), not the "controller:"-prefixed form.
+    When passthrough is enabled (see set_passthrough_enabled), this only
+    records that the bot wants `name` pressed -- the actual pad write is
+    OR-merged with whatever the real controller is doing at that instant
+    (a simultaneous real press must not get clobbered) and flushed
+    immediately after, right here, not deferred to the passthrough loop's
+    own next tick -- so a rotation's timing isn't held hostage to that
+    loop's poll interval."""
+    _get_pad()
+    passthrough = False
     with _pad_lock:
-        if name in _TRIGGERS:
-            (pad.left_trigger if name == "lt" else pad.right_trigger)(value=255)
-        else:
-            pad.press_button(button=getattr(_vg.XUSB_BUTTON, _DIGITAL_BUTTONS[name]))
-        pad.update()
+        _bot_wants[name] = True
+        passthrough = _passthrough_enabled
+        if not passthrough:
+            _write_bot_only_locked(name, True)
+    if passthrough:
+        _flush_combined_state()
 
 
 def release(name: str):
-    """Release and flush a controller button/trigger."""
-    pad = _get_pad()
+    """Release and flush a controller button/trigger -- see press()'s
+    docstring for how this interacts with passthrough mode."""
+    _get_pad()
+    passthrough = False
     with _pad_lock:
-        if name in _TRIGGERS:
-            (pad.left_trigger if name == "lt" else pad.right_trigger)(value=0)
+        _bot_wants.pop(name, None)
+        passthrough = _passthrough_enabled
+        if not passthrough:
+            _write_bot_only_locked(name, False)
+    if passthrough:
+        _flush_combined_state()
+
+
+def _write_bot_only_locked(name: str, is_press: bool):
+    """press()/release()'s pre-passthrough behavior: write directly to the
+    pad and flush immediately. Only used while passthrough is OFF -- once
+    it's on, _flush_combined_state() is the single place that ever writes
+    to the pad, so the bot's own wishes and the real controller's state can
+    never race each other into an inconsistent write. Caller must already
+    hold _pad_lock."""
+    pad = _get_pad()
+    if name in _TRIGGERS:
+        (pad.left_trigger if name == "lt" else pad.right_trigger)(value=255 if is_press else 0)
+    else:
+        (pad.press_button if is_press else pad.release_button)(
+            button=getattr(_vg.XUSB_BUTTON, _DIGITAL_BUTTONS[name]))
+    pad.update()
+
+
+def set_passthrough_enabled(enabled: bool):
+    """Enables/disables continuous mirroring of the real controller (see
+    module docstring) -- app.py calls this whenever Active Device becomes
+    (or stops being) Controller, both at startup and from the Settings
+    toggle/rotation's own device switch. Starts (or stops) a dedicated
+    background thread; safe to call repeatedly with the same value (a
+    no-op past the first time)."""
+    global _passthrough_enabled, _passthrough_thread
+    with _pad_lock:
+        if enabled == _passthrough_enabled:
+            return
+        _passthrough_enabled = enabled
+        if enabled:
+            _passthrough_stop.clear()
+            _passthrough_thread = threading.Thread(
+                target=_passthrough_loop, name="controller-passthrough", daemon=True)
+            _passthrough_thread.start()
         else:
-            pad.release_button(button=getattr(_vg.XUSB_BUTTON, _DIGITAL_BUTTONS[name]))
+            _passthrough_stop.set()
+            _passthrough_thread = None
+
+
+def _passthrough_loop():
+    while not _passthrough_stop.wait(timeout=_PASSTHROUGH_POLL_S):
+        _flush_combined_state()
+
+
+def _flush_combined_state():
+    """Recomputes and writes the CURRENT combined (real controller + bot)
+    state to the virtual pad. Called both periodically by the passthrough
+    loop (so stick movement and real button changes stay fresh even when
+    the bot isn't doing anything) and immediately by press()/release()
+    (so the bot's own timing never waits on the loop's own poll interval).
+    Silently skipped if the pad isn't available yet (e.g. ViGEmBus not
+    installed) -- matches warm_up()'s own best-effort philosophy; the very
+    next tick (or press()) retries."""
+    try:
+        pad = _get_pad()
+    except ControllerUnavailable:
+        return
+    snapshot = controller_input.get_controller_reader().snapshot()
+    with _pad_lock:
+        if not _passthrough_enabled:
+            return  # disabled in the gap between this call being scheduled and acquiring the lock
+        for name in _DIGITAL_BUTTONS:
+            pressed = _bot_wants.get(name, False) or snapshot.buttons.get(name, False)
+            (pad.press_button if pressed else pad.release_button)(
+                button=getattr(_vg.XUSB_BUTTON, _DIGITAL_BUTTONS[name]))
+        for name, real_value in (("lt", snapshot.lt), ("rt", snapshot.rt)):
+            bot_value = 255 if _bot_wants.get(name, False) else 0
+            (pad.left_trigger if name == "lt" else pad.right_trigger)(value=max(bot_value, real_value))
+        lx, ly = snapshot.left_stick
+        rx, ry = snapshot.right_stick
+        pad.left_joystick_float(x_value_float=lx, y_value_float=ly)
+        pad.right_joystick_float(x_value_float=rx, y_value_float=ry)
         pad.update()
 
 
@@ -313,13 +427,19 @@ def release_all():
     shutdown. A no-op if no virtual controller was ever created. Built only
     from the confirmed press_button/release_button/left_trigger/right_trigger/
     update API surface, rather than assuming a convenience reset() method
-    exists on the installed vgamepad version."""
+    exists on the installed vgamepad version. Also clears _bot_wants (so a
+    stale entry can't linger into some future press) and stops passthrough,
+    if it was running."""
     global _pad
     if _pad is None:
         return
+    set_passthrough_enabled(False)
     with _pad_lock:
+        _bot_wants.clear()
         for name in _DIGITAL_BUTTONS:
             _pad.release_button(button=getattr(_vg.XUSB_BUTTON, _DIGITAL_BUTTONS[name]))
         _pad.left_trigger(value=0)
         _pad.right_trigger(value=0)
+        _pad.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
+        _pad.right_joystick_float(x_value_float=0.0, y_value_float=0.0)
         _pad.update()
