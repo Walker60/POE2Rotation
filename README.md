@@ -106,11 +106,15 @@ Two things worth knowing:
   Advanced) already points at — the same "which one is your real, physically-held
   controller" setting the hotkey-capture side of the app already uses.
 - Analog sticks are pure passthrough (a Step's Key is always a button/trigger name,
-  never a stick axis, so there's no rotation input to merge in for them) — **unverified
-  against real Deck hardware**: the Linux/evdev backend inverts the Y axis to match
-  XInput's up-positive convention (evdev's own convention is down-positive), which is
-  correct for the vast majority of controllers but worth confirming doesn't move the
-  wrong vertical direction on your specific hardware.
+  never a stick axis, so there's no rotation input to merge in for them). **Confirmed
+  on real Deck hardware**: unlike most generic joysticks, the Deck's own (Steam
+  Input-synthesized) pad already reports Y in XInput's up-positive convention directly
+  — no sign flip needed, unlike the down-positive convention an earlier version of this
+  wrongly assumed applied here too and which showed up as inverted vertical movement.
+  Also confirmed: that same pad reports X/Y face buttons swapped relative to the naive
+  "NORTH=top=Y, WEST=left=X" assumption — already corrected in
+  `poe2bot/controller_input.py`'s `_KEY_CODE_TO_BUTTON`, affecting hotkey capture too,
+  not just passthrough.
 
 ## Pre-built Windows executable and auto-update
 

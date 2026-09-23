@@ -106,12 +106,16 @@ else:
                                      # while the current device sits idle -- see _poll_loop_evdev
 
     # evdev's BTN_SOUTH/EAST/NORTH/WEST naming is by PHYSICAL POSITION on an
-    # Xbox-style pad, not by letter -- SOUTH (bottom) = A, EAST (right) = B,
-    # NORTH (top) = Y, WEST (left) = X. Easy to get backwards; verify against
-    # a real device with `evtest` if button captures come out mismatched.
+    # Xbox-style pad, not by letter -- SOUTH (bottom) = A, EAST (right) = B.
+    # NORTH/WEST (top/left) are the ones actually worth double-checking per
+    # device: confirmed on a real Steam Deck that its (Steam Input-synthesized)
+    # pad reports NORTH for the physical X button and WEST for the physical Y
+    # button -- the opposite of the naive "NORTH=top=Y, WEST=left=X" guess an
+    # earlier version of this mapping made, which showed up as X/Y swapped in
+    # both hotkey capture and passthrough.
     _KEY_CODE_TO_BUTTON = {
         ecodes.BTN_SOUTH: "a", ecodes.BTN_EAST: "b",
-        ecodes.BTN_NORTH: "y", ecodes.BTN_WEST: "x",
+        ecodes.BTN_NORTH: "x", ecodes.BTN_WEST: "y",
         ecodes.BTN_TL: "lb", ecodes.BTN_TR: "rb",
         ecodes.BTN_SELECT: "back", ecodes.BTN_START: "start",
         ecodes.BTN_THUMBL: "ls", ecodes.BTN_THUMBR: "rs",
@@ -493,21 +497,17 @@ class ControllerReader:
         snapshot()'s passthrough support -- on_button_down/up never
         tracked analog stick position at all, only buttons/triggers/hat.
 
-        Y sign flip: evdev/joystick convention is that Y INCREASES
-        downward (pushed down = larger value); XInput/vgamepad's
-        convention (what poe2bot/controller.py's passthrough ultimately
-        writes to, on both platforms) is the opposite, Y increases
-        upward. Inverting Y here is what keeps "stick pushed up" meaning
-        the same thing regardless of which backend read it -- UNVERIFIED
-        against real Deck hardware, like this whole evdev backend; check
-        with a real controller (`evtest`, or simply moving a passthrough-
-        driven character in-game) if up/down ends up backwards."""
+        No Y sign flip: confirmed on real Steam Deck hardware that the
+        Deck's own evdev-exposed Y axis already matches XInput/vgamepad's
+        up-positive convention directly -- an earlier version of this
+        method inverted Y on the (wrong, for this hardware at least)
+        assumption that evdev's classic down-positive joystick convention
+        would apply here too; that made passthrough-driven movement move
+        the wrong vertical direction in-game."""
         side, axis = _STICK_AXES[code]
         axis_min, axis_max = self._stick_range.get(code, (-32768, 32767))
         span = axis_max - axis_min
         normalized = max(-1.0, min(1.0, 2.0 * (value - axis_min) / span - 1.0)) if span else 0.0
-        if axis == "y":
-            normalized = -normalized
         with self._lock:
             x, y = self._stick_raw[side]
             self._stick_raw[side] = (normalized, y) if axis == "x" else (x, normalized)
