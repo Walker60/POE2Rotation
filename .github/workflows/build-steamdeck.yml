@@ -86,6 +86,14 @@ jobs:
       - name: Write the VERSION file
         run: echo "${{ steps.version.outputs.sha }}" > dist/poe2bot/VERSION
 
+      # See packaging/launch-steamdeck.sh's own header comment: Steam's "Add a
+      # Non-Steam Game" file picker won't offer the extensionless `poe2bot`
+      # binary itself, only recognized extensions like .sh.
+      - name: Add the Steam-shortcut launcher script
+        run: |
+          cp packaging/launch-steamdeck.sh dist/poe2bot/poe2bot.sh
+          chmod +x dist/poe2bot/poe2bot.sh
+
       - name: Archive the bundle
         run: |
           cd dist

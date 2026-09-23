@@ -214,9 +214,16 @@ after a hotkey is bound to one of their buttons. Two ways to make the Deck's
 own controls visible as a real evdev gamepad:
 
 - **Add poe2bot as a non-Steam shortcut and launch it through Steam** (Desktop
-  Mode → Steam → Games → "Add a Non-Steam Game" → point it at the `poe2bot`
-  executable) — launching it this way, rather than directly from a terminal,
-  is what gets Steam Input to engage and expose a virtual Xbox 360 controller
+  Mode → Steam → Games → "Add a Non-Steam Game" → point it at **`poe2bot.sh`**,
+  not the bare `poe2bot` executable next to it — Steam's file picker only
+  offers a handful of recognized extensions (`.sh`, `.AppImage`,
+  `.application`, ...), and the actual PyInstaller-built `poe2bot` binary is a
+  plain, extensionless ELF executable, the normal Linux convention, so it
+  never shows up there at all. `poe2bot.sh` is a one-line wrapper
+  (`packaging/launch-steamdeck.sh`, copied into every build) that just execs
+  the real binary from the same folder — nothing else about running it
+  changes. Launching it this way, rather than directly from a terminal, is
+  what gets Steam Input to engage and expose a virtual Xbox 360 controller
   the same way it does for an actual game; `evdev` should then find it like
   any other gamepad. Unconfirmed against real hardware yet — if Steam Input
   doesn't engage for a plain utility app this way, or the virtual pad it
