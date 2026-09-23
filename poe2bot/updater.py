@@ -62,6 +62,7 @@ _API_URL = f"https://api.github.com/repos/{_REPO}/releases/tags/{_RELEASE_TAG}"
 _REQUEST_HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "poe2bot-updater"}
 _CHECK_TIMEOUT_S = 15
 _DOWNLOAD_TIMEOUT_S = 120
+_DOWNLOAD_CHUNK_SIZE = 65536
 # Only ever download from GitHub's own asset hosts -- a basic sanity check
 # against the API ever handing back something unexpected, not a defense
 # against a compromised repo (which could just as easily change _REPO above).
@@ -172,12 +173,18 @@ def _copy_user_data(old_dir: str, new_dir: str) -> None:
 def download_and_install(update_info: "UpdateInfo", progress_callback=None) -> None:
     """Downloads update_info's bundle and extracts it to a fresh sibling
     directory (poe2bot.new), ready to be swapped in for the currently
-    running installation. progress_callback(str), if given, is called from
-    THIS (calling) thread at each stage -- callers running this on a
-    background thread are responsible for hopping back to their own UI
-    thread themselves. Raises UpdateCheckFailed/OSError on any failure,
-    leaving install_dir completely untouched either way -- nothing about
-    the running installation itself changes here on EITHER platform.
+    running installation. progress_callback(str, float | None), if given, is
+    called from THIS (calling) thread at each stage -- callers running this
+    on a background thread are responsible for hopping back to their own UI
+    thread themselves. The second argument is a 0..1 download-completion
+    fraction while the download itself is in progress and the server
+    reported a Content-Length, and None the rest of the time (including for
+    the Extracting/Installing stages, and for the download itself if the
+    server didn't report a size) -- callers use that to show a progress bar
+    only when there's an actual fraction to show. Raises
+    UpdateCheckFailed/OSError on any failure, leaving install_dir completely
+    untouched either way -- nothing about the running installation itself
+    changes here on EITHER platform.
 
     What happens after staging differs by platform, entirely inside
     restart_into_new_version():
@@ -214,14 +221,24 @@ def download_and_install(update_info: "UpdateInfo", progress_callback=None) -> N
     with tempfile.TemporaryDirectory(prefix="poe2bot-update-") as tmp_dir:
         archive_path = os.path.join(tmp_dir, "update" + _ASSET_SUFFIX)
         if progress_callback:
-            progress_callback("Downloading...")
+            progress_callback("Downloading...", None)
         request = urllib.request.Request(update_info.download_url, headers=_REQUEST_HEADERS)
         with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT_S, context=_SSL_CONTEXT) as response, \
                 open(archive_path, "wb") as out_file:
-            shutil.copyfileobj(response, out_file)
+            content_length = response.headers.get("Content-Length")
+            total_bytes = int(content_length) if content_length and content_length.isdigit() else None
+            downloaded_bytes = 0
+            while True:
+                chunk = response.read(_DOWNLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+                downloaded_bytes += len(chunk)
+                if progress_callback and total_bytes:
+                    progress_callback("Downloading...", downloaded_bytes / total_bytes)
 
         if progress_callback:
-            progress_callback("Extracting...")
+            progress_callback("Extracting...", None)
         extract_dir = os.path.join(tmp_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
         if _ASSET_SUFFIX == ".zip":
@@ -237,7 +254,7 @@ def download_and_install(update_info: "UpdateInfo", progress_callback=None) -> N
                 "Downloaded bundle doesn't look like a poe2bot build (no poe2bot/ folder inside it).")
 
         if progress_callback:
-            progress_callback("Installing...")
+            progress_callback("Installing...", None)
         # shutil.move (not os.rename): the temp dir and parent_dir may be on
         # different filesystems, which a bare os.rename can't cross --
         # shutil.move falls back to copy+delete in that case.

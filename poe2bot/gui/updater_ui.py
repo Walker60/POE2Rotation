@@ -50,8 +50,8 @@ class UpdaterMixin:
         threading.Thread(target=self._install_update_worker, args=(info,), daemon=True).start()
 
     def _install_update_worker(self, info):
-        def progress(message):
-            self.status_queue.put(("__update_install_progress__", message))
+        def progress(message, fraction=None):
+            self.status_queue.put(("__update_install_progress__", (message, fraction)))
         try:
             updater.download_and_install(info, progress_callback=progress)
         except Exception as e:
@@ -59,16 +59,20 @@ class UpdaterMixin:
             return
         self.status_queue.put(("__update_install_done__", info.version))
 
-    def _on_update_install_progress(self, message: str):
+    def _on_update_install_progress(self, payload):
+        message, fraction = payload
         self._set_update_button_state("disabled", message)
+        self._set_update_progress(fraction)
 
     def _on_update_install_failed(self, message: str):
         self._set_update_button_state("normal", "Check for Updates...")
+        self._set_update_progress(None)
         messagebox.showerror("Update failed", f"Could not install the update:\n{message}",
                               parent=self._update_dialog_parent())
 
     def _on_update_install_done(self, version: str):
         self._set_update_button_state("normal", "Check for Updates...")
+        self._set_update_progress(None)
         if not messagebox.askyesno(
                 "Update installed", f"Updated to {version}. Restart now to use the new version?",
                 parent=self._update_dialog_parent()):
@@ -93,6 +97,10 @@ class UpdaterMixin:
     def _set_update_button_state(self, state: str, text: str):
         if self.settings_window is not None and self.settings_window.winfo_exists():
             self.settings_window.set_update_button_state(state, text)
+
+    def _set_update_progress(self, fraction: "float | None"):
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.set_update_progress(fraction)
 
     def _update_dialog_parent(self):
         if self.settings_window is not None and self.settings_window.winfo_exists():

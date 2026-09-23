@@ -166,6 +166,11 @@ class SettingsWindow(tk.Toplevel):
         self._update_btn = ttk.Button(
             updates_frame, text="Check for Updates...", command=self._master._on_check_for_updates_clicked)
         self._update_btn.pack(fill="x", pady=(4, 0))
+        # Determinate download progress bar -- created up front but never
+        # packed here, so it takes up no space until set_update_progress()
+        # first shows it (only while a download with a known size is
+        # actually in flight; see that method).
+        self._update_progress = ttk.Progressbar(updates_frame, orient="horizontal", mode="determinate", maximum=100)
 
     def set_update_button_state(self, state: str, text: str):
         """Called from UpdaterMixin (poe2bot/gui/updater_ui.py) as a check/
@@ -175,6 +180,20 @@ class SettingsWindow(tk.Toplevel):
         whatever's mid-flight when it's hidden needs a stable handle to
         keep updating."""
         self._update_btn.config(state=state, text=text)
+
+    def set_update_progress(self, fraction: "float | None"):
+        """Shows/updates/hides the download progress bar below the Updates
+        button. Called from UpdaterMixin with a 0..1 fraction while the
+        update download is in progress and the server reported a size, and
+        with None the rest of the time (checking, extracting, installing,
+        done, or failed) -- so the bar is only ever visible during an actual
+        download, per its own docstring in updater.download_and_install()."""
+        if fraction is None:
+            self._update_progress.pack_forget()
+            return
+        if not self._update_progress.winfo_ismapped():
+            self._update_progress.pack(fill="x", pady=(4, 0))
+        self._update_progress.config(value=max(0.0, min(1.0, fraction)) * 100)
 
     def set_vigembus_button_state(self, state: str, text: str):
         """Same idea as set_update_button_state above, for ControllerDriverMixin
