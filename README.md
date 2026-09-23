@@ -198,9 +198,13 @@ environment markers; they're never installed on Windows).
 - **Permission to read/write `/dev/uinput` (virtual controller output) and
   `/dev/input/*` (real controller input) without root** — add your user to the
   `input`/`uinput` groups (or an equivalent udev rule); `vgamepad`'s own Linux
-  docs describe the exact steps. If running inside a container (Option B, or
-  if you choose to run Option A's bundle inside one too), it also needs device
-  passthrough for both of those.
+  docs describe the exact steps, or just run
+  [`packaging/setup-steamdeck-permissions.sh`](packaging/setup-steamdeck-permissions.sh)
+  once (`sh setup-steamdeck-permissions.sh`, then log out and back in) to do
+  it for you. Skipping this is exactly why launching poe2bot might currently
+  need a sudo password every time. If running inside a container (Option B,
+  or if you choose to run Option A's bundle inside one too), it also needs
+  device passthrough for both of those.
 
 **Virtual-controller output** (a step that presses a button on the emulated
 controller — see "Controller output" above): `vgamepad`, the same library
