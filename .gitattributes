@@ -1,0 +1,6 @@
+# Shell scripts run on Linux (the Steam Deck build's Steam-shortcut launcher,
+# packaging/launch-steamdeck.sh) -- force LF regardless of a contributor's own
+# git core.autocrlf setting. A CRLF shebang line ("#!/bin/sh\r") fails outright
+# on Linux (the kernel looks for an interpreter literally named "/bin/sh\r"),
+# so this can't be left to core.autocrlf's per-checkout, per-user default.
+*.sh text eol=lf
