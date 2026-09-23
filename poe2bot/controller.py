@@ -159,6 +159,59 @@ def install_vigembus():
             f"msiexec exited with code {result.returncode}" + (f": {detail}" if detail else ""))
 
 
+_linux_uinput_identity_patched = False
+
+
+def _patch_linux_vgamepad_identity():
+    """vgamepad's Linux backend (vgamepad/lin/virtual_gamepad.py) creates its
+    uinput device via a bare libevdev.Device() and never sets a vendor,
+    product, or bus type of its own -- unlike its Windows counterpart (a
+    real ViGEmBus-emulated Xbox 360 pad, VID 0x045E/PID 0x028E over
+    BUS_USB), so the Linux virtual pad ends up with whatever meaningless
+    default libevdev/uinput assigns it. This is a known, documented SDL2
+    limitation, not a poe2bot- or vgamepad-specific one: SDL's
+    gamecontroller layer -- what most modern games (Proton/Wine builds
+    included) use to recognize a device as an Xbox-360-shaped controller
+    and map its buttons at all -- matches primarily against a vendor/
+    product ID database (gamecontrollerdb.txt); a device with no
+    recognized ID is invisible to it even though it's perfectly readable
+    at the raw evdev/joystick level (evtest/jstest see it fine -- this is
+    exactly why that check alone can't rule this out). See
+    https://discourse.libsdl.org/t/uinput-controller/27972, which documents
+    this same class of problem and its standard fix: present the virtual
+    device with a real, recognized controller's identity instead of a bare/
+    virtual one.
+
+    Patches libevdev.Device.create_uinput_device (there's no hook point
+    inside vgamepad itself for this -- VX360Gamepad.__init__ calls it
+    directly, with no vendor/product of its own set yet) to set a real
+    Xbox 360 controller's identity -- BUS_USB, VID 0x045E, PID 0x028E,
+    matching what Linux's own "xpad" driver reports for a genuine one --
+    on any Device that doesn't already have one of its own (so a
+    hypothetical future vgamepad release that sets a real ID itself, or
+    some other libevdev consumer entirely, is left alone). Idempotent --
+    safe to call more than once, only patches once."""
+    global _linux_uinput_identity_patched
+    if _linux_uinput_identity_patched:
+        return
+    import libevdev
+
+    original_create_uinput_device = libevdev.Device.create_uinput_device
+
+    def _create_uinput_device_with_xbox_identity(self, *args, **kwargs):
+        current = self.id
+        # Handles both a dict-shaped and an attribute-shaped `.id` return --
+        # this has changed across libevdev releases (vgamepad itself assumes
+        # the older attribute-style shape in its own get_vid()/get_pid()).
+        get = current.get if isinstance(current, dict) else (lambda k, d=0: getattr(current, k, d))
+        if not (get("vendor") or get("product") or get("bustype")):
+            self.id = {"bustype": 0x03, "vendor": 0x045E, "product": 0x028E}
+        return original_create_uinput_device(self, *args, **kwargs)
+
+    libevdev.Device.create_uinput_device = _create_uinput_device_with_xbox_identity
+    _linux_uinput_identity_patched = True
+
+
 def _get_pad():
     """Lazily creates the one shared virtual controller for this process.
     Deliberately never cached as a permanent failure -- a user who installs
@@ -188,6 +241,8 @@ def _get_pad():
                        "Make sure it's installed (pip install vgamepad).")
                 raise ControllerUnavailable(
                     f"vgamepad could not be imported -- {fix} Details: {e}") from e
+            if sys.platform != "win32":
+                _patch_linux_vgamepad_identity()
             try:
                 pad = vg.VX360Gamepad()
             except Exception as e:

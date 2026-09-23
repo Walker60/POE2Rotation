@@ -168,32 +168,46 @@ environment markers; they're never installed on Windows).
 controller — see "Controller output" above): `vgamepad`, the same library
 `poe2bot/controller.py` already uses on Windows, ships its own native Linux
 backend built on the kernel's `uinput`/`evdev` subsystem — no ViGEmBus, no Wine
-involved, no code changes needed here. This is the single biggest open
-question in the whole Linux port: confirm a virtual pad created this way
-actually shows up as a controller to Proton-hosted PoE2 (not just to the host
-OS) before relying on it — there are reports of Proton not always recognizing
-a `uinput`-created pad. `poe2bot/controller.py`'s `warm_up()` creates the pad
-right at app startup (silently, before you ever press anything) instead of
-waiting for a rotation's first controller-encoded press, specifically so it
-already exists before PoE2 and Steam Input start looking for controllers —
-both typically enumerate joysticks once at their own startup and may never
-notice one that only appears later as a hot-plug event. If a button still
-isn't recognized in-game after that:
+involved. `poe2bot/controller.py`'s `warm_up()` creates the pad right at app
+startup (silently, before you ever press anything) instead of waiting for a
+rotation's first controller-encoded press, specifically so it already exists
+before PoE2 and Steam Input start looking for controllers — both typically
+enumerate joysticks once at their own startup and may never notice one that
+only appears later as a hot-plug event.
+
+**Confirmed and fixed**: vgamepad's Linux backend creates its uinput device
+with no vendor/product/bus-type identity of its own (unlike its Windows
+counterpart, a real ViGEmBus-emulated pad with genuine Xbox 360 IDs) — so it's
+perfectly visible at the raw evdev/joystick level (`evtest`/`jstest`, or a
+physical Deck button, all still work fine) but invisible to SDL2's
+gamecontroller layer, which is what most modern games (Proton/Wine builds
+included, PoE2 among them) actually use to recognize a device as an
+Xbox-360-shaped controller at all — it matches primarily against a known
+vendor/product ID database, and a device with no recognized ID in it is
+skipped entirely, however button-shaped its raw capabilities are. This is a
+documented SDL2 limitation, not Proton- or Steam-Input-specific — trying a
+"GE" Proton build (extra controller-support patches, otherwise worth trying
+for other Proton-level quirks) does not fix this particular problem.
+`_patch_linux_vgamepad_identity()` works around it by presenting the pad with
+a real Xbox 360 controller's identity (BUS_USB, VID 0x045E, PID 0x028E,
+matching what Linux's own `xpad` driver reports for a genuine one) the moment
+it's created — no manual step needed, this applies automatically on Linux.
+
+If a button still isn't recognized in-game after updating to a build with
+this fix:
 
 - Confirm the pad exists *at all* at the OS level first: `cat
-  /proc/bus/input/devices` (look for an "Xbox 360"-style entry) or `evtest`/
-  `jstest` right after launching poe2bot. If it's missing here, this is a
-  `/dev/uinput` permissions problem (see above), not a Proton/Steam Input one.
-- If it's present at the OS level but PoE2 still doesn't react, check
-  whether **Steam Input** is the layer swallowing it: Steam Input generally
-  only manages devices it saw when Steam itself started, so try restarting
-  Steam (or the whole Deck) with poe2bot's virtual pad already present, or
+  /proc/bus/input/devices` (look for an "Xbox 360"-style entry, now with
+  `Vendor=045e Product=028e`) or `evtest`/`jstest` right after launching
+  poe2bot. If it's missing here, this is a `/dev/uinput` permissions problem
+  (see above), not an SDL/Proton one.
+- If it's present at the OS level but PoE2 still doesn't react, check whether
+  **Steam Input** is the layer swallowing it: Steam Input generally only
+  manages devices it saw when Steam itself started, so try restarting Steam
+  (or the whole Deck) with poe2bot's virtual pad already present, or
   temporarily disabling Steam Input for PoE2's non-Steam shortcut (Properties
   → Controller) to see if input reaches the game at all with Steam Input out
   of the way entirely.
-- If it's present but the *game* still doesn't react even with Steam Input
-  out of the way, a community "GE" Proton build (which carries extra
-  controller-support patches over stock Proton) may help.
 
 Recalibrate every rotation's image/pixel conditions fresh on the Deck's own
 display — a template captured on a Windows PC's screen won't match the Deck's
