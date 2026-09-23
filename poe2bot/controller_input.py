@@ -480,3 +480,28 @@ def peek_controller_reader():
     starting its polling thread as a side effect for a keyboard-only user
     who's never touched anything controller-related."""
     return _singleton
+
+
+def linux_no_gamepad_visible() -> bool:
+    """True only on Linux, with evdev installed, and evdev currently sees
+    ZERO gamepad-like /dev/input devices system-wide -- the "Steam Input
+    owns the Deck's own controls, and a plain terminal-launched app never
+    gets a virtual gamepad" case README's Steam Deck section documents (see
+    _candidate_gamepad_paths' own docstring). False on Windows, if evdev
+    isn't installed at all, or if at least one gamepad-like device IS
+    currently visible -- whether or not it's the one CONTROLLER_INDEX
+    happens to point at.
+
+    Cheap and synchronous (opens each /dev/input device only briefly to
+    read its capabilities, the same one-off scan
+    _candidate_gamepad_paths() already does on every rescan) -- meant to be
+    called right from the Tk thread, e.g. before starting a physical-press
+    hotkey capture, to warn upfront instead of silently waiting forever for
+    a Deck button press evdev can never see. Also starts the
+    ControllerReader singleton's polling thread as a side effect (via
+    get_controller_reader()) if it hasn't already -- harmless here since a
+    caller checking this is, by definition, about to want controller input
+    anyway."""
+    if _IS_WINDOWS or evdev is None:
+        return False
+    return not get_controller_reader()._candidate_gamepad_paths()

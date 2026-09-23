@@ -1,5 +1,6 @@
 import threading
 
+from poe2bot import controller_input
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui.controller_map_window import ControllerMapWindow
 from poe2bot.hotkeys import display_name
@@ -142,6 +143,22 @@ class HotkeysMixin:
     }
 
     def _on_bind_key_clicked(self, kind: str):
+        # At most once per session (like CalibrationMixin's own _calibration_hint_shown) --
+        # this is a heads-up, not something to nag about on every single "Bind..." click,
+        # e.g. while trying it for several different rows in a row. Only ever true on
+        # Linux; a no-op check everywhere else (see linux_no_gamepad_visible's docstring).
+        if not self._no_gamepad_hint_shown and controller_input.linux_no_gamepad_visible():
+            self._no_gamepad_hint_shown = True
+            messagebox.showinfo(
+                "No gamepad-like device found",
+                "evdev doesn't currently see any gamepad-like /dev/input device on this "
+                "system. If you're trying to physically press one of the Steam Deck's own "
+                "built-in buttons, this is expected unless poe2bot is launched through Steam "
+                "(or Handheld Daemon is running) -- see README's Steam Deck section. A real "
+                "USB/Bluetooth controller doesn't have this problem. In the meantime, click "
+                "\"Map...\" instead to choose a controller button from a list, or just press "
+                "a keyboard key/mouse button here.",
+                parent=self)
         getattr(self, self._KEY_BIND_SPECS[kind]["button_attr"]).config(text="Press a key or click...")
         self._set_bind_buttons_enabled(False)
         threading.Thread(target=self._capture_key_worker, args=(kind,), daemon=True).start()
