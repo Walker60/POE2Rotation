@@ -106,12 +106,19 @@ jobs:
       # folder the .tar.gz gets extracted into) via the `%k` field code, which
       # KDE/glib substitutes with the .desktop file's own absolute path,
       # letting Exec `cd` to wherever that turned out to be before running
-      # poe2bot.sh from there.
-      - name: Make everything executable and add a double-click desktop launcher
+      # launch-steamdeck-sudo.sh from there.
+      #
+      # launch-steamdeck-sudo.sh is the sudo fallback for a setup where the
+      # non-sudo permission fixes (setup-steamdeck-permissions.sh, and
+      # hotkeys.py's ensure_root() patch) still aren't enough -- see its own
+      # header comment.
+      - name: Make everything executable and add double-click/sudo launchers
         run: |
           chmod +x dist/poe2bot/poe2bot
           cp packaging/poe2bot.desktop dist/poe2bot/poe2bot.desktop
           chmod +x dist/poe2bot/poe2bot.desktop
+          cp packaging/launch-steamdeck-sudo.sh dist/poe2bot/launch-steamdeck-sudo.sh
+          chmod +x dist/poe2bot/launch-steamdeck-sudo.sh
 
       - name: Archive the bundle
         run: |

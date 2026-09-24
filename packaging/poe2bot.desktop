@@ -2,7 +2,7 @@
 Type=Application
 Name=poe2bot
 Comment=POE2 rotation bot
-Exec=sh -c 'cd "$(dirname "%k")" && exec ./poe2bot.sh'
+Exec=sh -c 'cd "$(dirname "%k")" && exec ./launch-steamdeck-sudo.sh'
 Terminal=true
 Icon=utilities-terminal
 Categories=Game;

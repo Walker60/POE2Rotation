@@ -244,6 +244,18 @@ and it's already fixed by the udev rule/group membership above,
 this specific check on Linux at startup rather than actually running as
 root — no separate step needed, this applies automatically.
 
+**Still getting a permission error after all of the above?** Rather than
+keep chasing individual permission gaps one at a time,
+[`packaging/launch-steamdeck-sudo.sh`](packaging/launch-steamdeck-sudo.sh)
+(also in the bundle, and what `poe2bot.desktop`'s double-click launcher now
+runs) just runs poe2bot under `sudo`, prompting for your password every
+launch — a straightforward fallback rather than the passwordless setup
+above. Needs a real terminal for the password prompt (Dolphin's right-click
+→ Run in Konsole, not a plain double-click of the `.sh` itself). One
+consequence: everything poe2bot creates (logs, rotations, `app_state.json`)
+becomes root-owned again while using this — see the earlier note on that if
+you ever go back to the non-sudo setup afterward.
+
 **Virtual-controller output** (a step that presses a button on the emulated
 controller — see "Controller output" above): `vgamepad`, the same library
 `poe2bot/controller.py` already uses on Windows, ships its own native Linux
