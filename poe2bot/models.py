@@ -13,7 +13,7 @@ VALID_CONDITION_ACTIONS = ("fire", "block", "hold")   # what a Condition does on
 VALID_SEARCH_MODES = ("exact", "area")
 VALID_MATCH_LOGIC = ("all", "any")  # how a SkillConditionGroup's own children combine -- see SkillConditionGroup
 MAX_REPEAT_COUNT = 50
-MAX_GROUP_NESTING_DEPTH = 5  # sanity cap on how deep Condition Groups can nest -- see validate_rotation
+MAX_GROUP_NESTING_DEPTH = 5  # sanity cap on how deep Rotation Conditions can nest -- see validate_rotation
 
 
 _T = TypeVar("_T")
@@ -576,16 +576,17 @@ def _validate_entries(entries: List[Union[Step, ConditionGroup]], group_path_lab
     (group_path_label=that group's own label, depth=its nesting level) --
     recursing into any nested ConditionGroup and extending `problems` in
     place. group_path_label carries the " > "-joined ancestor-group chain
-    (e.g. "Condition Group 2 > Condition Group 1"); it's "" only at the true
-    top level, which is what makes this degrade to the exact
-    "Condition Group N"/"Condition Group N, Step M" labels a single level of
-    nesting always used."""
+    (e.g. "Rotation Condition 2 > Rotation Condition 1" -- a ConditionGroup
+    is called a "Rotation Condition" in the UI, to distinguish it from a
+    SkillConditionGroup); it's "" only at the true top level, which is what
+    makes this degrade to the exact "Rotation Condition N"/"Rotation
+    Condition N, Step M" labels a single level of nesting always used."""
     for i, entry in enumerate(entries, start=1):
         if isinstance(entry, ConditionGroup):
-            this_group_label = (f"{group_path_label} > Condition Group {i}"
-                                 if group_path_label else f"Condition Group {i}")
+            this_group_label = (f"{group_path_label} > Rotation Condition {i}"
+                                 if group_path_label else f"Rotation Condition {i}")
             if depth >= MAX_GROUP_NESTING_DEPTH:
-                problems.append(f"{this_group_label}: condition groups cannot nest more than "
+                problems.append(f"{this_group_label}: rotation conditions cannot nest more than "
                                  f"{MAX_GROUP_NESTING_DEPTH} levels deep.")
                 continue  # don't descend further -- avoid a cascade of redundant errors
             problems.extend(_condition_problems(
@@ -598,7 +599,7 @@ def _validate_entries(entries: List[Union[Step, ConditionGroup]], group_path_lab
 
 def _step_problems(label: str, step: Step) -> List[str]:
     """Every validation problem with one Step, addressed by `label` (e.g.
-    "Step 3" for a top-level step, or "Condition Group 2, Step 1" for one
+    "Step 3" for a top-level step, or "Rotation Condition 2, Step 1" for one
     nested in a group) -- shared by validate_rotation's top-level steps and
     each ConditionGroup's own nested steps."""
     problems = []

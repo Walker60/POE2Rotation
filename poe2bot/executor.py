@@ -353,8 +353,8 @@ class RotationRunner:
             my_path = path_prefix + (i,)
             child_resume = resume_path[1:] if i == start_index else ()
             if isinstance(entry, ConditionGroup):
-                this_group_label = (f"{group_path_label} > Condition Group {i + 1}"
-                                     if group_path_label else f"Condition Group {i + 1}")
+                this_group_label = (f"{group_path_label} > Rotation Condition {i + 1}"
+                                     if group_path_label else f"Rotation Condition {i + 1}")
                 if not child_resume or child_resume[0] == 0:
                     self._current_path = my_path
                     if not self._wait_for_focus_or_stop():

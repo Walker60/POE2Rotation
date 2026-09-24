@@ -1013,10 +1013,11 @@ class StepEditorMixin:
 
     def _confirm_group_removal(self, group_removals) -> bool:
         """True if it's fine to proceed removing `group_removals` (a set of
-        group_path tuples) -- either there are none, none of them have any
-        nested steps at any depth, or the user just confirmed taking those
-        steps (and any nested condition groups) down along with their
-        group(s)."""
+        group_path tuples, each a rotation-level ConditionGroup -- shown to
+        the user as a "Rotation Condition") -- either there are none, none
+        of them have any nested steps at any depth, or the user just
+        confirmed taking those steps (and any nested rotation conditions)
+        down along with their group(s)."""
         if not group_removals:
             return True
         total_nested_steps = sum(
@@ -1024,9 +1025,9 @@ class StepEditorMixin:
         if not total_nested_steps:
             return True
         return messagebox.askyesno(
-            "Remove Condition Group",
-            f"Remove {len(group_removals)} condition group(s) and the {total_nested_steps} "
-            f"step(s) nested inside them (including any nested condition groups)?", danger=True)
+            "Remove Rotation Condition",
+            f"Remove {len(group_removals)} rotation condition(s) and the {total_nested_steps} "
+            f"step(s) nested inside them (including any nested rotation conditions)?", danger=True)
 
     def _move_step_up(self):
         self._move_selected(-1)

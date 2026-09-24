@@ -765,14 +765,15 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         genuinely different Add-button rows -- Add Image/Pixel/Timer
         Condition + Copy/Paste Conditions (a step's own plain Conditions,
         see poe2bot/gui/conditions.py), Add Skill Condition Group (see
-        poe2bot/gui/skill_condition_groups.py), Add Condition Group
-        (Image)/(Pixel) (a rotation-level ConditionGroup, see poe2bot/gui/
-        condition_groups.py) -- plus ONE shared detail editor below them
-        (Name/Action/Negate-or-Match-Logic/Timeout-or-Hold+Delay/match
-        summary) for whichever single Condition/SkillConditionGroup/
-        ConditionGroup is currently selected. See GateEditorMixin
-        (poe2bot/gui/gate_editor.py) for the populate/apply/visibility
-        logic this feeds."""
+        poe2bot/gui/skill_condition_groups.py), Add Rotation Condition
+        (Image)/(Pixel) (a rotation-level ConditionGroup, called a "Rotation
+        Condition" in the UI to distinguish it from a Skill Condition
+        Group -- see poe2bot/gui/condition_groups.py) -- plus ONE shared
+        detail editor below them (Name/Action/Negate-or-Match-Logic/
+        Timeout-or-Hold+Delay/match summary) for whichever single
+        Condition/SkillConditionGroup/ConditionGroup is currently selected.
+        See GateEditorMixin (poe2bot/gui/gate_editor.py) for the populate/
+        apply/visibility logic this feeds."""
         self.gate_editor_section = CollapsibleSection(
             scroll_body, title="Conditions", padding=6, start_collapsed=True,
             on_toggle=lambda collapsed: self._on_section_toggled("conditions", collapsed))
@@ -809,15 +810,15 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
 
         group_btns = ttk.Frame(body)
         group_btns.pack(fill="x", pady=(6, 0))
-        ttk.Button(group_btns, text="Add Condition Group (Image)...",
+        ttk.Button(group_btns, text="Add Rotation Condition (Image)...",
                    command=self._on_add_image_condition_group_clicked).pack(side="left", padx=(0, 4))
-        ttk.Button(group_btns, text="Add Condition Group (Pixel)...",
+        ttk.Button(group_btns, text="Add Rotation Condition (Pixel)...",
                    command=self._on_add_pixel_condition_group_clicked).pack(side="left", padx=(0, 4))
         ttk.Label(group_btns,
                   text="(gates a whole block of steps at once -- select it, then Add Step/Add Sleep in"
                        " Skill Steps, or drag an existing step onto it, to nest steps under it; drag a"
-                       " group onto another group's row to nest it inside; with a group selected, these"
-                       " buttons recalibrate it instead of adding a new one)",
+                       " rotation condition onto another one's row to nest it inside; with one selected,"
+                       " these buttons recalibrate it instead of adding a new one)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
         ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(8, 6))

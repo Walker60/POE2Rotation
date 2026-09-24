@@ -625,75 +625,78 @@ Copying a step (Copy/Paste, or copying a whole rotation) carries its
 conditions along with it. Conditions with an image-match template participate
 in the same template-file portability/cleanup rules described above.
 
-## Condition Groups (optional, rotation-level)
+## Rotation Conditions (optional, rotation-level)
 
-A **Condition Group** is the rotation-level counterpart to a step's own
-Conditions above: instead of gating one step, it gates a whole block of
-steps nested under it at once. Handy for a burst combo that should only run
-in its entirety while some buff/debuff is up, without adding the same
-condition to every step in that combo individually.
+A **Rotation Condition** is the rotation-level counterpart to a step's own
+Conditions above (called a "Condition Group" internally, in the code and
+saved rotation files — the UI calls it a Rotation Condition specifically to
+avoid confusion with a step's own Skill Condition Group, described above):
+instead of gating one step, it gates a whole block of steps nested under it
+at once. Handy for a burst combo that should only run in its entirety while
+some buff/debuff is up, without adding the same condition to every step in
+that combo individually.
 
-A group holds exactly one condition (an image or pixel match — never a
-Timer condition, and never an AND'd list the way a step's Conditions can be)
-and an **Action**:
+A Rotation Condition holds exactly one condition (an image or pixel match —
+never a Timer condition, and never an AND'd list the way a step's Conditions
+can be) and an **Action**:
 
-- **Execute Group** — every step nested in the group only runs while the
-  condition matches; while it doesn't, the whole group is skipped this pass
-  (no fire, no delay, for any step nested in it) and the rotation moves on
-  to whatever comes after the group.
-- **Skip Group** — a veto: while the condition matches, the whole group is
+- **Execute Group** — every step nested in it only runs while the condition
+  matches; while it doesn't, the whole thing is skipped this pass (no fire,
+  no delay, for any step nested in it) and the rotation moves on to
+  whatever comes after it.
+- **Skip Group** — a veto: while the condition matches, the whole thing is
   skipped this pass, regardless of Execute Group. Handy for "don't run this
   combo while stunned/silenced."
 
-There's no Override Hold Time option and no Wait-up-to-ms polling at the
-group level (both stay per-step, on a step's own Conditions) — a group's
-condition is always a single, instant check. A group can itself hold another
-group nested inside it (up to 5 levels deep) — each level's own gate must
-pass for anything inside it to run, so a group nested inside another
-effectively ANDs its own condition with every ancestor group's condition
-above it, without re-entering the same check on every inner step.
+There's no Override Hold Time option and no Wait-up-to-ms polling at this
+level (both stay per-step, on a step's own Conditions) — its condition is
+always a single, instant check. A Rotation Condition can itself hold another
+one nested inside it (up to 5 levels deep) — each level's own gate must
+pass for anything inside it to run, so one nested inside another
+effectively ANDs its own condition with every ancestor's condition above
+it, without re-entering the same check on every inner step.
 
-**Add Condition Group (Image)...**/**Add Condition Group (Pixel)...** (in
-the **Rotation Conditions** section), with no group selected, calibrate a
-new condition exactly like adding a step's own Image/Pixel Condition does
-and add a new, empty group to the end of the step list — select it
-afterward to set its Name/Action/Negate right there in Rotation Conditions,
-which saves as you type, no separate apply step. **With an existing group's
-own row already selected, these same two buttons instead recalibrate that
-group's match** — converting it to Image or Pixel as needed — rather than
-adding another group; Name/Action/Negate carry over unchanged. Unlike
-Selected Step/Skill Conditions (which hide while a group's own row is
-selected, since a group has no Key/Delay/Hold/Repeat/per-step Conditions of
-its own), Rotation Conditions stays visible no matter what's selected — its
-Name/Action/Negate fields just blank out until a group is actually
-selected. Double-clicking a group's row also recalibrates it, the same as
-double-clicking a step's condition, always keeping its current match type.
-**Test Match** (next to the Add Condition Group buttons) checks a selected group's
-condition the same way it does for a step's own condition — see Skill Conditions
-above.
+**Add Rotation Condition (Image)...**/**Add Rotation Condition (Pixel)...**
+(in the **Conditions** section, alongside Skill Conditions and Skill
+Condition Groups), with none selected, calibrate a new condition exactly
+like adding a step's own Image/Pixel Condition does and add a new, empty
+Rotation Condition to the end of the step list — select it afterward to set
+its Name/Action/Negate right there in the same section's shared detail
+editor, which saves as you type, no separate apply step. **With an existing
+one's own row already selected, these same two buttons instead recalibrate
+its match** — converting it to Image or Pixel as needed — rather than
+adding another one; Name/Action/Negate carry over unchanged. The Conditions
+section's detail editor stays visible no matter what's selected — its
+fields just blank out (and swap to whichever of Skill Condition/Skill
+Condition Group/Rotation Condition's own fields are relevant) until
+something is actually selected. Double-clicking its row also recalibrates
+it, the same as double-clicking a step's condition, always keeping its
+current match type. **Test Match** (next to the Add buttons) checks a
+selected Rotation Condition the same way it does for a step's own condition
+— see Skill Conditions above.
 
-Steps end up nested under a group two ways: select the group (or one of its
-own nested steps/conditions) and click **Add Step**/**Add Sleep**, which
-appends into that group instead of the top level; or drag an existing step
-onto the group's row to move it in — dragging a nested step onto a plain
-step's row instead repositions it as a sibling of that step, wherever it
-lives, which is how a nested step gets pulled back out to the top level or
-into a different group. A group itself is nested inside another group only
-by dragging it onto the *middle* of that other group's own row — there's
-no "Add Nested Group" button; the Add Condition Group buttons always add a
-brand-new group at the top level, exactly as above. Dragging a group onto
+Steps end up nested under a Rotation Condition two ways: select it (or one
+of its own nested steps/conditions) and click **Add Step**/**Add Sleep**,
+which appends into it instead of the top level; or drag an existing step
+onto its row to move it in — dragging a nested step onto a plain step's row
+instead repositions it as a sibling of that step, wherever it lives, which
+is how a nested step gets pulled back out to the top level or into a
+different one. A Rotation Condition itself is nested inside another only by
+dragging it onto the *middle* of that other one's own row — there's no "Add
+Nested Group" button; the Add Rotation Condition buttons always add a
+brand-new one at the top level, exactly as above. Dragging one onto
 that same row's top or bottom edge instead repositions it as a plain
-sibling of that group, which is how a nested group gets pulled back out to
-a shallower level (including the top level) — handy since hovering a
-group's row otherwise always means nesting into it, even when it's the
+sibling of that one, which is how a nested Rotation Condition gets pulled
+back out to a shallower level (including the top level) — handy since
+hovering its row otherwise always means nesting into it, even when it's the
 only row there is to drop next to. Move Up/Move Down and a plain drag
-reorder a nested step within its own group, or a group itself among
-whichever list it currently lives in (the top level, or another group's
-own nested entries), the same way Move
-Up/Move Down and dragging already work for a plain step. Removing a
-non-empty group (Remove Selected) asks for confirmation first, since it
-deletes everything nested inside it — steps and any further-nested groups,
-at any depth — along with the group.
+reorder a nested step within its own Rotation Condition, or a Rotation
+Condition itself among whichever list it currently lives in (the top
+level, or another one's own nested entries), the same way Move Up/Move
+Down and dragging already work for a plain step. Removing a non-empty one
+(Remove Selected) asks for confirmation first, since it deletes everything
+nested inside it — steps and any further-nested Rotation Conditions, at
+any depth — along with it.
 
 ## Repeat and Combine Hold (optional, per step)
 
@@ -725,9 +728,9 @@ list on the left) and drag-and-drop, on top of the buttons described above:
 
 - **Drag** one or more selected rows to reorder them — drag a step (or
   several multi-selected steps sharing the same current group, or lack of
-  one) onto a Condition Group's row to move it into that group, or onto a
+  one) onto a Rotation Condition's row to move it into that group, or onto a
   plain step's row to reposition it as a sibling of that step (wherever it
-  lives — the top level, or any group); drag a Condition Group (or several
+  lives — the top level, or any group); drag a Rotation Condition (or several
   sharing the same current parent) onto the *middle* of another group's row
   to nest it inside that group instead, or onto that same row's top/bottom
   edge to reposition it as a plain sibling of that group instead — this
@@ -838,7 +841,7 @@ menu item is disabled whenever there's nothing to restore.
    temporarily pulling a step out of a rotation without deleting it and
    losing its calibrated conditions. The button is only enabled while
    exactly one step (or one of its conditions) is selected — nothing to
-   toggle with a condition group's own row selected, or with nothing/several
+   toggle with a Rotation Condition's own row selected, or with nothing/several
    things selected.
 
    The **Enabled** checkbox (next to Mode) is the same idea one level up: unchecking

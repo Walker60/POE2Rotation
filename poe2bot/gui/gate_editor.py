@@ -16,11 +16,11 @@ _ACTION_BY_LABEL_BY_KIND = {
 }
 
 _KIND_CAPTIONS = {
-    None: "Nothing selected -- select a condition, skill condition group, or condition group's own "
+    None: "Nothing selected -- select a condition, skill condition group, or rotation condition's own "
           "row in Skill Steps, or use one of the Add buttons above.",
     "condition": "Selected: Skill Condition",
     "skill_group": "Selected: Skill Condition Group",
-    "rotation_group": "Selected: Rotation Condition Group",
+    "rotation_group": "Selected: Rotation Condition",
 }
 
 
@@ -29,9 +29,10 @@ class GateEditorMixin:
     Image/Pixel/Timer Condition + Copy/Paste Conditions for a step's own
     plain Conditions; Add Skill Condition Group for grouping several of
     them with an All/Any rule -- see poe2bot/models.py's SkillConditionGroup;
-    Add Condition Group (Image)/(Pixel) for a rotation-level ConditionGroup
-    that gates a whole block of steps -- see that class's own docstring),
-    each a genuinely different creation flow kept in its own actual
+    Add Rotation Condition (Image)/(Pixel) for a rotation-level
+    ConditionGroup that gates a whole block of steps -- called a "Rotation
+    Condition" in the UI, see that class's own docstring), each a
+    genuinely different creation flow kept in its own actual
     ADD-button row, but sharing ONE detail editor below them (Name/Action/
     Negate-or-Match-Logic/Timeout-or-Hold+Delay/match-summary) for whichever
     single Condition/SkillConditionGroup/ConditionGroup is currently
@@ -102,7 +103,7 @@ class GateEditorMixin:
                 "of them to test individually, or use Test Run and watch the Activity window.")
             return
         self._show_gate_info(
-            "No condition selected", "Select a condition or condition group in the Skill Steps list first.")
+            "No condition selected", "Select a condition or rotation condition in the Skill Steps list first.")
 
     @staticmethod
     def _show_gate_info(title: str, message: str):
@@ -157,7 +158,7 @@ class GateEditorMixin:
                 self.gate_timeout_var.set("0")
                 self.gate_hold_var.set("")
                 self.gate_delay_var.set("")
-                self.gate_match_summary_var.set("(no condition group selected)")
+                self.gate_match_summary_var.set("(no rotation condition selected)")
             self._clear_gate_form_error()
             self._refresh_gate_extra_visibility()
 

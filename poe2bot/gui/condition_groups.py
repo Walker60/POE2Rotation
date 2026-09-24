@@ -2,15 +2,17 @@ from poe2bot.models import Condition, ConditionGroup
 
 
 class ConditionGroupsMixin:
-    """Rotation-level Condition Groups: creating one (Add Condition Group
-    (Image)/(Pixel), always a top-level append), and recalibrating a
-    group's match by double-clicking its row. A group may itself be nested
-    inside another group (up to models.MAX_GROUP_NESTING_DEPTH) -- nesting
-    is created only via drag-and-drop (see poe2bot/gui/drag_drop.py), never
-    by these Add Condition Group buttons, which always append at the top
-    level exactly as before. Mixed into App (see poe2bot/gui/app.py) --
-    reuses CalibrationMixin's _start_image_capture/_start_pixel_capture via
-    the on_use callback, exactly like ConditionsMixin does for a step's own
+    """Rotation-level Condition Groups -- called a "Rotation Condition" in
+    the UI, to distinguish it from a Skill Condition Group, which stays
+    named as-is: creating one (Add Rotation Condition (Image)/(Pixel),
+    always a top-level append), and recalibrating a group's match by
+    double-clicking its row. A group may itself be nested inside another
+    group (up to models.MAX_GROUP_NESTING_DEPTH) -- nesting is created only
+    via drag-and-drop (see poe2bot/gui/drag_drop.py), never by these Add
+    Rotation Condition buttons, which always append at the top level
+    exactly as before. Mixed into App (see poe2bot/gui/app.py) -- reuses
+    CalibrationMixin's _start_image_capture/_start_pixel_capture via the
+    on_use callback, exactly like ConditionsMixin does for a step's own
     conditions. The selected group's own Name/Action/Negate fields are
     edited through the unified detail editor instead -- see
     poe2bot/gui/gate_editor.py's GateEditorMixin, which this mixin's
@@ -19,7 +21,7 @@ class ConditionGroupsMixin:
     def _selected_group_location(self):
         """The group_path of the condition group whose own header row is
         currently selected, or None (a step/condition row, nothing, or a
-        multi-selection). Used by the Add Condition Group (Image)/(Pixel)
+        multi-selection). Used by the Add Rotation Condition (Image)/(Pixel)
         buttons to decide whether they're adding a brand new top-level
         group or recalibrating the one that's already selected -- see
         _on_add_image_condition_group_clicked below."""
@@ -56,8 +58,8 @@ class ConditionGroupsMixin:
         entirely, and always lands at the top level regardless of what's
         selected; nesting a group inside another is done only by dragging it
         onto that group's own row afterward (see poe2bot/gui/drag_drop.py)
-        -- and selects its new row so the Rotation Conditions section
-        immediately shows it."""
+        -- and selects its new row so the unified Conditions section's
+        detail editor immediately shows it."""
         group_path = (len(self.editing_steps),)
         self.editing_steps.append(ConditionGroup(condition=condition))
         self._refresh_steps_tree()
@@ -65,14 +67,14 @@ class ConditionGroupsMixin:
         self._autosave()
 
     # ---- recalibrating a group's match (double-click its row, or the Add ----
-    # ---- Condition Group buttons while that group is already selected) ------
+    # ---- Rotation Condition buttons while that group is already selected) ---
 
     def _on_group_row_double_click(self, group_path):
         """Double-clicking a condition group's own row recalibrates its
         match in place, always using whichever match_type it already has --
         exactly like recalibrating a step's condition does (see
         ConditionsMixin._on_tree_double_click, which dispatches here for a
-        group row). The Add Condition Group (Image)/(Pixel) buttons share
+        group row). The Add Rotation Condition (Image)/(Pixel) buttons share
         the same underlying recalibrate (_recalibrate_group) when a group
         is already selected, but let the clicked button's type override
         this, which is how an existing group gets converted from one match

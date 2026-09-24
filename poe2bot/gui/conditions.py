@@ -17,8 +17,9 @@ class ConditionsMixin:
     (see poe2bot/gui/app.py) -- Add/recalibrate Condition reuse
     CalibrationMixin's _start_image_capture/_start_pixel_capture via the
     on_use callback. See poe2bot/gui/condition_groups.py for the parallel
-    rotation-level Condition Group concept (one condition gating a whole
-    block of steps rather than one step's own conditions), and
+    rotation-level Condition Group concept -- called a "Rotation Condition"
+    in the UI (one condition gating a whole block of steps rather than one
+    step's own conditions), and
     poe2bot/gui/skill_condition_groups.py for the parallel Skill Condition
     Group concept (several of one step's own conditions, combined via an
     All/Any rule) -- a Condition living inside one of THOSE is still added/
