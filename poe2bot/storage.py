@@ -125,11 +125,29 @@ def load_rotation(name: str, folder: str = "") -> Rotation:
 
 
 def load_all_rotations() -> dict:
+    rotations, _has_failures = load_all_rotations_and_check()
+    return rotations
+
+
+def load_all_rotations_and_check() -> tuple:
+    """Like load_all_rotations(), but returns (rotations, has_unparseable) in
+    one combined walk+parse pass -- has_unparseable is exactly what a
+    separate has_unparseable_rotations() call would report, computed for
+    free alongside the load instead of re-walking and re-parsing every
+    rotation file a second time right after. Callers that need both at the
+    same moment (see gui/app.py's startup sequence) should use this instead
+    of calling load_all_rotations() and has_unparseable_rotations()
+    back-to-back."""
     rotations = {}
-    for rotation, folder in _iter_loaded_rotations():
+    has_failures = False
+    for path, folder in _iter_rotation_files():
+        rotation = _try_load_rotation(path)
+        if rotation is None:
+            has_failures = True
+            continue
         rotation.folder = folder
         rotations[rotation.name] = rotation
-    return rotations
+    return rotations, has_failures
 
 
 def save_rotation(rotation: Rotation) -> None:

@@ -8,6 +8,83 @@ _COLLAPSED_MARK = "▸"  # >
 _EXPANDED_MARK = "▾"   # v
 
 
+def make_scrollable_area(parent, *, horizontal: bool = False, padding: int = 0):
+    """Wraps a Canvas + Scrollbar(s) around a fresh body frame the caller
+    packs its own content into -- the standard Tk way to make an arbitrary
+    stack of widgets scrollable, since ttk has no native scrollable frame.
+    Returns (canvas, body): body is what callers pack their content into;
+    canvas is returned too, since a caller may need it for its own sizing
+    (e.g. SettingsWindow auto-sizing itself to its content).
+
+    `horizontal`, if set, also adds a horizontal scrollbar and never shrinks
+    body below its own natural required width -- for a caller with rows
+    that can genuinely be wider than the window (e.g. the step editor's
+    Skill Steps columns on a narrow screen), so the excess is reachable via
+    horizontal scroll instead of being squeezed and clipped; otherwise body
+    is always stretched/shrunk to exactly the canvas's own width, like a
+    plain vertically-scrolling list. `padding`, if set, applies to body
+    itself (e.g. an outer content margin) rather than needing a second
+    nested Frame just for that.
+
+    Mouse-wheel scrolling is bound only while the pointer is actually over
+    the canvas (not for the whole window's lifetime), so scrolling over
+    some OTHER scrollable widget nested inside (a Treeview's own scrollbar,
+    the rotation list, ...) is never hijacked by this canvas -- covers both
+    Windows/macOS's <MouseWheel> and X11's <Button-4>/<Button-5> (Linux has
+    no <MouseWheel> event of its own)."""
+    container = ttk.Frame(parent)
+    container.pack(fill="both", expand=True)
+    canvas = tk.Canvas(container, highlightthickness=0, bd=0, bg=ttk.Style().lookup("TFrame", "background"))
+    vscroll = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vscroll.set)
+    if horizontal:
+        # Packed before the canvas (claiming its own strip of the cavity first)
+        # so it lands flush against the bottom edge instead of leaving a gap.
+        hscroll = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+        canvas.configure(xscrollcommand=hscroll.set)
+        hscroll.pack(side="bottom", fill="x")
+    vscroll.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+
+    body = ttk.Frame(canvas, padding=padding)
+    window_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+    def _on_body_configure(_event):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+    body.bind("<Configure>", _on_body_configure)
+
+    def _on_canvas_configure(event):
+        width = max(event.width, body.winfo_reqwidth()) if horizontal else event.width
+        canvas.itemconfigure(window_id, width=width)
+    canvas.bind("<Configure>", _on_canvas_configure)
+
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_mousewheel_linux(event):
+        canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
+
+    def _on_shift_mousewheel(event):
+        canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _bind_wheel(_event):
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", _on_mousewheel_linux)
+        canvas.bind_all("<Button-5>", _on_mousewheel_linux)
+        if horizontal:
+            canvas.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)
+
+    def _unbind_wheel(_event):
+        canvas.unbind_all("<MouseWheel>")
+        canvas.unbind_all("<Button-4>")
+        canvas.unbind_all("<Button-5>")
+        if horizontal:
+            canvas.unbind_all("<Shift-MouseWheel>")
+    canvas.bind("<Enter>", _bind_wheel)
+    canvas.bind("<Leave>", _unbind_wheel)
+    return canvas, body
+
+
 class CollapsibleSection(ttk.Frame):
     """A ttk.LabelFrame-like group whose body can be shown/hidden by
     clicking its header. Pack/grid children into `.body`, exactly like

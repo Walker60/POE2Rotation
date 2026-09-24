@@ -26,22 +26,24 @@ from poe2bot.gui.rotation_list import RotationListMixin
 from poe2bot.gui.step_editor import StepEditorMixin
 from poe2bot.gui.drag_drop import DragDropMixin
 from poe2bot.gui.calibration import CalibrationMixin
-from poe2bot.gui.conditions import ConditionsMixin, CONDITION_ACTION_LABELS
-from poe2bot.gui.condition_groups import ConditionGroupsMixin, GROUP_CONDITION_ACTION_LABELS
-from poe2bot.gui.skill_condition_groups import SkillConditionGroupsMixin, SKILL_GROUP_ACTION_LABELS
+from poe2bot.gui.conditions import ConditionsMixin
+from poe2bot.gui.condition_groups import ConditionGroupsMixin
+from poe2bot.gui.skill_condition_groups import SkillConditionGroupsMixin
+from poe2bot.gui.gate_editor import GateEditorMixin
+from poe2bot.gui.action_labels import ACTION_LABELS
 from poe2bot.gui.hotkeys_ui import HotkeysMixin
 from poe2bot.gui.autosave import AutosaveMixin
 from poe2bot.gui.updater_ui import UpdaterMixin
 from poe2bot.gui.controller_driver_ui import ControllerDriverMixin
-from poe2bot.gui.widgets import CollapsibleSection
+from poe2bot.gui.widgets import CollapsibleSection, make_scrollable_area
 from poe2bot.gui.constants import STATUS_COLORS
 
 log = get_logger()
 
 
 class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
-          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, SkillConditionGroupsMixin, HotkeysMixin,
-          AutosaveMixin, UpdaterMixin, ControllerDriverMixin):
+          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, SkillConditionGroupsMixin, GateEditorMixin,
+          HotkeysMixin, AutosaveMixin, UpdaterMixin, ControllerDriverMixin):
     def __init__(self):
         super().__init__()
         self.title("POE2 Rotation Bot")
@@ -149,10 +151,16 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                                                   # clearing the tree's selection itself, so that
                                                   # doesn't get misread as "user navigated away" and
                                                   # trigger an unwanted auto-commit (see there)
-        self._section_collapse_overrides = {}  # id(step) -> {"cooldown"/"buff"/"conditions": bool},
-                                                # in-session only (not persisted) manual overrides of
-                                                # each CollapsibleSection's smart per-step default
+        self._section_collapse_overrides = {}  # id(step) -> {"conditions": bool}, in-session only
+                                                # (not persisted) manual override of the Conditions
+                                                # section's smart per-step default
+        self._gate_editor_kind = None      # None/"condition"/"skill_group"/"rotation_group" -- whichever
+                                            # kind the unified Conditions detail editor is currently
+                                            # showing -- see GateEditorMixin, poe2bot/gui/gate_editor.py
+        self._gate_editor_nested = False   # only meaningful when _gate_editor_kind == "condition"
         self.rotation_filter_var = tk.StringVar()  # substring filter for the rotation list
+        self._rotation_filter_after_id = None  # pending debounced _refresh_rotation_tree() call, or
+                                                # None -- see _on_rotation_filter_key_release
         self._calibration_hint_shown = False  # show the "here's how calibration works" popup
                                                # at most once per session -- see CalibrationMixin
         self._no_gamepad_hint_shown = False  # show the "evdev sees no gamepad-like device" popup
@@ -163,8 +171,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self._pending_grab_capture_fn = None  # the capture to run once the screen grab hotkey fires, or None
 
         self._build_widgets()
-        self._load_rotations_from_disk()
-        self._sweep_templates()
+        has_unparseable = self._load_rotations_from_disk()
+        self._sweep_templates(known_unparseable=has_unparseable)
         self._refresh_rotation_tree()
         self._new_rotation()
         geometry.size_window_to_contents(self)
@@ -185,12 +193,20 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             self.controller_min_tap_ms, self.controller_index, self.require_game_focus,
             self.screen_grab_hotkey)
 
-    def _load_rotations_from_disk(self):
-        for name, rotation in storage.load_all_rotations().items():
+    def _load_rotations_from_disk(self) -> bool:
+        """Loads every rotation file into self.rotations, returning whether
+        any rotation file failed to parse -- storage.load_all_rotations_and_check()
+        does the walk+parse pass once and reports both, so the startup-only
+        template sweep right after (see __init__) doesn't have to redo that
+        same full walk+parse again just to answer the same question (see
+        ConditionsMixin._sweep_templates's known_unparseable parameter)."""
+        rotations, has_unparseable = storage.load_all_rotations_and_check()
+        for name, rotation in rotations.items():
             self.rotations[name] = rotation
             self.rotation_manager.load(rotation)
             if self._rotation_hotkeys_should_be_live(rotation):
                 self._bind_rotation_hotkeys(rotation)
+        return has_unparseable
 
     # ---- Active Folder / Active Device scoping --------------------------------
 
@@ -406,9 +422,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self._build_hotkeys_section(scroll_body)
         self._build_steps_tree(scroll_body)
         self._build_step_fields_section(scroll_body)
-        self._build_conditions_section(scroll_body)
-        self._build_skill_condition_groups_section(scroll_body)
-        self._build_rotation_conditions_section(scroll_body)
+        self._build_gate_editor_section(scroll_body)
 
     def _build_bottom_bar(self):
         """The Stop/Start Bot button, its status label, and the Settings...
@@ -461,7 +475,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         ttk.Label(filter_row, text="Filter:").pack(side="left")
         filter_entry = ttk.Entry(filter_row, textvariable=self.rotation_filter_var)
         filter_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        filter_entry.bind("<KeyRelease>", lambda _e: self._refresh_rotation_tree())
+        filter_entry.bind("<KeyRelease>", self._on_rotation_filter_key_release)
 
         self.rotation_tree = ttk.Treeview(
             left, columns=("status",), show="tree headings", height=20, selectmode="extended")
@@ -546,70 +560,14 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         """The scrollable body every section below (hotkeys, the steps list,
         step fields, conditions) packs into -- together they can add up to
         more space (vertically, and horizontally on a narrow/small screen --
-        e.g. the Steam Deck) than the window has, and a Canvas + Scrollbars is
-        the standard Tk way to make an arbitrary stack of widgets scrollable
-        (ttk has no native scrollable frame). Name/Folder/Mode stay outside
-        this canvas (built by _build_rotation_form_header) so they're always
-        visible. Returns scroll_body, the frame every later section packs
-        into."""
-        # Everything below (hotkeys, the steps list, step actions/fields, and
-        # conditions) can add up to more space than the window has --
-        # a Canvas + Scrollbars is the standard Tk way to make an arbitrary
-        # stack of widgets scrollable (ttk has no native scrollable frame).
-        # Name/Folder/Mode above stay outside this canvas so they're always visible.
-        scroll_container = ttk.Frame(right)
-        scroll_container.pack(fill="both", expand=True, pady=(4, 0))
-        # A plain tk.Canvas (there's no ttk one) isn't auto-styled the way the
-        # rest of the GUI is -- its background needs to be kept in sync with
-        # the current theme by hand, same idea as _sync_root_background below.
-        editor_canvas = tk.Canvas(
-            scroll_container, highlightthickness=0, bd=0, bg=ttk.Style().lookup("TFrame", "background"))
+        e.g. the Steam Deck) than the window has. Name/Folder/Mode stay
+        outside this canvas (built by _build_rotation_form_header) so they're
+        always visible. Returns scroll_body, the frame every later section
+        packs into. See widgets.make_scrollable_area for the actual
+        Canvas + Scrollbar(s) mechanics, shared with SettingsWindow's own
+        scroll area."""
+        editor_canvas, scroll_body = make_scrollable_area(right, horizontal=True)
         self.editor_canvas = editor_canvas
-        editor_vscroll = ttk.Scrollbar(scroll_container, orient="vertical", command=editor_canvas.yview)
-        editor_hscroll = ttk.Scrollbar(scroll_container, orient="horizontal", command=editor_canvas.xview)
-        editor_canvas.configure(yscrollcommand=editor_vscroll.set, xscrollcommand=editor_hscroll.set)
-        # Packed in this order (scrollbars claiming their strips of the cavity
-        # before the canvas fills what's left) so they land flush against the
-        # right/bottom edges instead of leaving a gap in that corner -- same
-        # reasoning as _build_bottom_bar's own packing-order comment.
-        editor_vscroll.pack(side="right", fill="y")
-        editor_hscroll.pack(side="bottom", fill="x")
-        editor_canvas.pack(side="left", fill="both", expand=True)
-        scroll_body = ttk.Frame(editor_canvas)
-        scroll_window = editor_canvas.create_window((0, 0), window=scroll_body, anchor="nw")
-
-        def _on_scroll_body_configure(_event):
-            editor_canvas.configure(scrollregion=editor_canvas.bbox("all"))
-        scroll_body.bind("<Configure>", _on_scroll_body_configure)
-
-        def _on_editor_canvas_configure(event):
-            # Stretches scroll_body (and everything packed fill="x" inside it)
-            # to fill the visible canvas width, same as before -- but never
-            # shrinks it below its own natural required width, so on a window
-            # too narrow for its widest row (e.g. the Skill Steps columns) that
-            # row instead overflows off the right edge and becomes reachable
-            # via editor_hscroll/Shift+MouseWheel, rather than being silently
-            # squeezed and clipped.
-            width = max(event.width, scroll_body.winfo_reqwidth())
-            editor_canvas.itemconfigure(scroll_window, width=width)
-        editor_canvas.bind("<Configure>", _on_editor_canvas_configure)
-
-        def _on_editor_mousewheel(event):
-            editor_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def _on_editor_shift_mousewheel(event):
-            editor_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
-        # Bound/unbound on hover (not bind_all for the app's lifetime) so scrolling
-        # over the rotation list or the steps tree's own scrollbar isn't hijacked.
-        def _bind_editor_wheel(_e):
-            editor_canvas.bind_all("<MouseWheel>", _on_editor_mousewheel)
-            editor_canvas.bind_all("<Shift-MouseWheel>", _on_editor_shift_mousewheel)
-
-        def _unbind_editor_wheel(_e):
-            editor_canvas.unbind_all("<MouseWheel>")
-            editor_canvas.unbind_all("<Shift-MouseWheel>")
-        editor_canvas.bind("<Enter>", _bind_editor_wheel)
-        editor_canvas.bind("<Leave>", _unbind_editor_wheel)
         return scroll_body
 
     def _build_hotkeys_section(self, scroll_body: ttk.Frame):
@@ -802,15 +760,26 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             step_fields_group, textvariable=self.step_form_error_var, foreground=theme.DANGER_COLOR)
         # Not packed here -- only shown while there's an actual error, see _read_step_form.
 
-    def _build_conditions_section(self, scroll_body: ttk.Frame):
-        """The collapsible "Skill Conditions" section: Add Image/Pixel/
-        Timer Condition buttons, Copy/Paste Conditions, and the selected
-        condition's Name/Action/Negate/timeout/hold-override fields."""
-        self.conditions_section = CollapsibleSection(
-            scroll_body, title="Skill Conditions", padding=6, start_collapsed=True,
+    def _build_gate_editor_section(self, scroll_body: ttk.Frame):
+        """The single collapsible "Conditions" section: three separate,
+        genuinely different Add-button rows -- Add Image/Pixel/Timer
+        Condition + Copy/Paste Conditions (a step's own plain Conditions,
+        see poe2bot/gui/conditions.py), Add Skill Condition Group (see
+        poe2bot/gui/skill_condition_groups.py), Add Condition Group
+        (Image)/(Pixel) (a rotation-level ConditionGroup, see poe2bot/gui/
+        condition_groups.py) -- plus ONE shared detail editor below them
+        (Name/Action/Negate-or-Match-Logic/Timeout-or-Hold+Delay/match
+        summary) for whichever single Condition/SkillConditionGroup/
+        ConditionGroup is currently selected. See GateEditorMixin
+        (poe2bot/gui/gate_editor.py) for the populate/apply/visibility
+        logic this feeds."""
+        self.gate_editor_section = CollapsibleSection(
+            scroll_body, title="Conditions", padding=6, start_collapsed=True,
             on_toggle=lambda collapsed: self._on_section_toggled("conditions", collapsed))
-        self.conditions_section.pack(fill="x", pady=(0, 6))
-        condition_btns = ttk.Frame(self.conditions_section.body)
+        self.gate_editor_section.pack(fill="x", pady=(0, 6))
+        body = self.gate_editor_section.body
+
+        condition_btns = ttk.Frame(body)
         condition_btns.pack(fill="x")
         ttk.Button(condition_btns, text="Add Image Condition...",
                    command=self._on_add_image_condition_clicked).pack(side="left", padx=(0, 4))
@@ -822,199 +791,108 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                    command=self._on_copy_conditions_clicked).pack(side="left", padx=(8, 4))
         ttk.Button(condition_btns, text="Paste Conditions",
                    command=self._on_paste_conditions_clicked).pack(side="left", padx=(0, 4))
-        ttk.Button(condition_btns, text="Test Match",
-                   command=self._on_test_match_clicked).pack(side="left", padx=(8, 4))
         ttk.Label(condition_btns,
                   text="(with a condition selected, Add Image/Pixel/Timer Condition recalibrates it"
                        " instead of adding a new one -- same as double-clicking it;"
                        " use Move Up/Move Down in Skill Steps to reorder it)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
-        condition_name_row = ttk.Frame(self.conditions_section.body)
-        condition_name_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(condition_name_row, text="Name:").pack(side="left")
-        self.condition_name_var = tk.StringVar()
-        ttk.Entry(condition_name_row, textvariable=self.condition_name_var, width=16).pack(
-            side="left", padx=(2, 12))
-        ttk.Label(condition_name_row, text="Action:").pack(side="left")
-        self.condition_action_var = tk.StringVar(value=CONDITION_ACTION_LABELS["fire"])
-        condition_action_combo = ttk.Combobox(
-            condition_name_row, textvariable=self.condition_action_var,
-            values=list(CONDITION_ACTION_LABELS.values()), state="readonly", width=22)
-        condition_action_combo.pack(side="left", padx=(2, 12))
-        condition_action_combo.bind("<<ComboboxSelected>>", self._on_condition_action_changed)
-        self.condition_negate_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(condition_name_row, text="Negate (invert the match)",
-                        variable=self.condition_negate_var).pack(side="left")
-        for condition_var in (self.condition_name_var, self.condition_action_var, self.condition_negate_var):
-            self._autosave_on_change(condition_var)
-
-        condition_extra_row = ttk.Frame(self.conditions_section.body)
-        condition_extra_row.pack(fill="x", pady=(4, 0))
-        self.condition_timeout_frame = ttk.Frame(condition_extra_row)
-        ttk.Label(self.condition_timeout_frame, text="Wait up to (ms)").pack(side="left")
-        self.condition_timeout_var = tk.StringVar(value="0")
-        ttk.Entry(self.condition_timeout_frame, textvariable=self.condition_timeout_var, width=6).pack(
-            side="left", padx=(2, 0))
-        self.condition_hold_frame = ttk.Frame(condition_extra_row)
-        ttk.Label(self.condition_hold_frame, text="Hold override (ms)").pack(side="left")
-        self.condition_hold_var = tk.StringVar(value="")
-        ttk.Entry(self.condition_hold_frame, textvariable=self.condition_hold_var, width=6).pack(
-            side="left", padx=(2, 8))
-        ttk.Label(self.condition_hold_frame, text="Delay override (ms)").pack(side="left")
-        self.condition_delay_var = tk.StringVar(value="")
-        ttk.Entry(self.condition_hold_frame, textvariable=self.condition_delay_var, width=6).pack(
-            side="left", padx=(2, 0))
-        # Neither frame packed yet -- _refresh_condition_extra_visibility shows
-        # whichever one is relevant to the currently-selected Action.
-        for condition_numeric_var in (self.condition_timeout_var, self.condition_hold_var, self.condition_delay_var):
-            self._autosave_on_change(condition_numeric_var)
-
-        self.condition_form_error_var = tk.StringVar(value="")
-        self.condition_form_error_label = ttk.Label(
-            self.conditions_section.body, textvariable=self.condition_form_error_var, foreground=theme.DANGER_COLOR)
-        # Not packed here -- only shown while _apply_pending_condition_edits (see
-        # poe2bot/gui/conditions.py) finds Wait timeout/Hold/Delay override invalid.
-
-        self.condition_nested_hint_label = ttk.Label(
-            self.conditions_section.body,
-            text="This condition is inside a Skill Condition Group -- its own Action/Timeout/Hold/Delay"
-                 " are ignored; the group's own Action (below) applies instead.",
-            foreground="gray")
-        # Not packed here -- only shown for a condition nested inside a Skill Condition
-        # Group, see ConditionsMixin._refresh_condition_extra_visibility.
-
-    def _build_skill_condition_groups_section(self, scroll_body: ttk.Frame):
-        """The collapsible "Skill Condition Groups" section: an Add Skill
-        Condition Group button, and the selected group's Name/Action/Match
-        Logic/Timeout-or-Hold+Delay fields.
-
-        Distinct from the "Rotation Conditions" section below (a rotation-
-        level ConditionGroup gates a whole block of STEPS with one single
-        condition) -- this instead groups several of ONE step's own plain
-        Conditions, combined via an All/Any rule, with the action decided
-        once for the whole group. Conditions are added to the selected
-        group via this same section's own "Skill Conditions" Add Image/
-        Pixel/Timer Condition buttons above, not here -- see
-        ConditionsMixin._resolve_condition_add_target."""
-        self.skill_condition_groups_section = CollapsibleSection(
-            scroll_body, title="Skill Condition Groups", padding=6, start_collapsed=True,
-            on_toggle=lambda collapsed: self._on_section_toggled("skill_condition_groups", collapsed))
-        self.skill_condition_groups_section.pack(fill="x", pady=(0, 6))
-        skill_group_btns = ttk.Frame(self.skill_condition_groups_section.body)
-        skill_group_btns.pack(fill="x")
+        skill_group_btns = ttk.Frame(body)
+        skill_group_btns.pack(fill="x", pady=(6, 0))
         ttk.Button(skill_group_btns, text="Add Skill Condition Group",
                    command=self._on_add_skill_condition_group_clicked).pack(side="left", padx=(0, 4))
         ttk.Label(skill_group_btns,
                   text="(combines several of this skill's own conditions with an All/Any rule and one"
-                       " shared Action -- select it, then use the Skill Conditions section's Add Image/"
-                       "Pixel/Timer Condition buttons above to add conditions to it, or drag an existing"
-                       " condition onto its row)",
+                       " shared Action -- select it, then use Add Image/Pixel/Timer Condition above to"
+                       " add conditions to it, or drag an existing condition onto its row)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
-        skill_group_name_row = ttk.Frame(self.skill_condition_groups_section.body)
-        skill_group_name_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(skill_group_name_row, text="Name:").pack(side="left")
-        self.skill_group_name_var = tk.StringVar()
-        ttk.Entry(skill_group_name_row, textvariable=self.skill_group_name_var, width=16).pack(
-            side="left", padx=(2, 12))
-        ttk.Label(skill_group_name_row, text="Action:").pack(side="left")
-        self.skill_group_action_var = tk.StringVar(value=SKILL_GROUP_ACTION_LABELS["fire"])
-        skill_group_action_combo = ttk.Combobox(
-            skill_group_name_row, textvariable=self.skill_group_action_var,
-            values=list(SKILL_GROUP_ACTION_LABELS.values()), state="readonly", width=22)
-        skill_group_action_combo.pack(side="left", padx=(2, 12))
-        skill_group_action_combo.bind("<<ComboboxSelected>>", self._on_skill_group_action_changed)
-        ttk.Label(skill_group_name_row, text="Require:").pack(side="left")
-        self.skill_group_match_logic_var = tk.StringVar(value="All")
-        ttk.Combobox(skill_group_name_row, textvariable=self.skill_group_match_logic_var,
-                     values=["All", "Any"], state="readonly", width=6).pack(side="left", padx=(2, 0))
-        for skill_group_var in (self.skill_group_name_var, self.skill_group_action_var,
-                                 self.skill_group_match_logic_var):
-            self._autosave_on_change(skill_group_var)
-
-        skill_group_extra_row = ttk.Frame(self.skill_condition_groups_section.body)
-        skill_group_extra_row.pack(fill="x", pady=(4, 0))
-        self.skill_group_timeout_frame = ttk.Frame(skill_group_extra_row)
-        ttk.Label(self.skill_group_timeout_frame, text="Wait up to (ms)").pack(side="left")
-        self.skill_group_timeout_var = tk.StringVar(value="0")
-        ttk.Entry(self.skill_group_timeout_frame, textvariable=self.skill_group_timeout_var, width=6).pack(
-            side="left", padx=(2, 0))
-        self.skill_group_hold_frame = ttk.Frame(skill_group_extra_row)
-        ttk.Label(self.skill_group_hold_frame, text="Hold override (ms)").pack(side="left")
-        self.skill_group_hold_var = tk.StringVar(value="")
-        ttk.Entry(self.skill_group_hold_frame, textvariable=self.skill_group_hold_var, width=6).pack(
-            side="left", padx=(2, 8))
-        ttk.Label(self.skill_group_hold_frame, text="Delay override (ms)").pack(side="left")
-        self.skill_group_delay_var = tk.StringVar(value="")
-        ttk.Entry(self.skill_group_hold_frame, textvariable=self.skill_group_delay_var, width=6).pack(
-            side="left", padx=(2, 0))
-        # Neither frame packed yet -- _refresh_skill_group_extra_visibility shows
-        # whichever one is relevant to the currently-selected Action.
-        for skill_group_numeric_var in (self.skill_group_timeout_var, self.skill_group_hold_var,
-                                         self.skill_group_delay_var):
-            self._autosave_on_change(skill_group_numeric_var)
-
-        self.skill_group_form_error_var = tk.StringVar(value="")
-        self.skill_group_form_error_label = ttk.Label(
-            self.skill_condition_groups_section.body, textvariable=self.skill_group_form_error_var,
-            foreground=theme.DANGER_COLOR)
-        # Not packed here -- only shown while _apply_pending_skill_group_edits (see
-        # poe2bot/gui/skill_condition_groups.py) finds Wait timeout/Hold/Delay override invalid.
-
-    def _build_rotation_conditions_section(self, scroll_body: ttk.Frame):
-        """The collapsible "Rotation Conditions" section: Add Condition
-        Group buttons, and the selected group's Name/Action/Negate fields
-        and match summary.
-
-        Unlike step_fields_group/conditions_section (hidden whenever a
-        condition group's own row is selected, since a group has no Key/
-        Delay/Hold/Repeat/per-step Conditions of its own -- see
-        ConditionGroupsMixin._set_step_panels_visible), this section is
-        always visible: its Add Condition Group buttons don't depend on
-        any particular selection, only the Name/Action/Negate fields below
-        them do (blanked via _populate_group_condition_form(None) when
-        nothing/a step is selected)."""
-        self.rotation_conditions_section = CollapsibleSection(
-            scroll_body, title="Rotation Conditions", padding=6, start_collapsed=True)
-        self.rotation_conditions_section.pack(fill="x", pady=(0, 6))
-        group_action_btns = ttk.Frame(self.rotation_conditions_section.body)
-        group_action_btns.pack(fill="x")
-        ttk.Button(group_action_btns, text="Add Condition Group (Image)...",
+        group_btns = ttk.Frame(body)
+        group_btns.pack(fill="x", pady=(6, 0))
+        ttk.Button(group_btns, text="Add Condition Group (Image)...",
                    command=self._on_add_image_condition_group_clicked).pack(side="left", padx=(0, 4))
-        ttk.Button(group_action_btns, text="Add Condition Group (Pixel)...",
+        ttk.Button(group_btns, text="Add Condition Group (Pixel)...",
                    command=self._on_add_pixel_condition_group_clicked).pack(side="left", padx=(0, 4))
-        ttk.Button(group_action_btns, text="Test Match",
-                   command=self._on_test_match_group_clicked).pack(side="left", padx=(8, 4))
-        ttk.Label(group_action_btns,
+        ttk.Label(group_btns,
                   text="(gates a whole block of steps at once -- select it, then Add Step/Add Sleep in"
                        " Skill Steps, or drag an existing step onto it, to nest steps under it; drag a"
                        " group onto another group's row to nest it inside; with a group selected, these"
                        " buttons recalibrate it instead of adding a new one)",
                   foreground="gray").pack(side="left", padx=(8, 0))
 
-        group_name_row = ttk.Frame(self.rotation_conditions_section.body)
-        group_name_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(group_name_row, text="Name:").pack(side="left")
-        self.group_name_var = tk.StringVar()
-        ttk.Entry(group_name_row, textvariable=self.group_name_var, width=16).pack(side="left", padx=(2, 12))
-        ttk.Label(group_name_row, text="Action:").pack(side="left")
-        self.group_action_var = tk.StringVar(value=GROUP_CONDITION_ACTION_LABELS["fire"])
-        ttk.Combobox(group_name_row, textvariable=self.group_action_var,
-                     values=list(GROUP_CONDITION_ACTION_LABELS.values()), state="readonly", width=16).pack(
-            side="left", padx=(2, 12))
-        self.group_negate_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(group_name_row, text="Negate (invert the match)",
-                        variable=self.group_negate_var).pack(side="left")
-        for group_var in (self.group_name_var, self.group_action_var, self.group_negate_var):
-            self._autosave_on_change(group_var)
+        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=(8, 6))
 
-        group_summary_row = ttk.Frame(self.rotation_conditions_section.body)
-        group_summary_row.pack(fill="x", pady=(6, 0))
-        self.group_match_summary_var = tk.StringVar()
-        ttk.Label(group_summary_row, textvariable=self.group_match_summary_var).pack(side="left")
-        ttk.Label(group_summary_row, text="  (double-click this row in the list to recalibrate its match)",
+        kind_row = ttk.Frame(body)
+        kind_row.pack(fill="x")
+        self.gate_kind_var = tk.StringVar()
+        ttk.Label(kind_row, textvariable=self.gate_kind_var).pack(side="left")
+        ttk.Button(kind_row, text="Test Match", command=self._on_gate_test_match_clicked).pack(
+            side="left", padx=(12, 0))
+
+        name_row = ttk.Frame(body)
+        name_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(name_row, text="Name:").pack(side="left")
+        self.gate_name_var = tk.StringVar()
+        ttk.Entry(name_row, textvariable=self.gate_name_var, width=16).pack(side="left", padx=(2, 12))
+        ttk.Label(name_row, text="Action:").pack(side="left")
+        self.gate_action_var = tk.StringVar(value=ACTION_LABELS["fire"])
+        self.gate_action_combo = ttk.Combobox(
+            name_row, textvariable=self.gate_action_var, state="readonly", width=22)
+        self.gate_action_combo.pack(side="left", padx=(2, 12))
+        self.gate_action_combo.bind("<<ComboboxSelected>>", self._on_gate_action_changed)
+        self.gate_negate_var = tk.BooleanVar(value=False)
+        self.gate_negate_check = ttk.Checkbutton(
+            name_row, text="Negate (invert the match)", variable=self.gate_negate_var)
+        # Packed/unpacked by _refresh_gate_extra_visibility -- only "condition" and
+        # "rotation_group" have a Negate of their own (a SkillConditionGroup's own
+        # Negate is per-child, not on the group itself -- see models.py).
+        self.gate_match_logic_frame = ttk.Frame(name_row)
+        ttk.Label(self.gate_match_logic_frame, text="Require:").pack(side="left")
+        self.gate_match_logic_var = tk.StringVar(value="All")
+        ttk.Combobox(self.gate_match_logic_frame, textvariable=self.gate_match_logic_var,
+                     values=["All", "Any"], state="readonly", width=6).pack(side="left", padx=(2, 0))
+        for gate_var in (self.gate_name_var, self.gate_action_var, self.gate_negate_var, self.gate_match_logic_var):
+            self._autosave_on_change(gate_var)
+
+        extra_row = ttk.Frame(body)
+        extra_row.pack(fill="x", pady=(4, 0))
+        self.gate_timeout_frame = ttk.Frame(extra_row)
+        ttk.Label(self.gate_timeout_frame, text="Wait up to (ms)").pack(side="left")
+        self.gate_timeout_var = tk.StringVar(value="0")
+        ttk.Entry(self.gate_timeout_frame, textvariable=self.gate_timeout_var, width=6).pack(
+            side="left", padx=(2, 0))
+        self.gate_hold_frame = ttk.Frame(extra_row)
+        ttk.Label(self.gate_hold_frame, text="Hold override (ms)").pack(side="left")
+        self.gate_hold_var = tk.StringVar(value="")
+        ttk.Entry(self.gate_hold_frame, textvariable=self.gate_hold_var, width=6).pack(side="left", padx=(2, 8))
+        ttk.Label(self.gate_hold_frame, text="Delay override (ms)").pack(side="left")
+        self.gate_delay_var = tk.StringVar(value="")
+        ttk.Entry(self.gate_hold_frame, textvariable=self.gate_delay_var, width=6).pack(side="left", padx=(2, 0))
+        # None of these three packed yet -- _refresh_gate_extra_visibility (see
+        # poe2bot/gui/gate_editor.py) shows whichever is relevant to the current
+        # kind/Action.
+        for gate_numeric_var in (self.gate_timeout_var, self.gate_hold_var, self.gate_delay_var):
+            self._autosave_on_change(gate_numeric_var)
+
+        self.gate_summary_row = ttk.Frame(body)
+        self.gate_match_summary_var = tk.StringVar()
+        ttk.Label(self.gate_summary_row, textvariable=self.gate_match_summary_var).pack(side="left")
+        ttk.Label(self.gate_summary_row, text="  (double-click this row in the list to recalibrate its match)",
                   foreground="gray").pack(side="left")
+        # Not packed here -- only shown for kind == "rotation_group".
+
+        self.gate_nested_hint_label = ttk.Label(
+            body,
+            text="This condition is inside a Skill Condition Group -- its own Action/Timeout/Hold/Delay"
+                 " are ignored; the group's own Action (above) applies instead.",
+            foreground="gray")
+        # Not packed here -- only shown for a condition nested inside a Skill
+        # Condition Group, see GateEditorMixin._refresh_gate_extra_visibility.
+
+        self.gate_form_error_var = tk.StringVar(value="")
+        self.gate_form_error_label = ttk.Label(body, textvariable=self.gate_form_error_var, foreground=theme.DANGER_COLOR)
+        # Not packed here -- only shown while _apply_gate_numeric_fields (see
+        # poe2bot/gui/gate_editor.py) finds Wait timeout/Hold/Delay override invalid.
 
     # ---- appearance -----------------------------------------------------------
 
@@ -1219,7 +1097,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                     getattr(self, handler_name)(payload)
                 else:
                     status = payload
-                    self._refresh_rotation_tree()
+                    self._update_rotation_row_status(name)
                     if status == STATUS_RUNNING:
                         self._ensure_activity_window()
                         self.activity_window.ensure_pane(name)

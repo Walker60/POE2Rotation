@@ -40,6 +40,7 @@ import time
 
 from poe2bot import config
 from poe2bot.log_setup import get_logger
+from poe2bot.warn_once import WarnOnce
 
 log = get_logger()
 
@@ -183,7 +184,7 @@ class ControllerReader:
         self._down_subscribers = {}   # button_name -> list[callback]
         self._up_subscribers = {}     # button_name -> list[callback], fired once per release transition
         self._any_subscribers = []    # list[callback(button_name)] -- for capture flows
-        self._warned_disconnected = False
+        self._warned_disconnected = WarnOnce()
         # trigger_raw/stick_raw (0-255 / -1.0..1.0, see ControllerSnapshot) are new
         # state snapshot() reads that on_button_down/up never needed -- populated
         # on both platforms, only ever read/written under self._lock (unlike
@@ -290,7 +291,7 @@ class ControllerReader:
             if _xinput_get_state(self._index, ctypes.byref(state)) != _ERROR_SUCCESS:
                 self._handle_disconnected()
                 continue
-            self._warned_disconnected = False
+            self._warned_disconnected.clear()
             gp = state.Gamepad
             self._process_snapshot(gp.wButtons, gp.bLeftTrigger, gp.bRightTrigger,
                                     gp.sThumbLX, gp.sThumbLY, gp.sThumbRX, gp.sThumbRY)
@@ -363,7 +364,7 @@ class ControllerReader:
         return paths
 
     def _log_device_dump_once(self, seen):
-        if self._warned_disconnected:
+        if self._warned_disconnected.already_warned:
             return  # already dumped this info on a previous scan -- don't spam it every rescan interval
         if not seen:
             log.info("no /dev/input devices found at all")
@@ -404,12 +405,10 @@ class ControllerReader:
 
     def _poll_loop_evdev(self):
         if evdev is None:
-            if not self._warned_disconnected:
-                log.warning(
-                    "the `evdev` package is not installed -- real-controller input is disabled. "
-                    "Install it with `pip install evdev` (see README's Steam Deck section). "
-                    f"Import error: {_evdev_import_error}")
-                self._warned_disconnected = True
+            self._warned_disconnected.warn_once(lambda: log.warning(
+                "the `evdev` package is not installed -- real-controller input is disabled. "
+                "Install it with `pip install evdev` (see README's Steam Deck section). "
+                f"Import error: {_evdev_import_error}"))
             return
 
         device = None
@@ -428,7 +427,7 @@ class ControllerReader:
                     self._handle_disconnected()
                     time.sleep(_RESCAN_INTERVAL_S)
                     continue
-                self._warned_disconnected = False
+                self._warned_disconnected.clear()
             try:
                 # select() with a bounded timeout, rather than device.read_loop()'s
                 # unbounded blocking read, so set_index() takes effect within one
@@ -558,7 +557,8 @@ class ControllerReader:
         with self._lock:
             self._trigger_raw = {"lt": 0, "rt": 0}
             self._stick_raw = {"left": (0.0, 0.0), "right": (0.0, 0.0)}
-        if not self._warned_disconnected:
+
+        def warn():
             if _IS_WINDOWS:
                 log.warning(f"controller index {self._index} not connected -- set "
                             f"POE2BOT_CONTROLLER_INDEX if your real controller is on a different slot")
@@ -567,7 +567,7 @@ class ControllerReader:
                     f"no gamepad found at index {self._index} -- set POE2BOT_CONTROLLER_INDEX if "
                     f"yours enumerates at a different index, or check `ls /dev/input/event*` and "
                     f"that your user can read it (see the 'input' group note above)")
-            self._warned_disconnected = True
+        self._warned_disconnected.warn_once(warn)
 
     def _dispatch(self, button_name: str):
         with self._lock:

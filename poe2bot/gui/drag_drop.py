@@ -163,6 +163,36 @@ class DragDropMixin:
         see _group_subtree_depth -- at or under MAX_GROUP_NESTING_DEPTH."""
         return len(container_path) + max_dragged_depth <= MAX_GROUP_NESTING_DEPTH
 
+    def _row_is_after(self, row_iid: str, event_y: int) -> bool:
+        """True if `event_y` sits at or past the vertical midpoint of
+        `row_iid` -- the shared "dropped on the bottom half of this row, so
+        land AFTER it rather than before" test every _resolve_*_drop_target's
+        own sibling-row case uses; fails safe to False with no bbox (e.g. a
+        scrolled-out-of-view row), exactly like each did inline before this
+        was extracted."""
+        bbox = self.tree.bbox(row_iid)
+        return bool(bbox) and event_y >= bbox[1] + bbox[3] / 2
+
+    def _blank_space_edge_target(self, event_y: int, count: int, iid_at):
+        """(edge_iid, local_index, after) for a drop landing above the
+        first or below the last of `count` sibling rows (addressed via
+        iid_at(local_index)), when nothing else in that list is directly
+        hovered -- shared by every _resolve_*_drop_target's own "blank
+        space above/below this specific list" fallback. None if `count` is
+        0, or the hover is neither clearly above the first row nor clearly
+        below the last (e.g. it's ambiguously between two other lists'
+        rows) -- callers embed the 3-tuple into their own richer target
+        shape (see each one's own return statement)."""
+        if not count:
+            return None
+        first_iid, last_iid = iid_at(0), iid_at(count - 1)
+        first_bbox, last_bbox = self.tree.bbox(first_iid), self.tree.bbox(last_iid)
+        if first_bbox and event_y < first_bbox[1]:
+            return first_iid, 0, False
+        if last_bbox and event_y >= last_bbox[1] + last_bbox[3]:
+            return last_iid, count - 1, True
+        return None
+
     def _hover_zone(self, row_iid: str, event_y: int) -> str:
         """Splits a hovered GROUP header row into three vertical zones, so a
         group can always be repositioned as a plain sibling of another group
@@ -421,9 +451,7 @@ class DragDropMixin:
             dest_group_path = parsed[0]
             if (dest_group_path, parsed[1]) in {(g, s) for g, s, _c, _sc in candidate}:
                 return None  # dropped on one of the dragged steps itself
-            bbox = self.tree.bbox(target_row)
-            after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
-            return target_row, dest_group_path, parsed[1], after
+            return target_row, dest_group_path, parsed[1], self._row_is_after(target_row, event.y)
         source_group = candidate[0][0]
         exclude = {s for _g, s, _c, _sc in candidate}
         result = self._resolve_sibling_target(event, None, exclude, source_group)
@@ -528,24 +556,15 @@ class DragDropMixin:
             # as hovering the group's own header row -- there's no sibling
             # ordering to resolve one level deeper here.
             row = target_row if parsed[3] is None else self._location_iid(group_path, step_idx, hovered_idx)
-            bbox = self.tree.bbox(row)
-            after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
-            return row, None, hovered_idx, after
+            return row, None, hovered_idx, self._row_is_after(row, event.y)
 
         if parsed is not None and parsed[0] == group_path and parsed[1] == step_idx and parsed[2] is None:
             # Hovering the step's own row -- it sits above its conditions.
             return self._location_iid(group_path, step_idx, 0), None, 0, False
 
-        if not conditions:
-            return None
-        first_iid = self._location_iid(group_path, step_idx, 0)
-        last_iid = self._location_iid(group_path, step_idx, len(conditions) - 1)
-        first_bbox, last_bbox = self.tree.bbox(first_iid), self.tree.bbox(last_iid)
-        if first_bbox and event.y < first_bbox[1]:
-            return first_iid, None, 0, False
-        if last_bbox and event.y >= last_bbox[1] + last_bbox[3]:
-            return last_iid, None, len(conditions) - 1, True
-        return None
+        result = self._blank_space_edge_target(
+            event.y, len(conditions), lambda i: self._location_iid(group_path, step_idx, i))
+        return (result[0], None, result[1], result[2]) if result is not None else None
 
     def _resolve_condition_drop_target(self, event, candidate, parsed, target_row):
         """Resolves a drop while dragging one or more plain Conditions
@@ -588,9 +607,7 @@ class DragDropMixin:
                 # group's own children.
                 if is_dragged(hovered_cond_idx, hovered_subcond_idx):
                     return None
-                bbox = self.tree.bbox(target_row)
-                after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
-                return target_row, hovered_cond_idx, hovered_subcond_idx, after
+                return target_row, hovered_cond_idx, hovered_subcond_idx, self._row_is_after(target_row, event.y)
             hovered_entry = top_level[hovered_cond_idx]
             if self._is_skill_group_entry(hovered_entry):
                 zone = self._hover_zone(target_row, event.y)
@@ -604,9 +621,7 @@ class DragDropMixin:
                 return target_row, None, hovered_cond_idx, zone == "after"
             if is_dragged(None, hovered_cond_idx):
                 return None  # dropped on one of the dragged rows itself
-            bbox = self.tree.bbox(target_row)
-            after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
-            return target_row, None, hovered_cond_idx, after
+            return target_row, None, hovered_cond_idx, self._row_is_after(target_row, event.y)
         if parsed is not None and parsed[0] == owning_group and parsed[1] == owning_step and parsed[2] is None:
             # Hovering the step's own row -- it sits above its conditions.
             return self._location_iid(owning_group, owning_step, 0), None, 0, False
@@ -614,14 +629,9 @@ class DragDropMixin:
         # condition block (above the first / below the last of *that* step).
         # Always lands at the step's own TOP LEVEL -- there's no unambiguous
         # "which group" for a blank-space drop.
-        first_iid = self._location_iid(owning_group, owning_step, 0)
-        last_iid = self._location_iid(owning_group, owning_step, len(top_level) - 1)
-        first_bbox, last_bbox = self.tree.bbox(first_iid), self.tree.bbox(last_iid)
-        if first_bbox and event.y < first_bbox[1]:
-            return first_iid, None, 0, False
-        if last_bbox and event.y >= last_bbox[1] + last_bbox[3]:
-            return last_iid, None, len(top_level) - 1, True
-        return None
+        result = self._blank_space_edge_target(
+            event.y, len(top_level), lambda i: self._location_iid(owning_group, owning_step, i))
+        return (result[0], None, result[1], result[2]) if result is not None else None
 
     def _resolve_sibling_target(self, event, parsed, exclude_indices, container_path):
         """(highlight_iid, target_index, after) for a drop landing among
@@ -649,20 +659,9 @@ class DragDropMixin:
             if local_index is None or local_index in exclude_indices:
                 return None
             row = self._sibling_iid(container_path, local_index)
-            bbox = self.tree.bbox(row)
-            after = bool(bbox) and event.y >= bbox[1] + bbox[3] / 2
-            return row, local_index, after
+            return row, local_index, self._row_is_after(row, event.y)
         entries = self._steps_list_for(container_path)
-        if not entries:
-            return None
-        last = len(entries) - 1
-        first_row, last_row = self._sibling_iid(container_path, 0), self._sibling_iid(container_path, last)
-        first_bbox, last_bbox = self.tree.bbox(first_row), self.tree.bbox(last_row)
-        if first_bbox and event.y < first_bbox[1]:
-            return first_row, 0, False
-        if last_bbox and event.y >= last_bbox[1] + last_bbox[3]:
-            return last_row, last, True
-        return None
+        return self._blank_space_edge_target(event.y, len(entries), lambda i: self._sibling_iid(container_path, i))
 
     @staticmethod
     def _move_items(source_list: list, dragged_indices, dest_list: list, target_index: int, after: bool) -> int:

@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from poe2bot import focus, templates
-from poe2bot.executor import calibration_scale_note, capture_region, check_condition_now, rescaled_pixel_pos
+from poe2bot.matching import calibration_scale_note, capture_region, check_condition_now, rescaled_pixel_pos
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
 from poe2bot.gui.controller_map_window import ControllerMapWindow

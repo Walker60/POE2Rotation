@@ -41,22 +41,20 @@ class AutosaveMixin:
     def _autosave(self) -> bool:
         """The single entry point every tracked field's trace calls, and
         every structural mutation (Add/Remove/Move/drag/paste/recalibrate)
-        calls directly. Always attempts all four "apply the form onto
-        whatever's selected" steps -- at most one is ever relevant to
-        whatever's currently selected in the tree, the other three no-op via
-        their own guard clauses -- then persists the whole rotation. An
-        apply that fails (e.g. a currently-non-numeric Delay field, mid-
-        edit) leaves editing_steps holding the last *valid* state of that
-        object -- exactly what still gets persisted below, so the invalid
-        text stays visible in its own widget with an inline error, but
-        nothing invalid ever reaches disk. Returns whether the save
-        actually succeeded -- most callers (a var trace) ignore it, but a
-        few (e.g. App._on_test_run_clicked) need to know before acting on
-        the just-saved rotation."""
+        calls directly. Always attempts both "apply the form onto whatever's
+        selected" steps -- at most one is ever relevant to whatever's
+        currently selected in the tree, the other no-ops via its own guard
+        clauses -- then persists the whole rotation. An apply that fails
+        (e.g. a currently-non-numeric Delay field, mid-edit) leaves
+        editing_steps holding the last *valid* state of that object --
+        exactly what still gets persisted below, so the invalid text stays
+        visible in its own widget with an inline error, but nothing invalid
+        ever reaches disk. Returns whether the save actually succeeded --
+        most callers (a var trace) ignore it, but a few (e.g.
+        App._on_test_run_clicked) need to know before acting on the
+        just-saved rotation."""
         self._apply_pending_step_edits()
-        self._apply_pending_condition_edits()
-        self._apply_pending_group_edits()
-        self._apply_pending_skill_group_edits()
+        self._apply_pending_gate_edits()
         return self._persist_rotation_to_disk()
 
     def _persist_rotation_to_disk(self) -> bool:
@@ -100,6 +98,22 @@ class AutosaveMixin:
             return False
         self._clear_rotation_form_error()
 
+        # Whether the rotation LIST's own row for this rotation needs touching at all --
+        # its text (name), which folder node it sits under, its enabled-grayout tag, or
+        # the "(shared ...)" hotkey-badge suffix (which a hotkey change can also affect on
+        # some OTHER row, e.g. the rotation this one just started/stopped sharing a key
+        # with, so that case needs the full rebuild too, not just this row). Everything
+        # else about a rotation (its steps, conditions, timing fields, ...) has no
+        # representation in this tree at all, so the overwhelming majority of keystrokes
+        # -- editing a step/condition field -- can skip rebuilding it entirely instead of
+        # a full delete-and-reinsert-every-row rebuild on every single one.
+        needs_tree_refresh = (
+            old_rotation is None
+            or old_rotation.name != rotation.name
+            or old_rotation.folder != rotation.folder
+            or old_rotation.enabled != rotation.enabled
+            or old_rotation.hotkey != rotation.hotkey)
+
         self._write_rotation_to_disk(rotation, old_rotation)
         self._sync_rotation_hotkeys(rotation, hotkeys_should_be_live)
 
@@ -109,7 +123,8 @@ class AutosaveMixin:
         # keystroke (this runs that often now). Just keep the bookkeeping current.
         self.editing_original_name = rotation.name
         self._update_title()
-        self._refresh_rotation_tree()
+        if needs_tree_refresh:
+            self._refresh_rotation_tree()
         return True
 
     def _build_rotation_from_form(self, name: str, old_rotation: Optional[Rotation]) -> Optional[Rotation]:

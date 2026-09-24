@@ -6,6 +6,7 @@ from poe2bot import updater
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry
 from poe2bot.gui.controller_layouts import CONTROLLER_TYPE_LABELS
+from poe2bot.gui.widgets import make_scrollable_area
 from poe2bot.hotkeys import display_name
 
 
@@ -105,55 +106,14 @@ class SettingsWindow(tk.Toplevel):
     def _build_scroll_area(self) -> ttk.Frame:
         """Wraps every section below in a Canvas + Scrollbar (the standard Tk
         way to make an arbitrary stack of widgets scrollable, since ttk has
-        no native scrollable frame -- same pattern as App's own step-editor
-        scroll area, poe2bot/gui/app.py's _build_editor_scroll_area) so a
-        window now resizable can be shrunk below its natural content height
-        -- e.g. to fit the Steam Deck's small display -- without clipping
-        anything. Returns the frame every section packs into, same as the
-        plain `container` this replaced."""
-        bg = ttk.Style().lookup("TFrame", "background")
-        scroll_frame = ttk.Frame(self)
-        scroll_frame.pack(fill="both", expand=True)
-        canvas = tk.Canvas(scroll_frame, highlightthickness=0, bd=0, bg=bg)
+        no native scrollable frame) so a window now resizable can be shrunk
+        below its natural content height -- e.g. to fit the Steam Deck's
+        small display -- without clipping anything. Returns the frame every
+        section packs into, same as the plain `container` this replaced.
+        See widgets.make_scrollable_area for the actual mechanics, shared
+        with App's own step-editor scroll area."""
+        canvas, container = make_scrollable_area(self, padding=12)
         self._canvas = canvas
-        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        container = ttk.Frame(canvas, padding=12)
-        scroll_window = canvas.create_window((0, 0), window=container, anchor="nw")
-
-        def _on_container_configure(_event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        container.bind("<Configure>", _on_container_configure)
-
-        def _on_canvas_configure(event):
-            # Keeps container (and everything packed fill="x" inside it) the
-            # same width as the visible canvas, instead of shrink-wrapping to
-            # its widest child.
-            canvas.itemconfigure(scroll_window, width=event.width)
-        canvas.bind("<Configure>", _on_canvas_configure)
-
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def _on_mousewheel_linux(event):
-            canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
-
-        def _bind_wheel(_event):
-            canvas.bind_all("<MouseWheel>", _on_mousewheel)
-            canvas.bind_all("<Button-4>", _on_mousewheel_linux)
-            canvas.bind_all("<Button-5>", _on_mousewheel_linux)
-
-        def _unbind_wheel(_event):
-            canvas.unbind_all("<MouseWheel>")
-            canvas.unbind_all("<Button-4>")
-            canvas.unbind_all("<Button-5>")
-        # Bound/unbound on hover (not for the window's lifetime) so scrolling over
-        # some other scrollable widget inside here isn't hijacked by this canvas.
-        canvas.bind("<Enter>", _bind_wheel)
-        canvas.bind("<Leave>", _unbind_wheel)
         return container
 
     def _build_updates_section(self, container):

@@ -6,6 +6,7 @@ import tkinter as tk
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui.action_labels import ACTION_LABELS, SKILL_GROUP_ACTION_LABELS
 from poe2bot.gui.controller_map_window import ControllerMapWindow
+from poe2bot.gui.tree_location import Location
 from poe2bot.models import ConditionGroup, SkillConditionGroup, Step, iter_steps, replace_step_fields
 
 # (StringVar attr, Entry attr, parser, allow_blank, Step field name, display label) for
@@ -127,13 +128,10 @@ class StepEditorMixin:
             self.step_hold_jitter_var.set("10")
             self.step_repeat_var.set("1")
             self.step_repeat_combine_hold_var.set(False)
-            self._populate_condition_form(None)
-            self.conditions_section.set_collapsed(True)
-            self._populate_skill_group_form(None)
-            self.skill_condition_groups_section.set_collapsed(True)
+            self._populate_gate_editor(None, None)
+            self.gate_editor_section.set_collapsed(True)
             self._clear_form_errors()
             self._set_step_panels_visible(True)
-            self._populate_group_condition_form(None)
             self._update_toggle_step_enabled_button()
         # Blanking the form always means nothing is meaningfully "selected" for
         # auto-commit/dirty-check purposes, even for call sites (_new_rotation,
@@ -240,7 +238,7 @@ class StepEditorMixin:
             group_path.append(pairs[i][1])
             i += 1
         if i == len(pairs):
-            return tuple(group_path), None, None, None
+            return Location(tuple(group_path))
         if pairs[i][0] != "step":
             return None
         step_idx = pairs[i][1]
@@ -259,7 +257,7 @@ class StepEditorMixin:
                 i += 1
         if i != len(pairs):
             return None
-        return tuple(group_path), step_idx, cond_idx, subcond_idx
+        return Location(tuple(group_path), step_idx, cond_idx, subcond_idx)
 
     @staticmethod
     def _location_iid(group_path, step_idx, cond_idx=None, subcond_idx=None) -> str:
@@ -518,7 +516,7 @@ class StepEditorMixin:
     def _update_condition_row(self, group_path, step_idx, cond_idx, subcond_idx=None):
         """Patches one condition's row label in place -- same
         preserve-the-tree-selection rationale as _update_step_row, used by
-        ConditionsMixin._apply_pending_condition_edits (called on every
+        GateEditorMixin._apply_pending_condition_fields (called on every
         keystroke via AutosaveMixin._autosave, so a full _refresh_steps_tree
         rebuild here would drop the current selection after the very first
         keystroke)."""
@@ -531,7 +529,7 @@ class StepEditorMixin:
     def _update_skill_group_row(self, group_path, step_idx, cond_idx):
         """Patches a Skill Condition Group's own header row label in place
         -- same rationale as _update_condition_row, used by
-        SkillConditionGroupsMixin._apply_pending_skill_group_edits."""
+        GateEditorMixin._apply_pending_skill_group_fields."""
         iid = self._location_iid(group_path, step_idx, cond_idx)
         if not self.tree.exists(iid):
             return
@@ -540,7 +538,7 @@ class StepEditorMixin:
     def _update_group_row(self, group_path):
         """Patches a condition group's own header row label in place -- same
         rationale as _update_condition_row, used by
-        ConditionGroupsMixin._apply_pending_group_edits."""
+        GateEditorMixin._apply_pending_rotation_group_fields."""
         iid = self._location_iid(group_path, None)
         if not self.tree.exists(iid):
             return
@@ -611,10 +609,8 @@ class StepEditorMixin:
                 self._selected_step_ref = None
                 self._selected_group_ref = None
                 self._selected_skill_group_ref = None
-                self._populate_condition_form(None)
+                self._populate_gate_editor(None, None)
                 self._set_step_panels_visible(True)
-                self._populate_group_condition_form(None)
-                self._populate_skill_group_form(None)
                 self._update_toggle_step_enabled_button()
                 return
             parsed = self._parse_tree_iid(selection[0])
@@ -629,13 +625,12 @@ class StepEditorMixin:
                 self._selected_group_ref = group
                 self._selected_skill_group_ref = None
                 self._set_step_panels_visible(False)
-                self._populate_group_condition_form(group)
-                self._populate_skill_group_form(None)
+                self._populate_gate_editor("rotation_group", group)
+                self.gate_editor_section.set_collapsed(False)
                 self._update_toggle_step_enabled_button()
                 return
             self._selected_group_ref = None
             self._set_step_panels_visible(True)
-            self._populate_group_condition_form(None)
             step = self._steps_list_for(group_path)[step_idx]
             self._clear_form_errors()
 
@@ -651,8 +646,12 @@ class StepEditorMixin:
                 else:
                     selected_condition = entry
             self._selected_skill_group_ref = selected_skill_group
-            self._populate_condition_form(selected_condition, nested_in_skill_group=(subcond_idx is not None))
-            self._populate_skill_group_form(selected_skill_group)
+            if selected_condition is not None:
+                self._populate_gate_editor("condition", selected_condition, nested_in_skill_group=(subcond_idx is not None))
+            elif selected_skill_group is not None:
+                self._populate_gate_editor("skill_group", selected_skill_group)
+            else:
+                self._populate_gate_editor(None, None)
             self.step_name_var.set(step.name)
             self.step_key_var.set(step.key or "")
             self.step_delay_var.set(str(step.delay_ms))
@@ -662,18 +661,14 @@ class StepEditorMixin:
             self.step_repeat_var.set(str(step.repeat_count))
             self.step_repeat_combine_hold_var.set(step.repeat_combine_hold)
             if cond_idx is not None:
-                # A condition/skill-group row is selected -- always show
-                # whichever editor is relevant, regardless of this step's
-                # smart per-step default/override below, since the user is
-                # clearly here to look at (or update) that specific row.
-                self.conditions_section.set_collapsed(selected_condition is None)
-                self.skill_condition_groups_section.set_collapsed(selected_skill_group is None)
+                # A condition/skill-group row is directly selected -- always show
+                # the editor, regardless of this step's smart per-step default/
+                # override below, since the user is clearly here to look at (or
+                # update) that specific row.
+                self.gate_editor_section.set_collapsed(False)
             else:
-                self.conditions_section.set_collapsed(
+                self.gate_editor_section.set_collapsed(
                     self._section_collapse_state(step, "conditions", not step.conditions))
-                self.skill_condition_groups_section.set_collapsed(
-                    self._section_collapse_state(step, "skill_condition_groups",
-                                                  not any(self._is_skill_group_entry(e) for e in step.conditions)))
             self._selected_step_ref = step
             self._selected_step_core_snapshot = self._core_step_form_snapshot()
             self._update_toggle_step_enabled_button()

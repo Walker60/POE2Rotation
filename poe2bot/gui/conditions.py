@@ -2,24 +2,19 @@ import copy
 
 from poe2bot import storage, templates
 from poe2bot.gui import dialogs as messagebox
-from poe2bot.gui.action_labels import STEP_CONDITION_ACTION_LABELS as CONDITION_ACTION_LABELS
 from poe2bot.log_setup import get_logger
 from poe2bot.models import Condition, iter_conditions
 
 log = get_logger()
 
-# Human labels for Condition.action, and back -- shared by the Action combobox
-# (app.py), _populate_condition_form, and _apply_pending_condition_edits below.
-_CONDITION_ACTION_BY_LABEL = {label: action for action, label in CONDITION_ACTION_LABELS.items()}
-
 
 class ConditionsMixin:
-    """Per-step Conditions: add/update/recalibrate, plus tracking which
-    calibrated template files are still referenced (so the periodic sweep
-    doesn't delete ones still in use). A Condition is the single mechanism
-    behind what used to be three separate concepts (Cooldown Check, Buff
-    Check, plain Condition) -- see Condition.action in models.py. Mixed into
-    App (see poe2bot/gui/app.py) -- Add/recalibrate Condition reuse
+    """Per-step Conditions: add/recalibrate, plus tracking which calibrated
+    template files are still referenced (so the periodic sweep doesn't
+    delete ones still in use). A Condition is the single mechanism behind
+    what used to be three separate concepts (Cooldown Check, Buff Check,
+    plain Condition) -- see Condition.action in models.py. Mixed into App
+    (see poe2bot/gui/app.py) -- Add/recalibrate Condition reuse
     CalibrationMixin's _start_image_capture/_start_pixel_capture via the
     on_use callback. See poe2bot/gui/condition_groups.py for the parallel
     rotation-level Condition Group concept (one condition gating a whole
@@ -27,8 +22,12 @@ class ConditionsMixin:
     poe2bot/gui/skill_condition_groups.py for the parallel Skill Condition
     Group concept (several of one step's own conditions, combined via an
     All/Any rule) -- a Condition living inside one of THOSE is still added/
-    edited/recalibrated through this same mixin, just addressed one level
-    deeper (see StepEditorMixin's own docstring for the location tuple)."""
+    recalibrated through this same mixin, just addressed one level deeper
+    (see StepEditorMixin's own docstring for the location tuple). The
+    selected condition's own Name/Action/Negate/Timeout/Hold/Delay fields
+    are edited through the unified detail editor instead -- see
+    poe2bot/gui/gate_editor.py's GateEditorMixin, which this mixin's
+    _selected_condition_location is also shared with."""
 
     def _selected_condition_location(self):
         """(group_path, step_idx, cond_idx, subcond_idx) if exactly one
@@ -50,27 +49,6 @@ class ConditionsMixin:
                 self._steps_list_for(group_path)[step_idx].conditions[cond_idx]):
             return None  # a Skill Condition Group's own header row -- no match of its own
         return parsed
-
-    def _on_test_match_clicked(self):
-        """Live "does it match right now" preview for whichever condition is
-        currently selected -- see CalibrationMixin._show_test_match_result.
-        Meaningless for a timer condition (there's no "since this step's
-        last fire" to measure outside a running rotation), so that case
-        gets a plain explanatory message instead."""
-        location = self._selected_condition_location()
-        if location is None:
-            messagebox.showinfo("No condition selected", "Select a condition in the Skill Steps list first.")
-            return
-        group_path, step_idx, cond_idx, subcond_idx = location
-        condition = self._condition_at(group_path, step_idx, cond_idx, subcond_idx)
-        if condition.match_type == "timer":
-            messagebox.showinfo(
-                "Can't test a Timer condition",
-                "A Timer condition matches based on seconds since this step's own last fire -- "
-                "there's no rotation running right now to measure that against. Use Test Run "
-                "and watch the Activity window instead.")
-            return
-        self._show_test_match_result(condition)
 
     def _on_add_image_condition_clicked(self):
         self._add_or_recalibrate_condition("image")
@@ -173,7 +151,7 @@ class ConditionsMixin:
             owner[subcond_idx if subcond_idx is not None else cond_idx] = new_condition
             self._refresh_steps_tree()
             self.tree.selection_set(self._location_iid(group_path, step_idx, cond_idx, subcond_idx))
-            self._populate_condition_form(new_condition, nested_in_skill_group=(subcond_idx is not None))
+            self._populate_gate_editor("condition", new_condition, nested_in_skill_group=(subcond_idx is not None))
             self._autosave()
         return apply
 
@@ -198,114 +176,6 @@ class ConditionsMixin:
         self._refresh_steps_tree()
         self.tree.selection_set(self._location_iid(group_path, step_idx, cond_idx, len(children) - 1))
         self._autosave()
-
-    # ---- the per-condition editor (Name/Action/Negate/Timeout/Hold/Delay) ----
-
-    def _populate_condition_form(self, condition, *, nested_in_skill_group: bool = False):
-        """Fills the Conditions section's editor from `condition`, or blanks
-        it to defaults if None (a step row, not a condition row, is
-        selected, or nothing is). Shared by StepEditorMixin._on_select_step
-        and this mixin's own add/update handlers, so the form always
-        reflects exactly what's selected. `nested_in_skill_group` shows a
-        one-line hint that this condition's own Action/Timeout/Hold/Delay
-        are ignored (the owning Skill Condition Group's own apply instead)
-        -- the fields themselves stay visible/editable rather than being
-        hidden outright, to avoid restructuring this form for a case that's
-        otherwise identical to a standalone condition's. Wrapped in
-        _autosave_suppressed() -- this is code populating the form, not the
-        user editing it, so it must never misfire an autosave onto whatever
-        condition was previously loaded (see AutosaveMixin, poe2bot/gui/
-        autosave.py)."""
-        with self._autosave_suppressed():
-            self._condition_form_nested = nested_in_skill_group
-            if condition is None:
-                self.condition_name_var.set("")
-                self.condition_action_var.set(CONDITION_ACTION_LABELS["fire"])
-                self.condition_negate_var.set(False)
-                self.condition_timeout_var.set("0")
-                self.condition_hold_var.set("")
-                self.condition_delay_var.set("")
-            else:
-                self.condition_name_var.set(condition.name)
-                self.condition_action_var.set(CONDITION_ACTION_LABELS.get(condition.action, CONDITION_ACTION_LABELS["fire"]))
-                self.condition_negate_var.set(condition.negate)
-                self.condition_timeout_var.set(str(condition.timeout_ms))
-                self.condition_hold_var.set("" if condition.hold_ms is None else str(condition.hold_ms))
-                self.condition_delay_var.set("" if condition.delay_ms is None else str(condition.delay_ms))
-            self._refresh_condition_extra_visibility()
-
-    def _refresh_condition_extra_visibility(self):
-        """Shows only the field group relevant to the currently-selected
-        Action -- Wait Timeout for "fire", Hold/Delay override for "hold",
-        neither for "block" -- so the editor doesn't reintroduce the same
-        always-everything-visible clutter this whole redesign was meant to
-        remove. Also shows/hides the "this condition is nested in a Skill
-        Condition Group" hint label set by _populate_condition_form."""
-        action = _CONDITION_ACTION_BY_LABEL.get(self.condition_action_var.get(), "fire")
-        self.condition_timeout_frame.pack_forget()
-        self.condition_hold_frame.pack_forget()
-        if action == "fire":
-            self.condition_timeout_frame.pack(side="left")
-        elif action == "hold":
-            self.condition_hold_frame.pack(side="left")
-        if getattr(self, "_condition_form_nested", False):
-            self.condition_nested_hint_label.pack(anchor="w", pady=(4, 0))
-        else:
-            self.condition_nested_hint_label.pack_forget()
-
-    def _on_condition_action_changed(self, _event=None):
-        self._refresh_condition_extra_visibility()
-
-    def _apply_pending_condition_edits(self) -> bool:
-        """Applies the editor's Name/Action/Negate/Timeout/Hold/Delay fields
-        onto whichever single condition is currently selected -- everything
-        about a condition except its match itself (recalibrate via double-
-        click for that, see _on_tree_double_click). The non-interactive core
-        of what used to be the "Update Selected Condition" button, called on
-        every field change by AutosaveMixin._autosave -- so unlike that
-        button, nothing/the wrong thing being selected is just "nothing
-        pending to apply" (return True), not something to interrupt anyone
-        about, and a parse/range failure shows inline via
-        condition_form_error_label instead of a popup, since this can now
-        run mid-keystroke."""
-        selection = self.tree.selection()
-        if len(selection) != 1:
-            return True
-        parsed = self._parse_tree_iid(selection[0])
-        if parsed is None or parsed[2] is None:
-            return True
-        group_path, step_idx, cond_idx, subcond_idx = parsed
-        if subcond_idx is None and self._is_skill_group_entry(
-                self._steps_list_for(group_path)[step_idx].conditions[cond_idx]):
-            return True  # a Skill Condition Group's own header row -- nothing here to apply
-        action = _CONDITION_ACTION_BY_LABEL.get(self.condition_action_var.get(), "fire")
-        try:
-            timeout_ms = int(self.condition_timeout_var.get() or 0)
-            hold_text = self.condition_hold_var.get().strip()
-            delay_text = self.condition_delay_var.get().strip()
-            hold_ms = int(hold_text) if hold_text else None
-            delay_ms = int(delay_text) if delay_text else None
-        except ValueError:
-            self.condition_form_error_var.set(
-                "Wait timeout, Hold override, and Delay override must be whole numbers "
-                "(Hold/Delay may be left blank).")
-            self.condition_form_error_label.pack(anchor="w", pady=(4, 0))
-            return False
-        if timeout_ms < 0 or (hold_ms is not None and hold_ms < 0) or (delay_ms is not None and delay_ms < 0):
-            self.condition_form_error_var.set("Wait timeout, Hold override, and Delay override cannot be negative.")
-            self.condition_form_error_label.pack(anchor="w", pady=(4, 0))
-            return False
-        self.condition_form_error_var.set("")
-        self.condition_form_error_label.pack_forget()
-        condition = self._condition_at(group_path, step_idx, cond_idx, subcond_idx)
-        condition.name = self.condition_name_var.get().strip()
-        condition.negate = self.condition_negate_var.get()
-        condition.action = action
-        condition.timeout_ms = timeout_ms
-        condition.hold_ms = hold_ms
-        condition.delay_ms = delay_ms
-        self._update_condition_row(group_path, step_idx, cond_idx, subcond_idx)
-        return True
 
     def _on_tree_double_click(self, _event):
         """Double-clicking a condition row recalibrates its match in place
@@ -416,14 +286,22 @@ class ConditionsMixin:
         keep.update(storage.trashed_rotation_templates())
         return keep
 
-    def _sweep_templates(self):
+    def _sweep_templates(self, known_unparseable: bool = None):
         # A rotation file that currently fails to load contributes nothing to
         # _referenced_templates() (self.rotations only holds successfully-
         # loaded ones), so its calibration images would otherwise look
         # orphaned and get deleted -- abstain from the whole sweep rather
         # than risk destroying something a merely-temporarily-broken (not
         # actually abandoned) rotation still needs.
-        if storage.has_unparseable_rotations():
+        #
+        # `known_unparseable`, when given, skips the fresh disk recheck below --
+        # used only right after storage.load_all_rotations_and_check() already
+        # walked and parsed every rotation file once (see App._load_rotations_from_disk),
+        # so this call doesn't have to do that same full walk+parse a second time in a
+        # row just to answer the same question. Every other caller (after an import or
+        # delete, where disk state just changed) omits it and gets a fresh check.
+        has_unparseable = storage.has_unparseable_rotations() if known_unparseable is None else known_unparseable
+        if has_unparseable:
             log.warning("Skipping template cleanup: at least one rotation file failed to load "
                         "(its templates might still be in use) -- fix or remove it, and cleanup "
                         "will resume normally.")

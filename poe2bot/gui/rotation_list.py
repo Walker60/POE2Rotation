@@ -19,6 +19,20 @@ class RotationListMixin:
     self.rotations, self._refresh_steps_tree from StepEditorMixin), which is
     the whole point of splitting a big class across files this way."""
 
+    def _on_rotation_filter_key_release(self, _event):
+        """Debounces the filter Entry's own <KeyRelease> -- typing several
+        characters quickly reschedules the same pending _refresh_rotation_tree()
+        call rather than running a fresh full tree rebuild after every single
+        one, since that's what actually costs something here, not the cheap
+        string comparison the filter itself does."""
+        if self._rotation_filter_after_id is not None:
+            self.after_cancel(self._rotation_filter_after_id)
+        self._rotation_filter_after_id = self.after(150, self._on_rotation_filter_settled)
+
+    def _on_rotation_filter_settled(self):
+        self._rotation_filter_after_id = None
+        self._refresh_rotation_tree()
+
     def _refresh_rotation_tree(self):
         selected = self.editing_original_name
         previously_open = {
@@ -88,6 +102,27 @@ class RotationListMixin:
             if self.rotation_tree.exists(item_id):
                 self.rotation_tree.see(item_id)
                 self.rotation_tree.selection_set(item_id)
+
+    def _update_rotation_row_status(self, name: str):
+        """Patches one rotation's row status text/tag in place instead of a
+        full _refresh_rotation_tree() rebuild -- used by App._poll_status_queue,
+        which runs every 200ms and would otherwise rebuild the ENTIRE tree on
+        every single status transition (start/stop/pause/...) of every
+        running rotation, not just the one that actually changed. A no-op if
+        the row isn't currently in the tree at all (e.g. filtered out by the
+        Filter field) -- it'll show the right status the next time it's
+        rebuilt and becomes visible again, same as any other filtered-out
+        row already misses live updates until then."""
+        iid = f"rotation:{name}"
+        if not self.rotation_tree.exists(iid):
+            return
+        rotation = self.rotations.get(name)
+        if rotation is None:
+            return
+        status = self.rotation_manager.status(name)
+        status_text = STATUS_LABELS.get(status, "").strip(" ()").capitalize()
+        tags = (status, "rotation_disabled") if not rotation.enabled else (status,)
+        self.rotation_tree.item(iid, values=(status_text,), tags=tags)
 
     def _selected_rotation_name(self):
         """Name of the single currently-selected rotation, or None if nothing,

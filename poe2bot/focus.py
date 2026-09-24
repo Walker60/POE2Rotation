@@ -24,6 +24,7 @@ import psutil
 
 from poe2bot import config
 from poe2bot.log_setup import get_logger
+from poe2bot.warn_once import WarnOnce
 
 log = get_logger()
 
@@ -98,9 +99,9 @@ else:
     _thread_local = threading.local()
 
 _cached_pid = None
-_warned_no_process = False
-_warned_no_window = False
-_warned_no_xlib = False
+_no_process_warning = WarnOnce()
+_no_window_warning = WarnOnce()
+_no_xlib_warning = WarnOnce()
 
 
 def reset_process_cache():
@@ -127,17 +128,14 @@ def _game_pid():
 
 def is_game_focused() -> bool:
     """True if the configured game process currently has OS foreground focus."""
-    global _warned_no_process
     pid = _game_pid()
     if not pid:
-        if not _warned_no_process:
-            log.warning(
-                f"game process '{config.GAME_PROCESS_NAME}' not found -- check Task Manager > "
-                f"Details for the real executable name and set POE2BOT_TARGET_PROCESS if it "
-                f"differs (this is a common mismatch across storefronts/versions)")
-            _warned_no_process = True
+        _no_process_warning.warn_once(lambda: log.warning(
+            f"game process '{config.GAME_PROCESS_NAME}' not found -- check Task Manager > "
+            f"Details for the real executable name and set POE2BOT_TARGET_PROCESS if it "
+            f"differs (this is a common mismatch across storefronts/versions)"))
         return False
-    _warned_no_process = False
+    _no_process_warning.clear()
 
     return _is_game_focused_win32(pid) if _IS_WINDOWS else _is_game_focused_x11(pid)
 
@@ -231,7 +229,6 @@ def game_window_client_rect():
     calibration time, per above) does this fall back to enumerating every
     top-level window and keeping whichever visible, non-minimized one
     (owned by the game's pid) has the largest client area."""
-    global _warned_no_window
     pid = _game_pid()
     if not pid:
         return None
@@ -239,15 +236,13 @@ def game_window_client_rect():
     rect = _game_window_client_rect_win32(pid) if _IS_WINDOWS else _game_window_client_rect_x11(pid)
 
     if rect is None:
-        if not _warned_no_window:
-            log.warning(
-                f"game process '{config.GAME_PROCESS_NAME}' found (pid={pid}) but no suitably-sized "
-                f"visible window -- calibrated conditions won't be rescaled for this screen until "
-                f"one is found (expected while the game is still loading, otherwise check it isn't "
-                f"minimized)")
-            _warned_no_window = True
+        _no_window_warning.warn_once(lambda: log.warning(
+            f"game process '{config.GAME_PROCESS_NAME}' found (pid={pid}) but no suitably-sized "
+            f"visible window -- calibrated conditions won't be rescaled for this screen until "
+            f"one is found (expected while the game is still loading, otherwise check it isn't "
+            f"minimized)"))
     else:
-        _warned_no_window = False
+        _no_window_warning.clear()
     return rect
 
 
@@ -282,14 +277,11 @@ def _game_window_client_rect_win32(pid):
 # restricted for unprivileged apps under Wayland).
 
 def _x11_available() -> bool:
-    global _warned_no_xlib
     if display is None:
-        if not _warned_no_xlib:
-            log.warning(
-                "python-xlib is not installed -- game window detection is disabled. "
-                "Install it with `pip install python-xlib` (see README's Steam Deck section). "
-                f"Import error: {_xlib_import_error}")
-            _warned_no_xlib = True
+        _no_xlib_warning.warn_once(lambda: log.warning(
+            "python-xlib is not installed -- game window detection is disabled. "
+            "Install it with `pip install python-xlib` (see README's Steam Deck section). "
+            f"Import error: {_xlib_import_error}"))
         return False
     return True
 
