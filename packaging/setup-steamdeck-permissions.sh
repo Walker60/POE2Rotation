@@ -25,6 +25,17 @@
 # `steamos-readonly disable`/`enable` around just the one file write below,
 # so you don't need to run those by hand. `steamos-readonly` doesn't exist
 # on a non-SteamOS Linux box, so this is skipped there automatically.
+#
+# Optional argument: the path to your extracted poe2bot folder. poe2bot
+# stores its logs/, rotations/, templates/, trash/, and app_state.json
+# directly inside that folder (see config.py's BASE_DIR) -- if you were
+# previously launching it with `sudo` (exactly what this script exists to
+# stop being necessary), any of those already created root as the owner,
+# and a later non-sudo launch fails with a permission error trying to write
+# to them, even after this script's own fix. Passing the path here reclaims
+# ownership of the whole folder for your user, one time, clearing that up:
+#
+#   sh setup-steamdeck-permissions.sh /path/to/poe2bot
 
 set -e
 
@@ -76,8 +87,20 @@ else
     echo "the udev rule above only takes effect the next time it's created."
 fi
 
+if [ -n "$1" ]; then
+    echo
+    echo "Reclaiming ownership of $1 for $USER (undoing any earlier sudo runs)..."
+    sudo chown -R "$USER:$USER" "$1"
+fi
+
 echo
 echo "Done. Log out and back in (or reboot) for the new group membership to"
 echo "take effect. After that, launch poe2bot / poe2bot.sh directly -- no"
 echo "sudo password needed. If it still asks for one afterward, re-run this"
 echo "script and share everything printed under '--- Verifying ---' above."
+echo
+echo "Still get a permission error accessing logs/rotations/app_state.json"
+echo "specifically (not a sudo prompt)? Those are probably still root-owned"
+echo "from an earlier sudo launch -- re-run this script with your poe2bot"
+echo "folder's path as an argument (see this script's own header comment),"
+echo "or just run: sudo chown -R \"\$USER:\$USER\" /path/to/poe2bot"

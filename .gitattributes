@@ -4,3 +4,7 @@
 # on Linux (the kernel looks for an interpreter literally named "/bin/sh\r"),
 # so this can't be left to core.autocrlf's per-checkout, per-user default.
 *.sh text eol=lf
+# Same reasoning for the double-click desktop launcher (packaging/poe2bot.desktop):
+# it's parsed by KDE on Linux, never on Windows, so it shouldn't gain CRLFs
+# from a Windows contributor's own checkout settings either.
+*.desktop text eol=lf

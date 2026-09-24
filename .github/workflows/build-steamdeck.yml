@@ -94,6 +94,25 @@ jobs:
           cp packaging/launch-steamdeck.sh dist/poe2bot/poe2bot.sh
           chmod +x dist/poe2bot/poe2bot.sh
 
+      # Right-clicking the raw `poe2bot` binary in Dolphin and choosing "Run in
+      # Konsole" (or double-clicking poe2bot.desktop below) needs the
+      # executable bit set on both -- PyInstaller sets it on `poe2bot` itself
+      # at build time, but this makes it explicit rather than relying on that,
+      # since tar (below) faithfully preserves whatever permission bits are
+      # actually on these files at archive time.
+      #
+      # poe2bot.desktop is a double-clickable launcher for people who'd rather
+      # not use a terminal at all -- it's relocatable (works no matter which
+      # folder the .tar.gz gets extracted into) via the `%k` field code, which
+      # KDE/glib substitutes with the .desktop file's own absolute path,
+      # letting Exec `cd` to wherever that turned out to be before running
+      # poe2bot.sh from there.
+      - name: Make everything executable and add a double-click desktop launcher
+        run: |
+          chmod +x dist/poe2bot/poe2bot
+          cp packaging/poe2bot.desktop dist/poe2bot/poe2bot.desktop
+          chmod +x dist/poe2bot/poe2bot.desktop
+
       - name: Archive the bundle
         run: |
           cd dist

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=poe2bot
+Comment=POE2 rotation bot
+Exec=sh -c 'cd "$(dirname "%k")" && exec ./poe2bot.sh'
+Terminal=true
+Icon=utilities-terminal
+Categories=Game;

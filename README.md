@@ -166,7 +166,34 @@ dependency, via PyInstaller — see `packaging/linux.spec`) on a Linux runner.
 in a browser, since Actions artifacts have no public download link), extract
 it anywhere on the Deck, and run the `poe2bot` executable inside it directly
 — no `pip`, `pacman`, or Distrobox needed just to get Python/the dependencies
-in place. **After that**, use **Settings → Check for Updates** inside the
+in place.
+
+**"Permission denied" running `poe2bot` (e.g. via Dolphin's right-click → Run
+in Konsole)?** The extracted files lost their executable bit somewhere along
+the way — common when a GUI archive tool extracts the double-nested archive
+(GitHub always wraps an Actions artifact in an outer `.zip`, even though the
+one file inside it here is `poe2bot-steamdeck-linux-x86_64.tar.gz`) or when
+the destination is an SD card formatted exFAT/FAT32, since neither supports
+Unix executable permissions at all — if that's the case, extract onto the
+Deck's main storage instead (e.g. `~/Games/poe2bot`), not the SD card. Fix it
+with `chmod +x poe2bot poe2bot.sh` from inside the extracted folder, in a
+Konsole window. `poe2bot.desktop` (also in the bundle) is a double-clickable
+launcher that doesn't need a terminal at all — the very first double-click,
+KDE will ask whether to trust/execute it; choosing to do so is safe, it just
+runs `poe2bot.sh` right there.
+
+**Permission error accessing `logs` (or `rotations`/`app_state.json`), even
+though launching itself no longer prompts for sudo?** `poe2bot` stores those
+directly inside its own folder (see `config.py`'s `BASE_DIR`) — if it was ever
+launched with `sudo` before (e.g. before setting up
+`packaging/setup-steamdeck-permissions.sh` below), whichever of those got
+created that way are now root-owned, and a later non-sudo launch can't write
+to them. One-time fix: `sudo chown -R "$USER:$USER" .` from inside the
+poe2bot folder (or pass that folder's path as an argument to
+`setup-steamdeck-permissions.sh`, which does the same thing). Nothing recurs
+after this — going forward everything is created as your own user.
+
+**After that**, use **Settings → Check for Updates** inside the
 app itself instead of repeating this by hand: it checks a rolling GitHub
 Release the same workflow publishes (which, unlike a plain Actions artifact,
 has a permanent public download link) and, if the SHA it was built from
