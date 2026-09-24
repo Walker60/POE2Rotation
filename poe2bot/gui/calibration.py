@@ -1,3 +1,4 @@
+import threading
 import tkinter as tk
 from tkinter import ttk
 
@@ -5,7 +6,9 @@ from poe2bot import focus, templates
 from poe2bot.executor import calibration_scale_note, capture_region, check_condition_now, rescaled_pixel_pos
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
+from poe2bot.gui.controller_map_window import ControllerMapWindow
 from poe2bot.gui.overlays import RegionCaptureOverlay, PointCaptureOverlay
+from poe2bot.hotkeys import display_name
 from poe2bot.log_setup import get_logger
 
 log = get_logger()
@@ -80,6 +83,20 @@ class CalibrationMixin:
                   f"extrema(min,max)/channel={image.getextrema()}")
         return bounds, image
 
+    def _capture_intro_line(self, again: bool = False) -> str:
+        """The first line of every calibration hint popup -- what happens
+        right after the user clicks OK. Differs depending on whether a
+        Screen Grab Hotkey is configured (Settings): with one set, nothing
+        happens until it's physically pressed (possibly much later, from
+        inside the game); without one, the capture is immediate, exactly as
+        before. Shared by _start_image_capture/_start_pixel_capture/
+        _start_search_area_capture's hint text."""
+        hotkey = self.hotkey_manager.screen_grab_hotkey
+        if hotkey:
+            return (f"When you're ready, press {display_name(hotkey)} -- from anywhere, even "
+                     "with another window focused -- to grab the screen.")
+        return f"After you click OK, the bot window will hide{' again' if again else ''}."
+
     def _start_image_capture(self, on_use, default_confidence=_DEFAULT_CONFIDENCE):
         """Runs the region-capture-overlay flow, ending in an image-match
         preview. "Use This" calls on_use(filename, region, confidence,
@@ -87,15 +104,20 @@ class CalibrationMixin:
         goes through this same callback, there's no other consumer.
         search_mode/search_region come from the optional second click-drag
         pass offered in the preview dialog -- see _show_image_match_preview
-        and _start_search_area_capture."""
+        and _start_search_area_capture. If a Screen Grab Hotkey is
+        configured, the actual capture waits for it instead of running
+        immediately -- see _await_grab_hotkey_or_capture_now."""
         self._show_calibration_hint_once(
             "Calibrate image match",
-            "After you click OK, the bot window will hide.\n\n"
+            f"{self._capture_intro_line()}\n\n"
             "Make sure the skill's icon is visible and OFF cooldown (ready to cast), "
             "then click-drag a small rectangle tightly around just that icon and "
             "release the mouse button.\n\nPress Escape at any time to cancel.")
-        self.withdraw()
-        self.after(_HIDE_WINDOW_DELAY_MS, lambda: self._open_region_capture_overlay(on_use, default_confidence))
+
+        def capture_fn():
+            self.withdraw()
+            self.after(_HIDE_WINDOW_DELAY_MS, lambda: self._open_region_capture_overlay(on_use, default_confidence))
+        self._await_grab_hotkey_or_capture_now(capture_fn)
 
     def _open_region_capture_overlay(self, on_use, default_confidence=_DEFAULT_CONFIDENCE):
         bounds, captured_image = self._capture_full_screen_for_overlay()
@@ -236,14 +258,17 @@ class CalibrationMixin:
         the rectangle turns out too small."""
         self._show_calibration_hint_once(
             "Calibrate search area",
-            "After you click OK, the bot window will hide again.\n\n"
+            f"{self._capture_intro_line(again=True)}\n\n"
             "Click-drag a LARGER rectangle that comfortably contains the icon, "
             "giving it room to be found even if it shifts slightly. It must be "
             "at least as large as the icon you just captured.\n\n"
             "Press Escape to cancel and return to the previous confirmation.")
-        self.withdraw()
-        self.after(_HIDE_WINDOW_DELAY_MS,
-                   lambda: self._open_search_area_overlay(filename, region, confidence, on_use))
+
+        def capture_fn():
+            self.withdraw()
+            self.after(_HIDE_WINDOW_DELAY_MS,
+                       lambda: self._open_search_area_overlay(filename, region, confidence, on_use))
+        self._await_grab_hotkey_or_capture_now(capture_fn)
 
     def _open_search_area_overlay(self, filename, region, confidence, on_use):
         bounds, captured_image = self._capture_full_screen_for_overlay()
@@ -275,12 +300,15 @@ class CalibrationMixin:
         """Same shape as _start_image_capture, for the pixel-match flow."""
         self._show_calibration_hint_once(
             "Calibrate pixel match",
-            "After you click OK, the bot window will hide.\n\n"
+            f"{self._capture_intro_line()}\n\n"
             "Make sure the skill's icon is visible and OFF cooldown (ready to cast), "
             "then click exactly on the pixel you want to check.\n\n"
             "Press Escape at any time to cancel.")
-        self.withdraw()
-        self.after(_HIDE_WINDOW_DELAY_MS, lambda: self._open_point_capture_overlay(on_use, default_confidence))
+
+        def capture_fn():
+            self.withdraw()
+            self.after(_HIDE_WINDOW_DELAY_MS, lambda: self._open_point_capture_overlay(on_use, default_confidence))
+        self._await_grab_hotkey_or_capture_now(capture_fn)
 
     def _open_point_capture_overlay(self, on_use, default_confidence=_DEFAULT_CONFIDENCE):
         bounds, captured_image = self._capture_full_screen_for_overlay()
@@ -383,3 +411,132 @@ class CalibrationMixin:
         else:
             ttk.Frame(preview, height=8).pack()
         ttk.Button(preview, text="OK", style=theme.ACCENT_BUTTON_STYLE, command=preview.destroy).pack(pady=(0, 8))
+
+    # ---- Screen Grab Hotkey: arm-and-wait instead of capturing immediately -----
+    # Lets a user start an Image/Pixel Condition capture, alt-tab into the game,
+    # and fire the actual screenshot with a global hotkey once whatever they want
+    # to capture (a transient buff icon, a telegraph, etc.) is actually on screen
+    # -- instead of having to already be looking at it before switching to poe2bot
+    # and clicking Add. Purely additive: with no Screen Grab Hotkey configured
+    # (Settings), _await_grab_hotkey_or_capture_now falls straight through to
+    # capture_fn(), i.e. today's immediate-capture-on-click behavior.
+
+    def _await_grab_hotkey_or_capture_now(self, capture_fn):
+        """Runs `capture_fn` (the withdraw-then-screenshot tail of
+        _start_image_capture/_start_pixel_capture/_start_search_area_capture)
+        right away if no Screen Grab Hotkey is configured, or defers it to
+        _on_screen_grab_hotkey_pressed via a "Waiting for Screen Grab"
+        dialog if one is."""
+        hotkey = self.hotkey_manager.screen_grab_hotkey
+        if not hotkey:
+            capture_fn()
+            return
+        self._show_grab_waiting_dialog(hotkey, capture_fn)
+
+    def _show_grab_waiting_dialog(self, hotkey: str, capture_fn):
+        """A small dialog that just says what to press and how to back out
+        -- deliberately NOT withdrawing the main window (unlike capture_fn
+        itself): the whole point is the user is free to leave poe2bot
+        running in the background and go do something else (alt-tab to the
+        game) while this waits. transient()+grab_set() (same as
+        _build_preview_dialog) keeps it from being interacted "around" by
+        other poe2bot windows without blocking alt-tabbing to a different
+        application entirely -- grab_set() is local to this Tk app."""
+        self._pending_grab_capture_fn = capture_fn
+        dialog = tk.Toplevel(self)
+        dialog.title("Waiting for Screen Grab")
+        dialog.transient(self)
+        bg = ttk.Style().lookup("TFrame", "background")
+        if bg:
+            dialog.configure(bg=bg)
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack()
+        ttk.Label(frame, justify="center",
+                  text=f"Press {display_name(hotkey)} any time -- even with another\n"
+                       "window focused -- to grab the screen.").pack(pady=(0, 8))
+        ttk.Label(frame, text="Waiting...", foreground="gray").pack()
+        ttk.Button(frame, text="Cancel", style=theme.DANGER_BUTTON_STYLE,
+                   command=self._cancel_grab_wait).pack(pady=(12, 0))
+        dialog.protocol("WM_DELETE_WINDOW", self._cancel_grab_wait)
+        dialog.bind("<Escape>", lambda _e: self._cancel_grab_wait())
+        self._grab_waiting_dialog = dialog
+        dialog.grab_set()
+        armed = self.hotkey_manager.arm_screen_grab(
+            lambda: self.status_queue.put(("__screen_grab_fired__", None)))
+        if not armed:
+            # Shouldn't happen -- _await_grab_hotkey_or_capture_now already checked
+            # `hotkey` was truthy -- but stay safe rather than leave the user staring
+            # at a dialog that can never fire.
+            self._pending_grab_capture_fn = None
+            self._grab_waiting_dialog = None
+            dialog.destroy()
+            capture_fn()
+
+    def _cancel_grab_wait(self):
+        self.hotkey_manager.disarm_screen_grab()
+        self._pending_grab_capture_fn = None
+        dialog = self._grab_waiting_dialog
+        self._grab_waiting_dialog = None
+        if dialog is not None and dialog.winfo_exists():
+            dialog.destroy()
+
+    def _on_screen_grab_hotkey_pressed(self, _payload):
+        """The configured Screen Grab Hotkey was physically pressed while a
+        "Waiting for Screen Grab" dialog was up (dispatched here via
+        App._CAPTURE_SENTINEL_HANDLERS/_poll_status_queue, from whichever
+        thread the keyboard/mouse/controller library called back on -- see
+        HotkeyManager.arm_screen_grab). Runs the deferred capture_fn FIRST
+        (it calls self.withdraw() synchronously, hiding the main window)
+        and only then destroys the waiting dialog -- that ordering avoids a
+        brief focus flash from destroying the dialog while its still-visible
+        owner briefly regains focus."""
+        self.hotkey_manager.disarm_screen_grab()
+        capture_fn = self._pending_grab_capture_fn
+        self._pending_grab_capture_fn = None
+        dialog = self._grab_waiting_dialog
+        self._grab_waiting_dialog = None
+        if capture_fn is not None:
+            capture_fn()
+        if dialog is not None and dialog.winfo_exists():
+            dialog.destroy()
+
+    # ---- Screen Grab Hotkey: configuring which key/button it is (Settings) -----
+
+    def _set_screen_grab_settings_buttons_enabled(self, enabled: bool):
+        """No-op if Settings has never been opened this session (it's
+        created lazily -- see self.settings_window's own comment in
+        __init__) -- there's nothing to disable if it doesn't exist yet."""
+        if self.settings_window is not None:
+            self.settings_window.set_screen_grab_buttons_enabled(enabled)
+
+    def _refresh_screen_grab_settings_label(self):
+        if self.settings_window is not None:
+            self.settings_window.refresh_screen_grab_label()
+
+    def _on_bind_screen_grab_hotkey_clicked(self):
+        self._maybe_show_no_gamepad_hint()
+        self._set_screen_grab_settings_buttons_enabled(False)
+        threading.Thread(target=self._capture_screen_grab_hotkey_worker, daemon=True).start()
+
+    def _capture_screen_grab_hotkey_worker(self):
+        key = self.hotkey_manager.capture_next_key()
+        self.status_queue.put(("__screen_grab_bind_captured__", key))
+
+    def _on_screen_grab_hotkey_bind_captured(self, key: str):
+        self.screen_grab_hotkey = key
+        self.hotkey_manager.set_screen_grab_hotkey(key)
+        self._persist_app_state()
+        self._set_screen_grab_settings_buttons_enabled(True)
+        self._refresh_screen_grab_settings_label()
+
+    def _on_map_screen_grab_hotkey_clicked(self):
+        self._set_screen_grab_settings_buttons_enabled(False)
+        ControllerMapWindow(
+            self, self.controller_type, self._on_screen_grab_hotkey_bind_captured,
+            on_close=lambda: self._set_screen_grab_settings_buttons_enabled(True))
+
+    def _on_unbind_screen_grab_hotkey_clicked(self):
+        self.screen_grab_hotkey = None
+        self.hotkey_manager.set_screen_grab_hotkey(None)
+        self._persist_app_state()
+        self._refresh_screen_grab_settings_label()

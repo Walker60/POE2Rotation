@@ -4,9 +4,9 @@ import threading
 import tkinter as tk
 
 from poe2bot.gui import dialogs as messagebox
-from poe2bot.gui.action_labels import ACTION_LABELS
+from poe2bot.gui.action_labels import ACTION_LABELS, SKILL_GROUP_ACTION_LABELS
 from poe2bot.gui.controller_map_window import ControllerMapWindow
-from poe2bot.models import ConditionGroup, Step, iter_steps, replace_step_fields
+from poe2bot.models import ConditionGroup, SkillConditionGroup, Step, iter_steps, replace_step_fields
 
 # (StringVar attr, Entry attr, parser, allow_blank, Step field name, display label) for
 # every numeric field on the Selected Step form -- drives _read_step_form's per-field
@@ -40,27 +40,39 @@ class StepEditorMixin:
     poe2bot/models.py), and a ConditionGroup's own `entries` is the same
     kind of heterogeneous list one level down -- a ConditionGroup may nest
     inside another ConditionGroup to any depth (up to
-    models.MAX_GROUP_NESTING_DEPTH). Every tree row is addressed by a
-    3-tuple (group_path, step_idx, cond_idx):
+    models.MAX_GROUP_NESTING_DEPTH). A Step's own `conditions` list is
+    ALSO heterogeneous -- Condition | SkillConditionGroup -- but never nests
+    (a SkillConditionGroup's own `conditions` are always plain Conditions).
+    Every tree row is addressed by a 4-tuple (group_path, step_idx, cond_idx,
+    subcond_idx):
       group_path is a tuple of ints -- the chain of ConditionGroup indices
       (each relative to its own parent list) leading to whichever list
       step_idx/cond_idx index into. () means "the top level,"
       self.editing_steps itself; a non-empty path descends through nested
-      groups' own `entries` one level per element. This is a strict
-      generalization of what used to be a single Optional[int] group_idx --
-      () replaces None, and a single-element path (g,) replaces a plain g.
-        (path, None, None)  -- the ConditionGroup AT `path` itself, its own header row
-        (path, s, None)     -- a Step at local index s within the list `path` names
-        (path, s, c)        -- that Step's c'th condition
+      groups' own `entries` one level per element.
+        (path, None, None, None)  -- the ConditionGroup AT `path` itself, its own header row
+        (path, s, None, None)     -- a Step at local index s within the list `path` names
+        (path, s, c, None)        -- that Step's c'th entry in .conditions -- EITHER a plain
+                                      Condition's own row, OR (when that entry is a
+                                      SkillConditionGroup) that group's own header row. The
+                                      tuple shape alone does not distinguish these two -- check
+                                      _is_skill_group_entry, or just use _condition_at, which
+                                      already resolves through a group when there is one.
+        (path, s, c, k)           -- only ever valid when conditions[c] is a SkillConditionGroup:
+                                      its k'th nested plain Condition (never another group).
     `_parse_tree_iid` is the single place that turns a tree iid string into
     this tuple; `_steps_list_for(group_path)` turns `group_path` into the
     actual list a `step_idx` indexes into (self.editing_steps, or some
     nested group's own .entries); `_group_at(group_path)` returns the
-    ConditionGroup object at `path` itself (path must be non-empty). See
-    poe2bot/gui/condition_groups.py for the parallel per-group condition
-    editor and creation flow, and poe2bot/gui/drag_drop.py for reordering/
-    reparenting (including nesting a group inside another) across these
-    lists.
+    ConditionGroup object at `path` itself (path must be non-empty);
+    `_skill_group_at`/`_skill_group_children_for`/`_condition_at` are the
+    one-level-deeper counterparts for a Step's own SkillConditionGroups. See
+    poe2bot/gui/condition_groups.py for the rotation-level group's own
+    editor/creation flow, poe2bot/gui/skill_condition_groups.py for the
+    parallel per-skill group editor and creation flow, and
+    poe2bot/gui/drag_drop.py for reordering/reparenting (including nesting a
+    group inside another, or a condition into/out of a SkillConditionGroup)
+    across these lists.
     """
 
     # ---- controller-button map for the Key field ----------------------------
@@ -117,6 +129,8 @@ class StepEditorMixin:
             self.step_repeat_combine_hold_var.set(False)
             self._populate_condition_form(None)
             self.conditions_section.set_collapsed(True)
+            self._populate_skill_group_form(None)
+            self.skill_condition_groups_section.set_collapsed(True)
             self._clear_form_errors()
             self._set_step_panels_visible(True)
             self._populate_group_condition_form(None)
@@ -128,6 +142,7 @@ class StepEditorMixin:
         # that isn't even open anymore.
         self._selected_step_ref = None
         self._selected_group_ref = None
+        self._selected_skill_group_ref = None
 
     def _clear_form_errors(self):
         """Resets every numeric Entry's invalid-state highlight and hides the
@@ -166,15 +181,52 @@ class StepEditorMixin:
         return group
 
     @staticmethod
+    def _is_skill_group_entry(entry) -> bool:
+        return isinstance(entry, SkillConditionGroup)
+
+    def _condition_entry_at(self, group_path, step_idx, cond_idx):
+        """The raw object at position cond_idx of that step's own
+        .conditions -- a plain Condition, or a SkillConditionGroup. Callers
+        that need one specifically should check _is_skill_group_entry first
+        -- the same division of labor _steps_list_for/_group_at already
+        have one level up."""
+        return self._steps_list_for(group_path)[step_idx].conditions[cond_idx]
+
+    def _skill_group_at(self, group_path, step_idx, cond_idx):
+        """The SkillConditionGroup at (group_path, step_idx, cond_idx)
+        itself -- caller already knows it is one (see
+        _is_skill_group_entry) -- the counterpart to _group_at, one level
+        down."""
+        return self._condition_entry_at(group_path, step_idx, cond_idx)
+
+    def _skill_group_children_for(self, group_path, step_idx, cond_idx):
+        """The list a subcond_idx indexes into -- the generalized
+        counterpart to _steps_list_for, one level further down."""
+        return self._skill_group_at(group_path, step_idx, cond_idx).conditions
+
+    def _condition_at(self, group_path, step_idx, cond_idx, subcond_idx=None):
+        """The plain Condition a full location's trailing (cond_idx,
+        subcond_idx) addresses -- resolves through a Skill Condition Group
+        when subcond_idx is given, otherwise indexes .conditions directly
+        (caller's responsibility to already know that slot isn't a group,
+        when subcond_idx is None)."""
+        if subcond_idx is None:
+            return self._condition_entry_at(group_path, step_idx, cond_idx)
+        return self._skill_group_children_for(group_path, step_idx, cond_idx)[subcond_idx]
+
+    @staticmethod
     def _parse_tree_iid(iid: str):
-        """Turns a tree iid string into a (group_path, step_idx, cond_idx)
-        location -- see this class's own docstring for the shapes this
-        recognizes -- or None if `iid` doesn't parse. `group_path` is a
-        (possibly empty) tuple of ints: any number of "group-N" segments,
-        each one nesting level deeper, optionally followed by a "step-N"
-        segment (and that optionally followed by a "cond-N" segment). An
-        iid ending right after its last "group-N" segment names that
-        group's own header row (step_idx/cond_idx both None)."""
+        """Turns a tree iid string into a (group_path, step_idx, cond_idx,
+        subcond_idx) location -- see this class's own docstring for the
+        shapes this recognizes -- or None if `iid` doesn't parse.
+        `group_path` is a (possibly empty) tuple of ints: any number of
+        "group-N" segments, each one nesting level deeper, optionally
+        followed by a "step-N" segment (and that optionally followed by a
+        "cond-N" segment, itself optionally followed by a "sub-N" segment).
+        An iid ending right after its last "group-N" segment names that
+        group's own header row (step_idx/cond_idx/subcond_idx all None); a
+        "-sub-K" segment can never appear without an immediately preceding
+        "-cond-N" segment."""
         parts = iid.split("-")
         if len(parts) % 2 != 0:
             return None
@@ -188,23 +240,29 @@ class StepEditorMixin:
             group_path.append(pairs[i][1])
             i += 1
         if i == len(pairs):
-            return tuple(group_path), None, None
+            return tuple(group_path), None, None, None
         if pairs[i][0] != "step":
             return None
         step_idx = pairs[i][1]
         i += 1
         cond_idx = None
+        subcond_idx = None
         if i < len(pairs):
             if pairs[i][0] != "cond":
                 return None
             cond_idx = pairs[i][1]
             i += 1
+            if i < len(pairs):
+                if pairs[i][0] != "sub":
+                    return None
+                subcond_idx = pairs[i][1]
+                i += 1
         if i != len(pairs):
             return None
-        return tuple(group_path), step_idx, cond_idx
+        return tuple(group_path), step_idx, cond_idx, subcond_idx
 
     @staticmethod
-    def _location_iid(group_path, step_idx, cond_idx=None) -> str:
+    def _location_iid(group_path, step_idx, cond_idx=None, subcond_idx=None) -> str:
         """The inverse of _parse_tree_iid -- builds the iid string for a
         given location, so callers that just computed/moved to a location
         (reselecting after a reorder, a paste, etc.) don't have to know the
@@ -213,7 +271,10 @@ class StepEditorMixin:
         if step_idx is None:
             return prefix[:-1]  # drop the trailing "-" -- this path's own deepest group header row
         base = f"{prefix}step-{step_idx}"
-        return base if cond_idx is None else f"{base}-cond-{cond_idx}"
+        if cond_idx is None:
+            return base
+        base = f"{base}-cond-{cond_idx}"
+        return base if subcond_idx is None else f"{base}-sub-{subcond_idx}"
 
     def _find_step_location(self, step) -> tuple:
         """(group_path, step_idx) locating `step` (by identity) anywhere in
@@ -341,6 +402,14 @@ class StepEditorMixin:
         previously_open = set()
         previously_closed = set()
 
+        def scan_previous_conditions(conditions, path, step_idx):
+            for j, cond_entry in enumerate(conditions):
+                if not self._is_skill_group_entry(cond_entry):
+                    continue
+                cond_iid = self._location_iid(path, step_idx, j)
+                if self.tree.exists(cond_iid) and self.tree.get_children(cond_iid):
+                    (previously_open if self.tree.item(cond_iid, "open") else previously_closed).add(id(cond_entry))
+
         def scan_previous(entries, path):
             for i, entry in enumerate(entries):
                 iid = self._location_iid(path + (i,), None) if isinstance(entry, ConditionGroup) \
@@ -355,6 +424,8 @@ class StepEditorMixin:
                     (previously_open if self.tree.item(iid, "open") else previously_closed).add(id(entry))
                 if isinstance(entry, ConditionGroup):
                     scan_previous(entry.entries, path + (i,))
+                else:
+                    scan_previous_conditions(entry.conditions, path, i)
         scan_previous(getattr(self, "_steps_tree_render_order", []), ())
 
         def open_state(entry, default_open: bool) -> bool:
@@ -386,9 +457,18 @@ class StepEditorMixin:
                           values=(key_col, step.delay_ms, step.jitter_ms, step.hold_ms,
                                   step.hold_jitter_ms, step.repeat_count),
                           open=open_state(step, bool(step.conditions)), tags=self._step_row_tags(step))
-        for j, condition in enumerate(step.conditions):
-            self.tree.insert(step_iid, tk.END, iid=f"{step_iid}-cond-{j}",
-                              text=self._condition_summary(condition), values=("", "", "", "", "", ""))
+        for j, entry in enumerate(step.conditions):
+            cond_iid = f"{step_iid}-cond-{j}"
+            if self._is_skill_group_entry(entry):
+                self.tree.insert(step_iid, tk.END, iid=cond_iid, text=self._skill_group_summary(entry),
+                                  values=("", "", "", "", "", ""),
+                                  open=open_state(entry, bool(entry.conditions)))
+                for k, child in enumerate(entry.conditions):
+                    self.tree.insert(cond_iid, tk.END, iid=f"{cond_iid}-sub-{k}",
+                                      text=self._condition_summary(child), values=("", "", "", "", "", ""))
+            else:
+                self.tree.insert(step_iid, tk.END, iid=cond_iid,
+                                  text=self._condition_summary(entry), values=("", "", "", "", "", ""))
 
     @staticmethod
     def _step_row_tags(step) -> tuple:
@@ -435,18 +515,27 @@ class StepEditorMixin:
             key_col, step.delay_ms, step.jitter_ms, step.hold_ms, step.hold_jitter_ms, step.repeat_count),
             tags=tuple(tags))
 
-    def _update_condition_row(self, group_path, step_idx, cond_idx):
+    def _update_condition_row(self, group_path, step_idx, cond_idx, subcond_idx=None):
         """Patches one condition's row label in place -- same
         preserve-the-tree-selection rationale as _update_step_row, used by
         ConditionsMixin._apply_pending_condition_edits (called on every
         keystroke via AutosaveMixin._autosave, so a full _refresh_steps_tree
         rebuild here would drop the current selection after the very first
         keystroke)."""
+        iid = self._location_iid(group_path, step_idx, cond_idx, subcond_idx)
+        if not self.tree.exists(iid):
+            return
+        condition = self._condition_at(group_path, step_idx, cond_idx, subcond_idx)
+        self.tree.item(iid, text=self._condition_summary(condition))
+
+    def _update_skill_group_row(self, group_path, step_idx, cond_idx):
+        """Patches a Skill Condition Group's own header row label in place
+        -- same rationale as _update_condition_row, used by
+        SkillConditionGroupsMixin._apply_pending_skill_group_edits."""
         iid = self._location_iid(group_path, step_idx, cond_idx)
         if not self.tree.exists(iid):
             return
-        condition = self._steps_list_for(group_path)[step_idx].conditions[cond_idx]
-        self.tree.item(iid, text=self._condition_summary(condition))
+        self.tree.item(iid, text=self._skill_group_summary(self._skill_group_at(group_path, step_idx, cond_idx)))
 
     def _update_group_row(self, group_path):
         """Patches a condition group's own header row label in place -- same
@@ -490,6 +579,25 @@ class StepEditorMixin:
             extra = f" (wait up to {condition.timeout_ms}ms)"
         return f"[{action_label}] {not_marker}{base}{extra}"
 
+    @classmethod
+    def _skill_group_summary(cls, group) -> str:
+        action_label = SKILL_GROUP_ACTION_LABELS.get(group.action, group.action)
+        logic_label = "All" if group.match_logic == "all" else "Any"
+        count = len(group.conditions)
+        extra = ""
+        if group.action == "hold":
+            parts = []
+            if group.hold_ms is not None:
+                parts.append(f"hold {group.hold_ms}ms")
+            if group.delay_ms is not None:
+                parts.append(f"delay {group.delay_ms}ms")
+            if parts:
+                extra = f" -> {', '.join(parts)}"
+        elif group.action == "fire" and group.timeout_ms > 0:
+            extra = f" (wait up to {group.timeout_ms}ms)"
+        name = f"{group.name}: " if group.name else ""
+        return f"Skill Group: {name}{action_label} ({logic_label}, {count} condition{'' if count == 1 else 's'}){extra}"
+
     def _on_select_step(self, _event):
         if not self._suppress_commit_on_select:
             self._commit_previous_step_edits_if_changed()
@@ -502,23 +610,27 @@ class StepEditorMixin:
             if not selection:
                 self._selected_step_ref = None
                 self._selected_group_ref = None
+                self._selected_skill_group_ref = None
                 self._populate_condition_form(None)
                 self._set_step_panels_visible(True)
                 self._populate_group_condition_form(None)
+                self._populate_skill_group_form(None)
                 self._update_toggle_step_enabled_button()
                 return
             parsed = self._parse_tree_iid(selection[0])
             if parsed is None:
                 return
-            group_path, step_idx, cond_idx = parsed
+            group_path, step_idx, cond_idx, subcond_idx = parsed
             if step_idx is None:
                 # A condition group's own header row is selected -- it has no Key/
                 # Delay/Hold/Repeat of its own, just the one condition gating it.
                 group = self._group_at(group_path)
                 self._selected_step_ref = None
                 self._selected_group_ref = group
+                self._selected_skill_group_ref = None
                 self._set_step_panels_visible(False)
                 self._populate_group_condition_form(group)
+                self._populate_skill_group_form(None)
                 self._update_toggle_step_enabled_button()
                 return
             self._selected_group_ref = None
@@ -526,7 +638,21 @@ class StepEditorMixin:
             self._populate_group_condition_form(None)
             step = self._steps_list_for(group_path)[step_idx]
             self._clear_form_errors()
-            self._populate_condition_form(step.conditions[cond_idx] if cond_idx is not None else None)
+
+            selected_condition = None
+            selected_skill_group = None
+            if cond_idx is not None:
+                entry = step.conditions[cond_idx]
+                if self._is_skill_group_entry(entry):
+                    if subcond_idx is None:
+                        selected_skill_group = entry
+                    else:
+                        selected_condition = entry.conditions[subcond_idx]
+                else:
+                    selected_condition = entry
+            self._selected_skill_group_ref = selected_skill_group
+            self._populate_condition_form(selected_condition, nested_in_skill_group=(subcond_idx is not None))
+            self._populate_skill_group_form(selected_skill_group)
             self.step_name_var.set(step.name)
             self.step_key_var.set(step.key or "")
             self.step_delay_var.set(str(step.delay_ms))
@@ -536,13 +662,18 @@ class StepEditorMixin:
             self.step_repeat_var.set(str(step.repeat_count))
             self.step_repeat_combine_hold_var.set(step.repeat_combine_hold)
             if cond_idx is not None:
-                # A condition row is selected -- always show its editor, regardless of
-                # this step's smart per-step default/override below, since the user is
-                # clearly here to look at (or update) that specific condition.
-                self.conditions_section.set_collapsed(False)
+                # A condition/skill-group row is selected -- always show
+                # whichever editor is relevant, regardless of this step's
+                # smart per-step default/override below, since the user is
+                # clearly here to look at (or update) that specific row.
+                self.conditions_section.set_collapsed(selected_condition is None)
+                self.skill_condition_groups_section.set_collapsed(selected_skill_group is None)
             else:
                 self.conditions_section.set_collapsed(
                     self._section_collapse_state(step, "conditions", not step.conditions))
+                self.skill_condition_groups_section.set_collapsed(
+                    self._section_collapse_state(step, "skill_condition_groups",
+                                                  not any(self._is_skill_group_entry(e) for e in step.conditions)))
             self._selected_step_ref = step
             self._selected_step_core_snapshot = self._core_step_form_snapshot()
             self._update_toggle_step_enabled_button()
@@ -561,7 +692,7 @@ class StepEditorMixin:
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None or parsed[1] is None:
             return
-        group_path, step_idx, _cond_idx = parsed
+        group_path, step_idx, _cond_idx, _subcond_idx = parsed
         step = self._steps_list_for(group_path)[step_idx]
         self._section_collapse_overrides.setdefault(id(step), {})[key] = collapsed
 
@@ -746,7 +877,7 @@ class StepEditorMixin:
         # it doesn't touch editing_steps' structure or the tree's selection), so
         # reading the selection now and using it after is safe either way.
         selection = self.tree.selection()
-        selected_locations = {(g, s) for g, s, c in (self._parse_tree_iid(iid) for iid in selection)
+        selected_locations = {(g, s) for g, s, c, _sc in (self._parse_tree_iid(iid) for iid in selection)
                                if s is not None and c is None} if selection else set()
         # (the generator above never yields None -- selection is only ever real iids)
         if not selected_locations:
@@ -784,7 +915,7 @@ class StepEditorMixin:
         if not selection:
             return
         parsed_list = [p for p in (self._parse_tree_iid(iid) for iid in selection) if p is not None]
-        group_removals = {gp for gp, s, _c in parsed_list if s is None}
+        group_removals = {gp for gp, s, _c, _sc in parsed_list if s is None}
         if not self._confirm_group_removal(group_removals):
             return
 
@@ -803,13 +934,47 @@ class StepEditorMixin:
         # Conditions/steps whose owner is itself also being fully removed
         # (directly, or via any ancestor group) are skipped -- removing the
         # owner already takes care of them.
-        step_removals = {(gp, s) for gp, s, c in parsed_list
+        step_removals = {(gp, s) for gp, s, c, _sc in parsed_list
                           if s is not None and c is None and not under_removed_group(gp)}
-        condition_removals = [(gp, s, c) for gp, s, c in parsed_list
-                               if c is not None and (gp, s) not in step_removals and not under_removed_group(gp)]
+
+        # A top-level entry in step.conditions (c is not None, sc is None) is
+        # EITHER a plain Condition's own row OR a SkillConditionGroup's own
+        # header row -- split those two out, since removing a group with
+        # children still inside it needs its own confirmation prompt.
+        skill_group_removals = {
+            (gp, s, c) for gp, s, c, sc in parsed_list
+            if c is not None and sc is None and (gp, s) not in step_removals and not under_removed_group(gp)
+            and self._is_skill_group_entry(self._steps_list_for(gp)[s].conditions[c])}
+        if not self._confirm_skill_group_removal(skill_group_removals):
+            return
+
+        condition_removals = [(gp, s, c) for gp, s, c, sc in parsed_list
+                               if c is not None and sc is None and (gp, s) not in step_removals
+                               and not under_removed_group(gp) and (gp, s, c) not in skill_group_removals]
+        # A condition nested inside a SkillConditionGroup that's ITSELF also
+        # being removed is skipped -- removing the group already takes care
+        # of it.
+        nested_condition_removals = [(gp, s, c, sc) for gp, s, c, sc in parsed_list
+                                      if sc is not None and (gp, s) not in step_removals
+                                      and not under_removed_group(gp) and (gp, s, c) not in skill_group_removals]
+
+        # Nested removals first -- each is addressed by an index into the
+        # OWNING STEP's own .conditions (to find its SkillConditionGroup)
+        # that must still be accurate; the top-level splicing below (which
+        # can shift those indices) must not happen until every nested lookup
+        # has already used them.
+        nested_by_owner = {}
+        for gp, s, c, sc in nested_condition_removals:
+            nested_by_owner.setdefault((gp, s, c), []).append(sc)
+        for (gp, s, c), sub_indices in nested_by_owner.items():
+            owning_conditions = self._skill_group_children_for(gp, s, c)
+            for sc in sorted(sub_indices, reverse=True):
+                del owning_conditions[sc]
 
         conditions_by_owner = {}
         for gp, s, c in condition_removals:
+            conditions_by_owner.setdefault((gp, s), []).append(c)
+        for gp, s, c in skill_group_removals:      # same list/index space as plain top-level conditions
             conditions_by_owner.setdefault((gp, s), []).append(c)
         for (gp, s), cond_indices in conditions_by_owner.items():
             owning_conditions = self._steps_list_for(gp)[s].conditions
@@ -834,6 +999,22 @@ class StepEditorMixin:
 
         self._refresh_steps_tree()
         self._autosave()
+
+    def _confirm_skill_group_removal(self, skill_group_removals) -> bool:
+        """True if it's fine to proceed removing `skill_group_removals` (a
+        set of (group_path, step_idx, cond_idx) locations, each a
+        SkillConditionGroup's own header row) -- either there are none, none
+        of them have any child conditions, or the user just confirmed taking
+        those conditions down along with their group(s)."""
+        if not skill_group_removals:
+            return True
+        total_nested = sum(len(self._skill_group_at(gp, s, c).conditions) for gp, s, c in skill_group_removals)
+        if not total_nested:
+            return True
+        return messagebox.askyesno(
+            "Remove Skill Condition Group",
+            f"Remove {len(skill_group_removals)} skill condition group(s) and the {total_nested} "
+            f"condition(s) inside them?", danger=True)
 
     def _confirm_group_removal(self, group_removals) -> bool:
         """True if it's fine to proceed removing `group_removals` (a set of
@@ -875,8 +1056,10 @@ class StepEditorMixin:
         # (e.g. a field whose value is currently invalid mid-edit).
         if not self._apply_pending_step_edits():
             return
-        group_path, step_idx, cond_idx = parsed
-        if cond_idx is not None:
+        group_path, step_idx, cond_idx, subcond_idx = parsed
+        if subcond_idx is not None:
+            items, idx = self._skill_group_children_for(group_path, step_idx, cond_idx), subcond_idx
+        elif cond_idx is not None:
             items, idx = self._steps_list_for(group_path)[step_idx].conditions, cond_idx
         elif step_idx is not None:
             items, idx = self._steps_list_for(group_path), step_idx
@@ -889,7 +1072,9 @@ class StepEditorMixin:
             return
         items[idx], items[new_idx] = items[new_idx], items[idx]
         self._refresh_steps_tree()
-        if cond_idx is not None:
+        if subcond_idx is not None:
+            new_iid = self._location_iid(group_path, step_idx, cond_idx, new_idx)
+        elif cond_idx is not None:
             new_iid = self._location_iid(group_path, step_idx, new_idx)
         elif step_idx is not None:
             new_iid = self._location_iid(group_path, new_idx)

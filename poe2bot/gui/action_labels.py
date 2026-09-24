@@ -26,3 +26,14 @@ GROUP_CONDITION_ACTION_LABELS = {
     "fire": f"{ACTION_LABELS['fire']} Group",
     "block": f"{ACTION_LABELS['block']} Group",
 }
+
+# A SkillConditionGroup's own action combobox (poe2bot/gui/
+# skill_condition_groups.py) -- unlike the rotation-level ConditionGroup
+# above, this DOES support "hold": it lives inside one step and can
+# override that step's own hold_ms/delay_ms, exactly like one of that
+# step's own "hold" Conditions could before being grouped.
+SKILL_GROUP_ACTION_LABELS = {
+    "fire": f"{ACTION_LABELS['fire']} Group",
+    "block": f"{ACTION_LABELS['block']} Group",
+    "hold": "Override Hold Time",
+}

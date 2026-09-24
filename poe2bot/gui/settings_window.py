@@ -6,6 +6,7 @@ from poe2bot import updater
 from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry
 from poe2bot.gui.controller_layouts import CONTROLLER_TYPE_LABELS
+from poe2bot.hotkeys import display_name
 
 
 class SettingsWindow(tk.Toplevel):
@@ -89,6 +90,7 @@ class SettingsWindow(tk.Toplevel):
         if updater.IS_SUPPORTED:
             self._build_updates_section(container)
 
+        self._build_screen_grab_section(container)
         self._build_advanced_section(container)
 
         # A bare Canvas's own natural size has nothing to do with the size of
@@ -202,6 +204,49 @@ class SettingsWindow(tk.Toplevel):
         Controller section."""
         if sys.platform == "win32":
             self._vigembus_btn.config(state=state, text=text)
+
+    def _build_screen_grab_section(self, container):
+        """The Screen Grab Hotkey: arms a screenshot capture that a user can
+        trigger from anywhere (even with the game focused) while adding or
+        recalibrating an Image/Pixel condition, instead of the capture
+        happening immediately when they click Add -- see
+        CalibrationMixin._await_grab_hotkey_or_capture_now. Physical-press
+        Bind.../controller-button Map... buttons, same pattern as the
+        per-rotation Hotkey/Cancel/Reset/Pause rows (poe2bot/gui/app.py's
+        _build_hotkeys_section) -- but this is one app-wide value, like the
+        Panic Key below, not a per-rotation one, so it lives here instead."""
+        grab_frame = ttk.LabelFrame(container, text="Screen Grab Hotkey", padding=8)
+        grab_frame.pack(fill="x", pady=(8, 0))
+
+        self._screen_grab_label_var = tk.StringVar(value=display_name(self._master.screen_grab_hotkey))
+        row = ttk.Frame(grab_frame)
+        row.pack(fill="x")
+        ttk.Label(row, textvariable=self._screen_grab_label_var, width=14, anchor="w").pack(side="left")
+        self._screen_grab_bind_btn = ttk.Button(
+            row, text="Bind...", command=self._master._on_bind_screen_grab_hotkey_clicked)
+        self._screen_grab_bind_btn.pack(side="left", padx=(4, 0))
+        self._screen_grab_map_btn = ttk.Button(
+            row, text="Map...", command=self._master._on_map_screen_grab_hotkey_clicked)
+        self._screen_grab_map_btn.pack(side="left", padx=(4, 0))
+        self._screen_grab_unbind_btn = ttk.Button(
+            row, text="Unbind", command=self._master._on_unbind_screen_grab_hotkey_clicked)
+        self._screen_grab_unbind_btn.pack(side="left", padx=(4, 0))
+        ttk.Label(grab_frame, foreground="gray", wraplength=320, justify="left",
+                  text="Used when adding or recalibrating an Image or Pixel condition -- arms a "
+                       "screen grab you can trigger from anywhere, instead of capturing immediately "
+                       "when you click Add.").pack(anchor="w", pady=(4, 0))
+
+    def set_screen_grab_buttons_enabled(self, enabled: bool):
+        """Called from CalibrationMixin while a physical-press/controller-
+        button capture for this row is in flight, same idea as
+        set_update_button_state/set_vigembus_button_state above."""
+        state = "normal" if enabled else "disabled"
+        self._screen_grab_bind_btn.config(state=state)
+        self._screen_grab_map_btn.config(state=state)
+        self._screen_grab_unbind_btn.config(state=state)
+
+    def refresh_screen_grab_label(self):
+        self._screen_grab_label_var.set(display_name(self._master.screen_grab_hotkey))
 
     def _build_advanced_section(self, container):
         """The four settings poe2bot/config.py otherwise only reads from

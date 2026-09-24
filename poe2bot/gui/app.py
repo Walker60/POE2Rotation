@@ -28,6 +28,7 @@ from poe2bot.gui.drag_drop import DragDropMixin
 from poe2bot.gui.calibration import CalibrationMixin
 from poe2bot.gui.conditions import ConditionsMixin, CONDITION_ACTION_LABELS
 from poe2bot.gui.condition_groups import ConditionGroupsMixin, GROUP_CONDITION_ACTION_LABELS
+from poe2bot.gui.skill_condition_groups import SkillConditionGroupsMixin, SKILL_GROUP_ACTION_LABELS
 from poe2bot.gui.hotkeys_ui import HotkeysMixin
 from poe2bot.gui.autosave import AutosaveMixin
 from poe2bot.gui.updater_ui import UpdaterMixin
@@ -39,8 +40,8 @@ log = get_logger()
 
 
 class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
-          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, HotkeysMixin, AutosaveMixin, UpdaterMixin,
-          ControllerDriverMixin):
+          CalibrationMixin, ConditionsMixin, ConditionGroupsMixin, SkillConditionGroupsMixin, HotkeysMixin,
+          AutosaveMixin, UpdaterMixin, ControllerDriverMixin):
     def __init__(self):
         super().__init__()
         self.title("POE2 Rotation Bot")
@@ -66,6 +67,10 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # game_process_name/panic_key above, where only a truthy string is ever valid).
         self.require_game_focus = (
             config.REQUIRE_GAME_FOCUS if state["require_game_focus"] is None else state["require_game_focus"])
+        # Unlike the four above, None is a genuinely valid, expected steady state here --
+        # "no Screen Grab Hotkey configured yet" -- not just "no override saved". See
+        # CalibrationMixin's screen-grab-hotkey methods (poe2bot/gui/calibration.py).
+        self.screen_grab_hotkey = state["screen_grab_hotkey"]
         config.GAME_PROCESS_NAME = self.game_process_name
         config.PANIC_KEY = self.panic_key
         config.CONTROLLER_MIN_TAP_MS = self.controller_min_tap_ms
@@ -82,7 +87,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # panic_key passed explicitly (not left to HotkeyManager's own default arg)
         # since that default was captured at hotkeys.py's import time -- before
         # the override above ever had a chance to apply.
-        self.hotkey_manager = HotkeyManager(self.rotation_manager, panic_key=self.panic_key)
+        self.hotkey_manager = HotkeyManager(
+            self.rotation_manager, panic_key=self.panic_key, screen_grab_hotkey=self.screen_grab_hotkey)
         self.bot_enabled = True
 
         self.active_folder = state["active_folder"]  # None = "(All Folders)" -- no scoping restriction
@@ -136,6 +142,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self._selected_group_ref = None       # the actual ConditionGroup object currently loaded
                                                # into the Rotation Conditions section's fields, or
                                                # None -- mutually exclusive with _selected_step_ref
+        self._selected_skill_group_ref = None  # the actual SkillConditionGroup object currently loaded
+                                                # into the Skill Condition Groups section's fields, or
+                                                # None -- mutually exclusive with _selected_group_ref
         self._suppress_commit_on_select = False  # True only while _discard_selected_step_edits is
                                                   # clearing the tree's selection itself, so that
                                                   # doesn't get misread as "user navigated away" and
@@ -150,6 +159,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
                                               # at most once per session -- see HotkeysMixin
         self._last_calib_rect = None  # (left, top, width, height) of the game window's client area as of
                                        # the most recent screenshot, or None -- see CalibrationMixin._calib_size_kwargs
+        self._grab_waiting_dialog = None      # the "Waiting for Screen Grab" Toplevel, or None -- see CalibrationMixin
+        self._pending_grab_capture_fn = None  # the capture to run once the screen grab hotkey fires, or None
 
         self._build_widgets()
         self._load_rotations_from_disk()
@@ -171,7 +182,8 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         app_state.save_state(
             self.active_folder, self.active_device, self.controller_type, self._theme,
             self.game_process_name, self.panic_key,
-            self.controller_min_tap_ms, self.controller_index, self.require_game_focus)
+            self.controller_min_tap_ms, self.controller_index, self.require_game_focus,
+            self.screen_grab_hotkey)
 
     def _load_rotations_from_disk(self):
         for name, rotation in storage.load_all_rotations().items():
@@ -395,6 +407,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         self._build_steps_tree(scroll_body)
         self._build_step_fields_section(scroll_body)
         self._build_conditions_section(scroll_body)
+        self._build_skill_condition_groups_section(scroll_body)
         self._build_rotation_conditions_section(scroll_body)
 
     def _build_bottom_bar(self):
@@ -863,6 +876,92 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # Not packed here -- only shown while _apply_pending_condition_edits (see
         # poe2bot/gui/conditions.py) finds Wait timeout/Hold/Delay override invalid.
 
+        self.condition_nested_hint_label = ttk.Label(
+            self.conditions_section.body,
+            text="This condition is inside a Skill Condition Group -- its own Action/Timeout/Hold/Delay"
+                 " are ignored; the group's own Action (below) applies instead.",
+            foreground="gray")
+        # Not packed here -- only shown for a condition nested inside a Skill Condition
+        # Group, see ConditionsMixin._refresh_condition_extra_visibility.
+
+    def _build_skill_condition_groups_section(self, scroll_body: ttk.Frame):
+        """The collapsible "Skill Condition Groups" section: an Add Skill
+        Condition Group button, and the selected group's Name/Action/Match
+        Logic/Timeout-or-Hold+Delay fields.
+
+        Distinct from the "Rotation Conditions" section below (a rotation-
+        level ConditionGroup gates a whole block of STEPS with one single
+        condition) -- this instead groups several of ONE step's own plain
+        Conditions, combined via an All/Any rule, with the action decided
+        once for the whole group. Conditions are added to the selected
+        group via this same section's own "Skill Conditions" Add Image/
+        Pixel/Timer Condition buttons above, not here -- see
+        ConditionsMixin._resolve_condition_add_target."""
+        self.skill_condition_groups_section = CollapsibleSection(
+            scroll_body, title="Skill Condition Groups", padding=6, start_collapsed=True,
+            on_toggle=lambda collapsed: self._on_section_toggled("skill_condition_groups", collapsed))
+        self.skill_condition_groups_section.pack(fill="x", pady=(0, 6))
+        skill_group_btns = ttk.Frame(self.skill_condition_groups_section.body)
+        skill_group_btns.pack(fill="x")
+        ttk.Button(skill_group_btns, text="Add Skill Condition Group",
+                   command=self._on_add_skill_condition_group_clicked).pack(side="left", padx=(0, 4))
+        ttk.Label(skill_group_btns,
+                  text="(combines several of this skill's own conditions with an All/Any rule and one"
+                       " shared Action -- select it, then use the Skill Conditions section's Add Image/"
+                       "Pixel/Timer Condition buttons above to add conditions to it, or drag an existing"
+                       " condition onto its row)",
+                  foreground="gray").pack(side="left", padx=(8, 0))
+
+        skill_group_name_row = ttk.Frame(self.skill_condition_groups_section.body)
+        skill_group_name_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(skill_group_name_row, text="Name:").pack(side="left")
+        self.skill_group_name_var = tk.StringVar()
+        ttk.Entry(skill_group_name_row, textvariable=self.skill_group_name_var, width=16).pack(
+            side="left", padx=(2, 12))
+        ttk.Label(skill_group_name_row, text="Action:").pack(side="left")
+        self.skill_group_action_var = tk.StringVar(value=SKILL_GROUP_ACTION_LABELS["fire"])
+        skill_group_action_combo = ttk.Combobox(
+            skill_group_name_row, textvariable=self.skill_group_action_var,
+            values=list(SKILL_GROUP_ACTION_LABELS.values()), state="readonly", width=22)
+        skill_group_action_combo.pack(side="left", padx=(2, 12))
+        skill_group_action_combo.bind("<<ComboboxSelected>>", self._on_skill_group_action_changed)
+        ttk.Label(skill_group_name_row, text="Require:").pack(side="left")
+        self.skill_group_match_logic_var = tk.StringVar(value="All")
+        ttk.Combobox(skill_group_name_row, textvariable=self.skill_group_match_logic_var,
+                     values=["All", "Any"], state="readonly", width=6).pack(side="left", padx=(2, 0))
+        for skill_group_var in (self.skill_group_name_var, self.skill_group_action_var,
+                                 self.skill_group_match_logic_var):
+            self._autosave_on_change(skill_group_var)
+
+        skill_group_extra_row = ttk.Frame(self.skill_condition_groups_section.body)
+        skill_group_extra_row.pack(fill="x", pady=(4, 0))
+        self.skill_group_timeout_frame = ttk.Frame(skill_group_extra_row)
+        ttk.Label(self.skill_group_timeout_frame, text="Wait up to (ms)").pack(side="left")
+        self.skill_group_timeout_var = tk.StringVar(value="0")
+        ttk.Entry(self.skill_group_timeout_frame, textvariable=self.skill_group_timeout_var, width=6).pack(
+            side="left", padx=(2, 0))
+        self.skill_group_hold_frame = ttk.Frame(skill_group_extra_row)
+        ttk.Label(self.skill_group_hold_frame, text="Hold override (ms)").pack(side="left")
+        self.skill_group_hold_var = tk.StringVar(value="")
+        ttk.Entry(self.skill_group_hold_frame, textvariable=self.skill_group_hold_var, width=6).pack(
+            side="left", padx=(2, 8))
+        ttk.Label(self.skill_group_hold_frame, text="Delay override (ms)").pack(side="left")
+        self.skill_group_delay_var = tk.StringVar(value="")
+        ttk.Entry(self.skill_group_hold_frame, textvariable=self.skill_group_delay_var, width=6).pack(
+            side="left", padx=(2, 0))
+        # Neither frame packed yet -- _refresh_skill_group_extra_visibility shows
+        # whichever one is relevant to the currently-selected Action.
+        for skill_group_numeric_var in (self.skill_group_timeout_var, self.skill_group_hold_var,
+                                         self.skill_group_delay_var):
+            self._autosave_on_change(skill_group_numeric_var)
+
+        self.skill_group_form_error_var = tk.StringVar(value="")
+        self.skill_group_form_error_label = ttk.Label(
+            self.skill_condition_groups_section.body, textvariable=self.skill_group_form_error_var,
+            foreground=theme.DANGER_COLOR)
+        # Not packed here -- only shown while _apply_pending_skill_group_edits (see
+        # poe2bot/gui/skill_condition_groups.py) finds Wait timeout/Hold/Delay override invalid.
+
     def _build_rotation_conditions_section(self, scroll_body: ttk.Frame):
         """The collapsible "Rotation Conditions" section: Add Condition
         Group buttons, and the selected group's Name/Action/Negate fields
@@ -975,7 +1074,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         parsed = self._parse_tree_iid(selection[0])
         if parsed is None:
             return True
-        group_path, step_idx, _cond_idx = parsed
+        group_path, step_idx, _cond_idx, _subcond_idx = parsed
         if step_idx is None:
             return True  # a condition group's own header row is selected -- no step form pending
         existing = self._steps_list_for(group_path)[step_idx]
@@ -1097,6 +1196,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         "__reset_capture__": "_on_reset_key_captured",
         "__pause_capture__": "_on_pause_key_captured",
         "__step_mouse_capture__": "_on_step_mouse_captured",
+        # CalibrationMixin (poe2bot/gui/calibration.py) -- the Screen Grab Hotkey.
+        "__screen_grab_fired__": "_on_screen_grab_hotkey_pressed",
+        "__screen_grab_bind_captured__": "_on_screen_grab_hotkey_bind_captured",
         # UpdaterMixin (poe2bot/gui/updater_ui.py) -- Linux/Steam Deck only.
         "__update_check_failed__": "_on_update_check_failed",
         "__update_check_done__": "_on_update_check_done",

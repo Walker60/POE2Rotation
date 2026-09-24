@@ -83,7 +83,7 @@ class HotkeyManager:
     and would leak earlier registrations when several rotations share a key.
     """
 
-    def __init__(self, rotation_manager, panic_key: str = config.PANIC_KEY):
+    def __init__(self, rotation_manager, panic_key: str = config.PANIC_KEY, screen_grab_hotkey: str = None):
         self._rotation_manager = rotation_manager
         self._panic_key = panic_key
         self._trigger_keys = {}     # rotation name -> hotkey (config, survives enable/disable)
@@ -94,6 +94,8 @@ class HotkeyManager:
         self._reset_handlers = {}  # rotation name -> ("keyboard"|"mouse", live handler), only while enabled
         self._pause_keys = {}      # rotation name -> pause key (config, survives enable/disable)
         self._pause_handlers = {}  # rotation name -> ("keyboard"|"mouse", live handler), only while enabled
+        self._screen_grab_hotkey = screen_grab_hotkey  # config, survives enable/disable -- see arm_screen_grab
+        self._screen_grab_handlers = {}  # only populated between arm_screen_grab() and disarm_screen_grab()
         self._capture_lock = threading.Lock()  # serializes capture_next_key() -- see its docstring
         self._enabled = False
         self._register_panic_key()
@@ -118,6 +120,41 @@ class HotkeyManager:
         self._panic_key = new_panic_key
         if self._enabled:
             self._register_panic_key()
+
+    @property
+    def screen_grab_hotkey(self):
+        return self._screen_grab_hotkey
+
+    def set_screen_grab_hotkey(self, new_hotkey):
+        """Configure (or clear, if new_hotkey is falsy) the reserved hotkey
+        CalibrationMixin arms while a user is waiting to grab an Image/
+        Pixel condition's screenshot -- see arm_screen_grab/disarm_screen_grab.
+        Unlike the trigger/cancel/reset/pause keys, this is never itself
+        "live" outside of that short waiting window, so there's nothing to
+        re-register here -- disarming first is just a safety net in case
+        this is somehow called while a wait is already in flight."""
+        self.disarm_screen_grab()
+        self._screen_grab_hotkey = new_hotkey
+
+    def arm_screen_grab(self, on_press) -> bool:
+        """Registers `on_press` (called with no arguments, on the keyboard/
+        mouse/controller library's own thread -- same as every other
+        action-key callback in this class) against the configured screen
+        grab hotkey, so CalibrationMixin's "waiting for screen grab" dialog
+        can be notified the moment it's physically pressed, regardless of
+        which window (if any) currently has OS focus. Returns False (and
+        registers nothing) if no screen grab hotkey is configured. Callers
+        must call disarm_screen_grab() exactly once afterward, whether or
+        not the hotkey ever actually fired (cancelling the wait disarms it
+        too)."""
+        self.disarm_screen_grab()  # in case a previous wait was left armed
+        if not self._screen_grab_hotkey:
+            return False
+        self._register_action_key(self._screen_grab_handlers, "grab", self._screen_grab_hotkey, on_press)
+        return True
+
+    def disarm_screen_grab(self):
+        self._unregister_action_key(self._screen_grab_handlers, "grab")
 
     def bound_to(self, hotkey: str) -> list:
         """Names of every rotation currently bound to `hotkey` (may be more

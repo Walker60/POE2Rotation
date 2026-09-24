@@ -14,7 +14,7 @@ from PIL import Image, ImageChops, ImageStat
 from poe2bot import config, controller, hotkeys, templates
 from poe2bot.focus import game_window_client_rect, is_game_focused
 from poe2bot.log_setup import get_logger
-from poe2bot.models import Condition, ConditionGroup, Rotation, Step, iter_steps
+from poe2bot.models import Condition, ConditionGroup, Rotation, SkillConditionGroup, Step, iter_steps
 from poe2bot.scaling import scale_point, scale_region
 
 log = get_logger()
@@ -261,6 +261,15 @@ def check_condition_now(condition: Condition) -> bool:
     return _check_condition(condition, "test match", seconds_since_fired=None)
 
 
+def check_group_now(group: SkillConditionGroup) -> bool:
+    """Public entry point for a live "does this whole group currently match"
+    check, no owning Step/RotationRunner context needed -- the group-level
+    counterpart to check_condition_now(), for the GUI's own Test Match
+    preview on a SkillConditionGroup as a whole. Same timer-mode caveat as
+    check_condition_now applies to any "timer" child (see its docstring)."""
+    return _group_matches(group, "test match", seconds_since_fired=None)
+
+
 def rescaled_pixel_pos(condition: Condition):
     """Public accessor for _rescaled_point, using `condition`'s own
     calib_width/calib_height/calib_left/calib_top -- for the GUI's Test
@@ -305,19 +314,53 @@ def calibration_scale_note(condition: Condition) -> Optional[str]:
     return f"Repositioned: game window moved from ({calib_left}, {calib_top}) to ({current_left}, {current_top})"
 
 
+def _group_matches(group: SkillConditionGroup, label: str, seconds_since_fired: Optional[float]) -> bool:
+    """True if `group`'s combined result currently holds: every child
+    Condition must currently match if group.match_logic == "all", or at
+    least one must if "any" -- each child's own match (subject to its own
+    `negate`) computed exactly like a standalone Condition's, via
+    _check_condition; a child's own `action`/timeout_ms/hold_ms/delay_ms are
+    never consulted here (see SkillConditionGroup's own docstring). `label`
+    is passed straight through to _check_condition for logging, same as a
+    plain Condition's own label -- callers pass step.key or "step" (see
+    _fire_gate_passes/_hold_override), or "test match" for check_group_now's
+    standalone preview.
+
+    An empty group.conditions is a deliberate vacuous-truth edge case, NOT
+    handled specially: all() of an empty iterable is True (an empty "all"
+    group always matches), any() of an empty iterable is False (an empty
+    "any" group never does) -- exactly Python's own built-in behavior, left
+    as-is intentionally rather than special-cased."""
+    results = (_check_condition(c, label, seconds_since_fired) for c in group.conditions)
+    return all(results) if group.match_logic == "all" else any(results)
+
+
 def _fire_gate_passes(step: Step, seconds_since_fired: Optional[float]) -> bool:
-    """True if step is currently allowed to fire: every "fire" Condition on
-    it currently matches AND no "block" Condition does -- the AND+veto
-    combination every step's conditions use together. "hold" conditions never
-    affect this (see _hold_override). Short-circuits on the first condition
-    that already decides the answer, so a later expensive image/pixel check
-    is skipped once the outcome is already known."""
-    for condition in step.conditions:
-        if condition.action == "block":
-            if _check_condition(condition, step.key or "step", seconds_since_fired):
+    """True if step is currently allowed to fire: every "fire" entry in
+    step.conditions currently matches AND no "block" entry does -- the
+    AND+veto combination every step's conditions use together, generalized
+    from "condition" to "entry": an entry is now either a plain Condition
+    (matched via _check_condition directly) or a SkillConditionGroup
+    (matched via _group_matches, using the GROUP's own action -- a child
+    Condition's own action field is unused once nested in a group). "hold"
+    entries (plain or group) never affect this (see _hold_override).
+    Short-circuits on the first entry that already decides the answer, so a
+    later expensive check -- including every remaining child of a
+    still-unevaluated group -- is skipped once the outcome is known."""
+    for entry in step.conditions:
+        if isinstance(entry, SkillConditionGroup):
+            if entry.action not in ("fire", "block"):
+                continue  # "hold" (or bad data) has no effect here
+            matched = _group_matches(entry, step.key or "step", seconds_since_fired)
+            if entry.action == "block" and matched:
                 return False
-        elif condition.action == "fire":
-            if not _check_condition(condition, step.key or "step", seconds_since_fired):
+            if entry.action == "fire" and not matched:
+                return False
+        elif entry.action == "block":
+            if _check_condition(entry, step.key or "step", seconds_since_fired):
+                return False
+        elif entry.action == "fire":
+            if not _check_condition(entry, step.key or "step", seconds_since_fired):
                 return False
     return True
 
@@ -335,30 +378,46 @@ def _group_gate_passes(group: ConditionGroup) -> bool:
 
 
 def _max_fire_timeout_ms(step: Step) -> int:
-    """The longest timeout_ms configured on any of step's "fire" conditions
-    (0 if none have one) -- this is what RotationRunner._wait_for_fire_gate
-    polls up to before giving up on a pass; a plain instant check (today's
-    ordinary Condition behavior) is exactly the timeout_ms == 0 case."""
-    return max((c.timeout_ms for c in step.conditions if c.action == "fire" and c.timeout_ms > 0), default=0)
+    """The longest timeout_ms configured on any of step's "fire" entries (a
+    plain Condition or a SkillConditionGroup -- both expose timeout_ms the
+    same way, so no isinstance check is needed here; 0 if none have one) --
+    this is what RotationRunner._wait_for_fire_gate polls up to before
+    giving up on a pass; a plain instant check (today's ordinary Condition
+    behavior) is exactly the timeout_ms == 0 case."""
+    return max((entry.timeout_ms for entry in step.conditions
+                if entry.action == "fire" and entry.timeout_ms > 0), default=0)
 
 
-def _hold_override(step: Step, seconds_since_fired: Optional[float]) -> Optional[Condition]:
-    """The first currently-matching "hold" Condition on `step`, or None if
-    none match (or none are configured) -- its hold_ms/delay_ms (whichever
-    is set) replaces the step's own for this fire, in _fire_step/_sleep_delay.
-    First-in-list wins if more than one matches at once."""
-    for condition in step.conditions:
-        if condition.action == "hold" and _check_condition(condition, step.key or "step", seconds_since_fired):
-            return condition
+def _hold_override(step: Step, seconds_since_fired: Optional[float]) -> Optional[Union[Condition, SkillConditionGroup]]:
+    """The first currently-matching "hold" entry (a plain Condition or a
+    SkillConditionGroup) on `step`, or None if none match (or none are
+    configured) -- its hold_ms/delay_ms (whichever is set) replaces the
+    step's own for this fire, in _fire_step/_sleep_delay (see
+    _condition_override). First-in-list wins if more than one matches at
+    once, exactly as before, now across a mixed list -- a group counts as
+    "matching" when its OWN combined match_logic result over its children
+    currently holds (via _group_matches); a group's own hold_ms/delay_ms
+    then apply uniformly, never a child's."""
+    for entry in step.conditions:
+        if entry.action != "hold":
+            continue
+        matched = (_group_matches(entry, step.key or "step", seconds_since_fired)
+                   if isinstance(entry, SkillConditionGroup)
+                   else _check_condition(entry, step.key or "step", seconds_since_fired))
+        if matched:
+            return entry
     return None
 
 
-def _condition_override(hold_condition: Optional[Condition], attr: str) -> Optional[int]:
+def _condition_override(hold_condition: Optional[Union[Condition, SkillConditionGroup]], attr: str) -> Optional[int]:
     """getattr(hold_condition, attr) ("hold_ms" or "delay_ms") if a matching
-    "hold" condition was found, else None -- a value of None either way
-    (no hold_condition, or its override field itself unset) means "no
-    override, use the step's own value." Shared by _fire_step/_sleep_delay/
-    _fire_repeats, which each need this same lookup."""
+    "hold" entry (a plain Condition or a SkillConditionGroup) was found,
+    else None -- a value of None either way (no hold_condition, or its
+    override field itself unset) means "no override, use the step's own
+    value." Shared by _fire_step/_sleep_delay/_fire_repeats, which each need
+    this same lookup. SkillConditionGroup exposes hold_ms/delay_ms as plain
+    fields of its own, identically named to Condition's, so this generic
+    getattr() needs no isinstance branching at all."""
     return getattr(hold_condition, attr) if hold_condition is not None else None
 
 
@@ -978,7 +1037,7 @@ class RotationRunner:
                 return False
         return True
 
-    def _fire_step(self, step: Step, hold_condition: Optional[Condition] = None,
+    def _fire_step(self, step: Step, hold_condition: Optional[Union[Condition, SkillConditionGroup]] = None,
                     hold_override: Optional[int] = None):
         condition_hold = _condition_override(hold_condition, "hold_ms")
         base_hold = hold_override if hold_override is not None else (
@@ -1030,14 +1089,14 @@ class RotationRunner:
                 keyboard.send(step.key)
             self._notify_activity(f"Tapped '{step.key}'")
 
-    def _sleep_delay(self, step: Step, hold_condition: Optional[Condition] = None) -> bool:
+    def _sleep_delay(self, step: Step, hold_condition: Optional[Union[Condition, SkillConditionGroup]] = None) -> bool:
         condition_delay = _condition_override(hold_condition, "delay_ms")
         delay = condition_delay if condition_delay is not None else step.delay_ms
         if step.jitter_ms:
             delay += random.uniform(-step.jitter_ms, step.jitter_ms)
         return not self._stop_event.wait(timeout=max(0, delay) / 1000)
 
-    def _fire_repeats(self, step: Step, hold_condition: Optional[Condition]) -> bool:
+    def _fire_repeats(self, step: Step, hold_condition: Optional[Union[Condition, SkillConditionGroup]]) -> bool:
         """Fires `step` step.repeat_count times, then applies the post-fire
         delay -- either as repeat_count independent press/hold/release +
         delay cycles, or, when repeat_combine_hold is set and there's an

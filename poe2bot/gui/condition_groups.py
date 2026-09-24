@@ -89,24 +89,27 @@ class ConditionGroupsMixin:
 
     def _set_step_panels_visible(self, visible: bool):
         """Shows "Selected Step" (nested inside the Skill Steps section's
-        own body, alongside its button row) + Skill Conditions when a step
-        (or nothing) is selected; hides them when a condition group's own
-        row is selected instead, since a group has no Key/Delay/Hold/
-        Repeat/per-step Conditions of its own. Unlike Skill Conditions, the
-        Rotation Conditions section (built in app.py) is always visible
-        regardless of what's selected -- its Add Condition Group buttons
-        don't depend on any particular selection -- so it's re-packed here
-        too every time, last, to guarantee it always ends up positioned
-        after Skill Conditions rather than drifting out of place after
-        repeated toggles (Selected Step's own position is unaffected by
-        that ordering -- it lives in a different parent, Skill Steps' body,
+        own body, alongside its button row) + Skill Conditions + Skill
+        Condition Groups when a step (or nothing) is selected; hides them
+        when a rotation-level condition group's own row is selected
+        instead, since a group has no Key/Delay/Hold/Repeat/per-step
+        Conditions of its own. Unlike those, the Rotation Conditions
+        section (built in app.py) is always visible regardless of what's
+        selected -- its Add Condition Group buttons don't depend on any
+        particular selection -- so it's re-packed here too every time,
+        last, to guarantee it always ends up positioned after Skill
+        Condition Groups rather than drifting out of place after repeated
+        toggles (Selected Step's own position is unaffected by that
+        ordering -- it lives in a different parent, Skill Steps' body,
         alongside only its own button row)."""
         self.step_fields_group.pack_forget()
         self.conditions_section.pack_forget()
+        self.skill_condition_groups_section.pack_forget()
         self.rotation_conditions_section.pack_forget()
         if visible:
             self.step_fields_group.pack(fill="x", pady=(0, 6))
             self.conditions_section.pack(fill="x", pady=(0, 6))
+            self.skill_condition_groups_section.pack(fill="x", pady=(0, 6))
         self.rotation_conditions_section.pack(fill="x", pady=(0, 6))
 
     def _populate_group_condition_form(self, group):

@@ -2,14 +2,15 @@
 rotations' hotkeys are currently live), Active Device (keyboard or
 controller), Controller Type (which physical gamepad Settings' Map
 Controller Button window should show labels/layout for -- purely cosmetic,
-see poe2bot/gui/controller_layouts.py), Theme (dark/light), and optional
+see poe2bot/gui/controller_layouts.py), Theme (dark/light), optional
 GUI-editable overrides for the five settings poe2bot/config.py otherwise
 only reads from environment variables at startup (target process name,
 panic key, controller min tap ms, controller index, and whether the game
-must have OS focus to fire at all) -- so any of them survives closing and
-reopening the bot instead of resetting every launch. Deliberately separate
-from poe2bot/storage.py's per-rotation JSON files -- this is one small file
-of app-wide state, not rotation data."""
+must have OS focus to fire at all), and the Screen Grab Hotkey (unset by
+default -- see CalibrationMixin in poe2bot/gui/calibration.py) -- so any of
+them survives closing and reopening the bot instead of resetting every
+launch. Deliberately separate from poe2bot/storage.py's per-rotation JSON
+files -- this is one small file of app-wide state, not rotation data."""
 import json
 import os
 
@@ -33,6 +34,11 @@ _DEFAULT_STATE = {
     "controller_min_tap_ms": None,
     "controller_index": None,
     "require_game_focus": None,
+    # None means "no Screen Grab Hotkey configured" -- a genuinely valid,
+    # expected steady state (unlike panic_key, which always falls back to
+    # config.PANIC_KEY), not just "no override saved yet". See
+    # CalibrationMixin's screen-grab-hotkey methods (poe2bot/gui/calibration.py).
+    "screen_grab_hotkey": None,
 }
 
 
@@ -75,18 +81,21 @@ def load_state() -> dict:
     require_game_focus = data.get("require_game_focus")
     if not isinstance(require_game_focus, bool):
         require_game_focus = None
+    screen_grab_hotkey = data.get("screen_grab_hotkey")
+    if not isinstance(screen_grab_hotkey, str) or not screen_grab_hotkey.strip():
+        screen_grab_hotkey = None
     return {
         "active_folder": active_folder, "active_device": active_device,
         "controller_type": controller_type, "theme": theme,
         "game_process_name": game_process_name, "panic_key": panic_key,
         "controller_min_tap_ms": controller_min_tap_ms, "controller_index": controller_index,
-        "require_game_focus": require_game_focus,
+        "require_game_focus": require_game_focus, "screen_grab_hotkey": screen_grab_hotkey,
     }
 
 
 def save_state(active_folder, active_device: str, controller_type: str, theme: str, game_process_name=None,
                 panic_key=None, controller_min_tap_ms=None, controller_index=None,
-                require_game_focus=None) -> None:
+                require_game_focus=None, screen_grab_hotkey=None) -> None:
     tmp_path = STATE_PATH + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump({
@@ -94,6 +103,6 @@ def save_state(active_folder, active_device: str, controller_type: str, theme: s
             "controller_type": controller_type, "theme": theme,
             "game_process_name": game_process_name, "panic_key": panic_key,
             "controller_min_tap_ms": controller_min_tap_ms, "controller_index": controller_index,
-            "require_game_focus": require_game_focus,
+            "require_game_focus": require_game_focus, "screen_grab_hotkey": screen_grab_hotkey,
         }, f, indent=2)
     os.replace(tmp_path, STATE_PATH)

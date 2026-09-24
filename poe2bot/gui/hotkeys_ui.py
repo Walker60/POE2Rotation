@@ -142,11 +142,15 @@ class HotkeysMixin:
         "pause": "_on_pause_key_captured",
     }
 
-    def _on_bind_key_clicked(self, kind: str):
-        # At most once per session (like CalibrationMixin's own _calibration_hint_shown) --
-        # this is a heads-up, not something to nag about on every single "Bind..." click,
-        # e.g. while trying it for several different rows in a row. Only ever true on
-        # Linux; a no-op check everywhere else (see linux_no_gamepad_visible's docstring).
+    def _maybe_show_no_gamepad_hint(self):
+        """At most once per session (like CalibrationMixin's own _calibration_hint_shown) --
+        this is a heads-up, not something to nag about on every single physical-capture
+        attempt, e.g. while trying it for several different rows in a row. Only ever true on
+        Linux; a no-op check everywhere else (see linux_no_gamepad_visible's docstring).
+        Shared by _on_bind_key_clicked below and CalibrationMixin's own screen-grab-hotkey
+        Bind... button (poe2bot/gui/calibration.py) -- both are physical-press captures a
+        Steam Deck's own built-in controls can't be seen by unless poe2bot is launched
+        through Steam (see README's Steam Deck section)."""
         if not self._no_gamepad_hint_shown and controller_input.linux_no_gamepad_visible():
             self._no_gamepad_hint_shown = True
             messagebox.showinfo(
@@ -159,6 +163,9 @@ class HotkeysMixin:
                 "\"Map...\" instead to choose a controller button from a list, or just press "
                 "a keyboard key/mouse button here.",
                 parent=self)
+
+    def _on_bind_key_clicked(self, kind: str):
+        self._maybe_show_no_gamepad_hint()
         getattr(self, self._KEY_BIND_SPECS[kind]["button_attr"]).config(text="Press a key or click...")
         self._set_bind_buttons_enabled(False)
         threading.Thread(target=self._capture_key_worker, args=(kind,), daemon=True).start()

@@ -41,9 +41,9 @@ class AutosaveMixin:
     def _autosave(self) -> bool:
         """The single entry point every tracked field's trace calls, and
         every structural mutation (Add/Remove/Move/drag/paste/recalibrate)
-        calls directly. Always attempts all three "apply the form onto
+        calls directly. Always attempts all four "apply the form onto
         whatever's selected" steps -- at most one is ever relevant to
-        whatever's currently selected in the tree, the other two no-op via
+        whatever's currently selected in the tree, the other three no-op via
         their own guard clauses -- then persists the whole rotation. An
         apply that fails (e.g. a currently-non-numeric Delay field, mid-
         edit) leaves editing_steps holding the last *valid* state of that
@@ -56,6 +56,7 @@ class AutosaveMixin:
         self._apply_pending_step_edits()
         self._apply_pending_condition_edits()
         self._apply_pending_group_edits()
+        self._apply_pending_skill_group_edits()
         return self._persist_rotation_to_disk()
 
     def _persist_rotation_to_disk(self) -> bool:

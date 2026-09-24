@@ -18,6 +18,13 @@
 # Then log out and back in (or reboot) -- group membership only takes
 # effect on your next login -- and launch poe2bot / poe2bot.sh directly
 # from then on, with no sudo prompt at all.
+#
+# SteamOS specifically: its root filesystem (which /etc/udev/rules.d lives
+# on) is mounted read-only by default, so even root can't write to it until
+# that's temporarily lifted -- this script does that itself via
+# `steamos-readonly disable`/`enable` around just the one file write below,
+# so you don't need to run those by hand. `steamos-readonly` doesn't exist
+# on a non-SteamOS Linux box, so this is skipped there automatically.
 
 set -e
 
@@ -28,21 +35,49 @@ echo "This asks for your sudo password once, to install a udev rule and add"
 echo "$USER to the 'input' group. After this, poe2bot never needs sudo again."
 echo
 
-if ! echo "$RULE_CONTENT" | sudo tee "$RULE_FILE" > /dev/null; then
-    echo
-    echo "Writing $RULE_FILE failed -- on SteamOS this usually means the"
-    echo "root filesystem is still read-only. Try:"
-    echo "  sudo steamos-readonly disable"
-    echo "  sh $0"
-    echo "  sudo steamos-readonly enable"
-    exit 1
+HAS_READONLY_TOGGLE=0
+if command -v steamos-readonly > /dev/null 2>&1; then
+    HAS_READONLY_TOGGLE=1
+    echo "SteamOS detected -- temporarily disabling the read-only root filesystem..."
+    sudo steamos-readonly disable
 fi
 
+write_ok=1
+echo "$RULE_CONTENT" | sudo tee "$RULE_FILE" > /dev/null || write_ok=0
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 sudo usermod -aG input "$USER"
 
+if [ "$HAS_READONLY_TOGGLE" = "1" ]; then
+    echo "Re-enabling the read-only root filesystem..."
+    sudo steamos-readonly enable
+fi
+
+if [ "$write_ok" != "1" ]; then
+    echo
+    echo "Writing $RULE_FILE still failed even with the root filesystem"
+    echo "writable. Something else is blocking it -- report back the exact"
+    echo "error shown above."
+    exit 1
+fi
+
+echo
+echo "--- Verifying ---"
+echo "Rule file contents:"
+cat "$RULE_FILE" 2>/dev/null || echo "  MISSING"
+echo "Your groups (should include 'input' after your next login):"
+groups "$USER"
+if [ -e /dev/uinput ]; then
+    echo "/dev/uinput permissions right now (may still show root:root until"
+    echo "poe2bot next creates it, or until reboot -- that's expected):"
+    ls -l /dev/uinput
+else
+    echo "/dev/uinput doesn't exist yet -- poe2bot creates it on demand, and"
+    echo "the udev rule above only takes effect the next time it's created."
+fi
+
 echo
 echo "Done. Log out and back in (or reboot) for the new group membership to"
 echo "take effect. After that, launch poe2bot / poe2bot.sh directly -- no"
-echo "sudo password needed, ever again."
+echo "sudo password needed. If it still asks for one afterward, re-run this"
+echo "script and share everything printed under '--- Verifying ---' above."

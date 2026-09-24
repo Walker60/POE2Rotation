@@ -11,6 +11,7 @@ VALID_PAUSE_MODES = ("duration", "toggle")
 VALID_CONDITION_MATCH_TYPES = ("image", "pixel", "timer")  # a Condition can also be a pure time gate
 VALID_CONDITION_ACTIONS = ("fire", "block", "hold")   # what a Condition does once it matches -- see Condition.action
 VALID_SEARCH_MODES = ("exact", "area")
+VALID_MATCH_LOGIC = ("all", "any")  # how a SkillConditionGroup's own children combine -- see SkillConditionGroup
 MAX_REPEAT_COUNT = 50
 MAX_GROUP_NESTING_DEPTH = 5  # sanity cap on how deep Condition Groups can nest -- see validate_rotation
 
@@ -148,6 +149,59 @@ class Condition:
 
 
 @dataclass
+class SkillConditionGroup:
+    """An explicit, single-skill-scoped grouping of a Step's own plain
+    Conditions -- created only via the GUI's "Add Skill Condition Group"
+    action, never implicitly. NOT to be confused with the rotation-level
+    ConditionGroup below (which gates a whole nested block of Steps with one
+    single condition): this instead groups a subset of ONE Step's own
+    `conditions` list, combining several child Conditions together.
+
+    `action`/`timeout_ms`/`hold_ms`/`delay_ms` are chosen ONCE here, for the
+    whole group -- exactly the same vocabulary/meaning as the matching
+    fields on Condition, just applied to the group's own combined result
+    rather than a single condition's match. A child Condition's own
+    `action`/`timeout_ms`/`hold_ms`/`delay_ms` fields become unused once
+    it's nested in a group -- only its match config (match_type, template/
+    region/pixel_pos/pixel_color/search_mode/search_region, confidence,
+    timer_seconds, negate, calib_*) still applies per child; `negate` in
+    particular stays per-child.
+
+    `match_logic` decides how the children combine: "all" (every child must
+    currently match) or "any" (at least one must) -- see VALID_MATCH_LOGIC.
+    An empty `conditions` list is a deliberate vacuous-truth edge case, not
+    specially handled: see executor._group_matches.
+
+    A Step's own `conditions` list can freely mix standalone Conditions
+    (today's behavior, each with its own action) alongside these explicit
+    groups. No nesting: a group's own `conditions` are always plain
+    Conditions, never another SkillConditionGroup -- see iter_conditions/
+    validate_rotation/executor._group_matches for how every consumer treats
+    a group as exactly one flat pass over its children, never recursing."""
+    name: str = ""              # optional display label, same convention as Condition.name/Step.name
+    action: str = "fire"        # "fire"/"block"/"hold" -- same vocabulary as Condition.action, but decided
+                                 # once for the GROUP's combined result, never per child
+    match_logic: str = "all"    # "all" or "any" -- see VALID_MATCH_LOGIC
+    conditions: List[Condition] = field(default_factory=list)   # flat, plain Conditions only -- never nested
+    timeout_ms: int = 0         # "fire" only -- same semantics as Condition.timeout_ms, applied to the
+                                 # group's own combined match
+    hold_ms: Optional[int] = None    # "hold" only -- same semantics as Condition.hold_ms
+    delay_ms: Optional[int] = None   # "hold" only -- same semantics as Condition.delay_ms
+
+    @staticmethod
+    def from_dict(data: dict) -> "SkillConditionGroup":
+        return SkillConditionGroup(
+            name=data.get("name", ""),
+            action=data.get("action", "fire"),
+            match_logic=data.get("match_logic", "all"),
+            conditions=[Condition.from_dict(c) for c in data.get("conditions", [])],
+            timeout_ms=_int_or(data, "timeout_ms", 0),
+            hold_ms=_int_or(data, "hold_ms", None),
+            delay_ms=_int_or(data, "delay_ms", None),
+        )
+
+
+@dataclass
 class Step:
     key: Optional[str] = None   # None = no keybind assigned yet -- skipped entirely at runtime (no fire,
                                  # no delay); "" = a deliberate sleep/pause (waits out delay_ms, presses
@@ -157,9 +211,12 @@ class Step:
     jitter_ms: int = 0
     hold_ms: int = 0
     hold_jitter_ms: int = 0   # uniform random +/- jitter applied to hold_ms each time (only when hold_ms > 0)
-    conditions: List[Condition] = field(default_factory=list)   # everything that used to be a separate Cooldown
-                                                                  # Check / Buff Check / plain Condition now lives
-                                                                  # here uniformly -- see Condition.action
+    conditions: List[Union[Condition, SkillConditionGroup]] = field(default_factory=list)   # everything that used
+                                                                  # to be a separate Cooldown Check / Buff Check /
+                                                                  # plain Condition now lives here uniformly -- see
+                                                                  # Condition.action. May also hold explicit
+                                                                  # SkillConditionGroups the user created (never
+                                                                  # nested) -- see that class's own docstring.
     repeat_count: int = 1                    # fire this step this many times per pass; 1 = today's behavior
     repeat_combine_hold: bool = False        # if the key has a hold > 0, hold once for hold_ms * repeat_count and
                                               # delay once afterward, instead of repeat_count independent hold+delay cycles
@@ -190,12 +247,24 @@ class Step:
             jitter_ms=_int_or(data, "jitter_ms", 0),
             hold_ms=_int_or(data, "hold_ms", 0),
             hold_jitter_ms=_int_or(data, "hold_jitter_ms", 0),
-            conditions=[Condition.from_dict(c) for c in data.get("conditions", [])],
+            conditions=[_condition_entry_from_dict(c) for c in data.get("conditions", [])],
             repeat_count=_int_or(data, "repeat_count", 1),
             repeat_combine_hold=bool(data.get("repeat_combine_hold", False)),
             alt_key=alt_key,
             enabled=bool(data.get("enabled", True)),
         )
+
+    def to_dict(self) -> dict:
+        """Like asdict(self), except `conditions` -- a heterogeneous
+        Condition | SkillConditionGroup list -- gets each entry properly
+        "type"-tagged via _condition_entry_to_dict instead of asdict()'s own
+        untagged recursion, which would otherwise make a SkillConditionGroup
+        indistinguishable from a plain Condition dict on reload. See
+        _step_entry_to_dict, which calls this instead of a bare
+        asdict(step)."""
+        data = asdict(self)
+        data["conditions"] = [_condition_entry_to_dict(c) for c in self.conditions]
+        return data
 
 
 @dataclass
@@ -241,11 +310,38 @@ def _step_entry_to_dict(entry) -> dict:
     if isinstance(entry, ConditionGroup):
         return {"type": "group", "condition": asdict(entry.condition),
                 "entries": [_step_entry_to_dict(e) for e in entry.entries]}
-    return {"type": "step", **asdict(entry)}
+    return {"type": "step", **entry.to_dict()}
 
 
 def _step_entry_from_dict(data: dict):
     return ConditionGroup.from_dict(data) if data.get("type") == "group" else Step.from_dict(data)
+
+
+def _condition_entry_to_dict(entry) -> dict:
+    """Step.conditions (and, before SkillConditionGroup existed, always just
+    a flat Condition list) is now a heterogeneous Condition |
+    SkillConditionGroup list -- this (and _condition_entry_from_dict below)
+    gives each entry an explicit "type" discriminator in the persisted
+    JSON, the same idea _step_entry_to_dict/_step_entry_from_dict already
+    use for Step vs ConditionGroup. A condition dict with no "type" key at
+    all -- every rotation saved before SkillConditionGroup existed -- still
+    loads as a plain Condition (see _condition_entry_from_dict), so there's
+    no migration step. Unlike _step_entry_to_dict, this never recurses: a
+    SkillConditionGroup's own `conditions` are always plain Conditions,
+    never another group (see SkillConditionGroup's own docstring), so a
+    single asdict() correctly covers a group's children as-is. The "type"
+    tag here ("condition_group") is deliberately distinct from
+    _step_entry_to_dict's own "group" tag -- the two live in different JSON
+    contexts (Step.conditions vs Rotation.steps/ConditionGroup.entries) but
+    using different strings avoids any risk of confusing the two concepts
+    when reading a raw rotation file."""
+    if isinstance(entry, SkillConditionGroup):
+        return {"type": "condition_group", **asdict(entry)}
+    return {"type": "condition", **asdict(entry)}
+
+
+def _condition_entry_from_dict(data: dict):
+    return SkillConditionGroup.from_dict(data) if data.get("type") == "condition_group" else Condition.from_dict(data)
 
 
 def iter_steps(entries):
@@ -263,17 +359,25 @@ def iter_steps(entries):
 
 
 def iter_conditions(entries):
-    """Every Condition anywhere in `entries`: each step's own conditions
-    (at any nesting depth), plus each ConditionGroup's own single gating
-    condition (also at any depth). Used by the calibrated-template GC
-    sweep, which must not delete a template still referenced by a group's
-    own condition."""
+    """Every Condition anywhere in `entries`: each step's own standalone
+    conditions, plus each child Condition inside one of a step's own
+    SkillConditionGroups (never the group object itself -- unlike a
+    rotation-level ConditionGroup's single `condition`, there's no one "the
+    group's condition" to yield instead), plus each ConditionGroup's own
+    single gating condition (at any nesting depth). Used by the
+    calibrated-template GC sweep, which must not delete a template still
+    referenced by a group's own condition or by a SkillConditionGroup's
+    child."""
     for entry in entries:
         if isinstance(entry, ConditionGroup):
             yield entry.condition
             yield from iter_conditions(entry.entries)
         else:
-            yield from entry.conditions
+            for item in entry.conditions:
+                if isinstance(item, SkillConditionGroup):
+                    yield from item.conditions
+                else:
+                    yield item
 
 
 def replace_step_fields(target: Step, source: Step) -> None:
@@ -529,8 +633,12 @@ def _step_problems(label: str, step: Step) -> List[str]:
     if step.hold_jitter_ms < 0:
         problems.append(f"{label}: hold_jitter_ms cannot be negative.")
 
-    for j, condition in enumerate(step.conditions, start=1):
-        problems.extend(_condition_problems(f"{label}, condition {j}", condition, VALID_CONDITION_ACTIONS, allow_timer=True))
+    for j, entry in enumerate(step.conditions, start=1):
+        entry_label = f"{label}, condition {j}"
+        if isinstance(entry, SkillConditionGroup):
+            problems.extend(_condition_group_problems(entry_label, entry))
+        else:
+            problems.extend(_condition_problems(entry_label, entry, VALID_CONDITION_ACTIONS, allow_timer=True))
 
     if step.repeat_count < 1:
         problems.append(f"{label}: repeat count must be at least 1.")
@@ -541,12 +649,19 @@ def _step_problems(label: str, step: Step) -> List[str]:
     return problems
 
 
-def _condition_problems(label: str, condition: Condition, allowed_actions, allow_timer: bool) -> List[str]:
-    """Every validation problem with one Condition, addressed by `label`.
-    Shared by a Step's own conditions (`allowed_actions` = every action,
-    `allow_timer=True`) and a ConditionGroup's single gating condition
-    (`allowed_actions=("fire", "block")`, `allow_timer=False` -- a group
-    never uses "hold" or a pure time gate, see ConditionGroup)."""
+def _condition_match_problems(label: str, condition: Condition, allow_timer: bool) -> List[str]:
+    """Every validation problem with one Condition's own match configuration
+    (match_type + whatever match_type-specific fields it implies, plus
+    confidence) -- everything about a Condition EXCEPT whether its `action`
+    value is allowed where it lives, and action's own downstream fields
+    (timeout_ms / hold_ms / delay_ms), which mean different things (or
+    nothing at all) depending on context. See _condition_problems for a
+    standalone Condition or a rotation-level ConditionGroup's own gating
+    condition (both of which care about `action`), and
+    _condition_group_problems for a child Condition nested in a
+    SkillConditionGroup (whose OWN action/timeout_ms/hold_ms/delay_ms fields
+    are unused -- the group's own apply instead, uniformly, to the whole
+    group)."""
     problems = []
     if not condition.has_check():
         # Not yet calibrated -- treated as "this condition is off," not an
@@ -556,8 +671,6 @@ def _condition_problems(label: str, condition: Condition, allowed_actions, allow
     valid_match_types = VALID_CONDITION_MATCH_TYPES if allow_timer else ("image", "pixel")
     if condition.match_type not in valid_match_types:
         problems.append(f"{label}: match_type must be one of {valid_match_types}.")
-    if condition.action not in allowed_actions:
-        problems.append(f"{label}: action must be one of {allowed_actions}.")
     if condition.match_type != "timer" and not (0 < condition.confidence <= 1):
         # Confidence is a visual-match fuzziness threshold -- meaningless for a
         # pure time gate, which has no "how close is close enough" to tune.
@@ -576,7 +689,25 @@ def _condition_problems(label: str, condition: Condition, allowed_actions, allow
             problems.append(f"{label}: calibrated template image is missing on disk (recalibrate).")
         problems.extend(_search_area_problems(
             label, "", condition.search_mode, condition.search_region, condition.region))
+    return problems
 
+
+def _condition_problems(label: str, condition: Condition, allowed_actions, allow_timer: bool) -> List[str]:
+    """Every validation problem with one standalone Condition (or a
+    rotation-level ConditionGroup's own single gating condition), addressed
+    by `label`. Shared by a Step's own ungrouped conditions (`allowed_actions`
+    = every action, `allow_timer=True`) and a ConditionGroup's single gating
+    condition (`allowed_actions=("fire", "block")`, `allow_timer=False` -- a
+    group never uses "hold" or a pure time gate, see ConditionGroup). NOT
+    used for a Condition nested inside a SkillConditionGroup -- see
+    _condition_group_problems for that, which validates a child's own match
+    config the same way (via _condition_match_problems) but never its own
+    `action`/timeout_ms/hold_ms/delay_ms, which are unused there."""
+    problems = _condition_match_problems(label, condition, allow_timer)
+    if not condition.has_check():
+        return problems
+    if condition.action not in allowed_actions:
+        problems.append(f"{label}: action must be one of {allowed_actions}.")
     if condition.action == "fire":
         if condition.timeout_ms < 0:
             problems.append(f"{label}: wait timeout cannot be negative.")
@@ -589,4 +720,38 @@ def _condition_problems(label: str, condition: Condition, allowed_actions, allow
             problems.append(
                 f"{label}: action is 'Override Hold Time' but neither Hold nor "
                 f"Delay override is set, so it would never have any effect.")
+    return problems
+
+
+def _condition_group_problems(label: str, group: SkillConditionGroup) -> List[str]:
+    """Every validation problem with one SkillConditionGroup, addressed by
+    `label` (e.g. "Step 3, condition 2"). Checks the GROUP's own action/
+    match_logic/timeout_ms/hold_ms/delay_ms -- mirroring _condition_problems'
+    own action-specific checks (fire: timeout_ms >= 0; hold: at least one of
+    hold_ms/delay_ms set), just applied to the group's fields instead of a
+    single Condition's. Each child Condition is validated for its own match
+    configuration only (via _condition_match_problems, allow_timer=True -- a
+    group's children may use a timer condition same as any standalone one)
+    -- never a child's own `action`/timeout_ms/hold_ms/delay_ms, which are
+    unused once nested (the group's own apply instead, uniformly, to the
+    whole group's combined result)."""
+    problems = []
+    if group.action not in VALID_CONDITION_ACTIONS:
+        problems.append(f"{label}: action must be one of {VALID_CONDITION_ACTIONS}.")
+    if group.match_logic not in VALID_MATCH_LOGIC:
+        problems.append(f"{label}: match logic must be one of {VALID_MATCH_LOGIC}.")
+    if group.action == "fire":
+        if group.timeout_ms < 0:
+            problems.append(f"{label}: wait timeout cannot be negative.")
+    elif group.action == "hold":
+        if group.hold_ms is not None and group.hold_ms < 0:
+            problems.append(f"{label}: hold override cannot be negative.")
+        if group.delay_ms is not None and group.delay_ms < 0:
+            problems.append(f"{label}: delay override cannot be negative.")
+        if group.hold_ms is None and group.delay_ms is None:
+            problems.append(
+                f"{label}: action is 'Override Hold Time' but neither Hold nor "
+                f"Delay override is set, so it would never have any effect.")
+    for k, child in enumerate(group.conditions, start=1):
+        problems.extend(_condition_match_problems(f"{label}, child {k}", child, allow_timer=True))
     return problems
