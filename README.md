@@ -233,6 +233,17 @@ environment markers; they're never installed on Windows).
   or if you choose to run Option A's bundle inside one too), it also needs
   device passthrough for both of those.
 
+**"You must be root to use this library on linux" even with all of the above
+fixed?** `keyboard` and `mouse` (hotkey capture, see the note under "An X11
+session" above) both hard-code this exact check in their own Linux
+backends — a bare `os.geteuid() != 0`, not an actual attempt to open
+`/dev/input/*`, so it fires regardless of whether device permissions would
+actually allow it. Since that's genuinely all root was ever needed for here,
+and it's already fixed by the udev rule/group membership above,
+`poe2bot/hotkeys.py`'s `_patch_linux_input_libs_root_check()` neutralizes
+this specific check on Linux at startup rather than actually running as
+root — no separate step needed, this applies automatically.
+
 **Virtual-controller output** (a step that presses a button on the emulated
 controller — see "Controller output" above): `vgamepad`, the same library
 `poe2bot/controller.py` already uses on Windows, ships its own native Linux

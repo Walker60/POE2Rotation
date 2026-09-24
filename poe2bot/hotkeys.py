@@ -1,4 +1,5 @@
 import contextlib
+import sys
 import threading
 
 import keyboard
@@ -10,6 +11,41 @@ from poe2bot.controller_input import get_controller_reader
 from poe2bot.log_setup import get_logger
 
 log = get_logger()
+
+
+def _patch_linux_input_libs_root_check():
+    """`keyboard` and `mouse` both hard-fail on Linux with "You must be root
+    to use this library on linux" -- see either package's own _nixcommon.py:
+    `ensure_root()` is a bare `os.geteuid() != 0` check, not an actual
+    attempt to open /dev/input/*, so it fires unconditionally regardless of
+    whether the real open()/ioctl() calls these libraries go on to make
+    would actually succeed. Once /dev/uinput and /dev/input/* are properly
+    readable/writable by this user's own group membership (see README's
+    Steam Deck section and packaging/setup-steamdeck-permissions.sh -- the
+    exact same access poe2bot/controller_input.py's evdev-based reading
+    already relies on, non-root, on this same setup), that up-front gate is
+    simply wrong for this case: root was never actually required, correct
+    device permissions were. Patches every module-level binding of
+    ensure_root() in both packages (each of their _nix*.py submodules
+    imports it by name, so patching only _nixcommon's own copy wouldn't
+    reach the bound references those submodules already hold) to a no-op
+    instead of actually granting real root.
+    """
+    import keyboard._nixcommon
+    import keyboard._nixkeyboard
+    import keyboard._nixmouse
+    import mouse._nixcommon
+    import mouse._nixmouse
+    noop = lambda: None
+    keyboard._nixcommon.ensure_root = noop
+    keyboard._nixkeyboard.ensure_root = noop
+    keyboard._nixmouse.ensure_root = noop
+    mouse._nixcommon.ensure_root = noop
+    mouse._nixmouse.ensure_root = noop
+
+
+if sys.platform.startswith("linux"):
+    _patch_linux_input_libs_root_check()
 
 MOUSE_PREFIX = "mouse:"
 MOUSE_DISPLAY_NAMES = {
