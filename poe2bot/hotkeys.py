@@ -119,7 +119,8 @@ class HotkeyManager:
     and would leak earlier registrations when several rotations share a key.
     """
 
-    def __init__(self, rotation_manager, panic_key: str = config.PANIC_KEY, screen_grab_hotkey: str = None):
+    def __init__(self, rotation_manager, panic_key: str = config.PANIC_KEY, screen_grab_hotkey: str = None,
+                 bot_toggle_hotkey: str = None, on_bot_toggle=None):
         self._rotation_manager = rotation_manager
         self._panic_key = panic_key
         self._trigger_keys = {}     # rotation name -> hotkey (config, survives enable/disable)
@@ -132,10 +133,14 @@ class HotkeyManager:
         self._pause_handlers = {}  # rotation name -> ("keyboard"|"mouse", live handler), only while enabled
         self._screen_grab_hotkey = screen_grab_hotkey  # config, survives enable/disable -- see arm_screen_grab
         self._screen_grab_handlers = {}  # only populated between arm_screen_grab() and disarm_screen_grab()
+        self._bot_toggle_hotkey = bot_toggle_hotkey  # config -- see set_bot_toggle_hotkey
+        self._bot_toggle_handlers = {}  # always populated (iff a hotkey is set), independent of _enabled
+        self._on_bot_toggle = on_bot_toggle  # callback passed once at construction; reused across rebinds
         self._capture_lock = threading.Lock()  # serializes capture_next_key() -- see its docstring
         self._enabled = False
         self._register_panic_key()
         self._enabled = True
+        self._register_bot_toggle_key()
 
     @property
     def panic_key(self) -> str:
@@ -191,6 +196,31 @@ class HotkeyManager:
 
     def disarm_screen_grab(self):
         self._unregister_action_key(self._screen_grab_handlers, "grab")
+
+    @property
+    def bot_toggle_hotkey(self):
+        return self._bot_toggle_hotkey
+
+    def set_bot_toggle_hotkey(self, new_hotkey):
+        """Configure (or clear, if new_hotkey is falsy) the hotkey that fires
+        App._toggle_bot -- starting/stopping the bot's own hotkey listening.
+        Registered via _register_action_key, same as the screen grab hotkey,
+        so it can be a keyboard key, mouse button, or controller button --
+        but unlike every other action key in this class (including the
+        screen grab hotkey, which is only ever live between arm_screen_grab()
+        and disarm_screen_grab()), this one is always live and completely
+        independent of _enabled: it's kept out of the four rotation-scoped
+        registries enable_all()/disable_all() manage, so disable_all() never
+        unregisters it -- the whole point of this hotkey is to still be
+        pressable while the bot is stopped and every other hotkey is dead."""
+        self._unregister_action_key(self._bot_toggle_handlers, "toggle")
+        self._bot_toggle_hotkey = new_hotkey
+        self._register_bot_toggle_key()
+
+    def _register_bot_toggle_key(self):
+        if self._bot_toggle_hotkey and self._on_bot_toggle:
+            self._register_action_key(
+                self._bot_toggle_handlers, "toggle", self._bot_toggle_hotkey, self._on_bot_toggle)
 
     def bound_to(self, hotkey: str) -> list:
         """Names of every rotation currently bound to `hotkey` (may be more

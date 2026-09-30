@@ -39,6 +39,9 @@ _DEFAULT_STATE = {
     # config.PANIC_KEY), not just "no override saved yet". See
     # CalibrationMixin's screen-grab-hotkey methods (poe2bot/gui/calibration.py).
     "screen_grab_hotkey": None,
+    # None means "no Start/Stop Hotkey configured" -- same steady-state meaning
+    # as screen_grab_hotkey above. See App._toggle_bot/HotkeyManager.set_bot_toggle_hotkey.
+    "bot_toggle_hotkey": None,
 }
 
 
@@ -84,18 +87,22 @@ def load_state() -> dict:
     screen_grab_hotkey = data.get("screen_grab_hotkey")
     if not isinstance(screen_grab_hotkey, str) or not screen_grab_hotkey.strip():
         screen_grab_hotkey = None
+    bot_toggle_hotkey = data.get("bot_toggle_hotkey")
+    if not isinstance(bot_toggle_hotkey, str) or not bot_toggle_hotkey.strip():
+        bot_toggle_hotkey = None
     return {
         "active_folder": active_folder, "active_device": active_device,
         "controller_type": controller_type, "theme": theme,
         "game_process_name": game_process_name, "panic_key": panic_key,
         "controller_min_tap_ms": controller_min_tap_ms, "controller_index": controller_index,
         "require_game_focus": require_game_focus, "screen_grab_hotkey": screen_grab_hotkey,
+        "bot_toggle_hotkey": bot_toggle_hotkey,
     }
 
 
 def save_state(active_folder, active_device: str, controller_type: str, theme: str, game_process_name=None,
                 panic_key=None, controller_min_tap_ms=None, controller_index=None,
-                require_game_focus=None, screen_grab_hotkey=None) -> None:
+                require_game_focus=None, screen_grab_hotkey=None, bot_toggle_hotkey=None) -> None:
     tmp_path = STATE_PATH + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump({
@@ -104,5 +111,6 @@ def save_state(active_folder, active_device: str, controller_type: str, theme: s
             "game_process_name": game_process_name, "panic_key": panic_key,
             "controller_min_tap_ms": controller_min_tap_ms, "controller_index": controller_index,
             "require_game_focus": require_game_focus, "screen_grab_hotkey": screen_grab_hotkey,
+            "bot_toggle_hotkey": bot_toggle_hotkey,
         }, f, indent=2)
     os.replace(tmp_path, STATE_PATH)

@@ -20,6 +20,7 @@ from poe2bot.gui import dialogs as messagebox
 from poe2bot.gui import geometry, theme
 from poe2bot.gui.activity_window import ActivityWindow
 from poe2bot.gui.controller_layouts import CONTROLLER_TYPE_LABELS, controller_type_from_label
+from poe2bot.gui.controller_map_window import ControllerMapWindow
 from poe2bot.gui.hotkey_map_window import HotkeyMapWindow
 from poe2bot.gui.settings_window import SettingsWindow
 from poe2bot.gui.rotation_list import RotationListMixin
@@ -73,6 +74,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # "no Screen Grab Hotkey configured yet" -- not just "no override saved". See
         # CalibrationMixin's screen-grab-hotkey methods (poe2bot/gui/calibration.py).
         self.screen_grab_hotkey = state["screen_grab_hotkey"]
+        # Same steady-state meaning as screen_grab_hotkey above -- None means
+        # "no Start/Stop Hotkey configured yet". See _toggle_bot below.
+        self.bot_toggle_hotkey = state["bot_toggle_hotkey"]
         config.GAME_PROCESS_NAME = self.game_process_name
         config.PANIC_KEY = self.panic_key
         config.CONTROLLER_MIN_TAP_MS = self.controller_min_tap_ms
@@ -90,7 +94,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # since that default was captured at hotkeys.py's import time -- before
         # the override above ever had a chance to apply.
         self.hotkey_manager = HotkeyManager(
-            self.rotation_manager, panic_key=self.panic_key, screen_grab_hotkey=self.screen_grab_hotkey)
+            self.rotation_manager, panic_key=self.panic_key, screen_grab_hotkey=self.screen_grab_hotkey,
+            bot_toggle_hotkey=self.bot_toggle_hotkey,
+            on_bot_toggle=lambda: self.status_queue.put(("__bot_toggle_fired__", None)))
         self.bot_enabled = True
 
         self.active_folder = state["active_folder"]  # None = "(All Folders)" -- no scoping restriction
@@ -191,7 +197,7 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             self.active_folder, self.active_device, self.controller_type, self._theme,
             self.game_process_name, self.panic_key,
             self.controller_min_tap_ms, self.controller_index, self.require_game_focus,
-            self.screen_grab_hotkey)
+            self.screen_grab_hotkey, self.bot_toggle_hotkey)
 
     def _load_rotations_from_disk(self) -> bool:
         """Loads every rotation file into self.rotations, returning whether
@@ -985,6 +991,52 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
             self.toggle_btn.config(text="Stop Bot", style="TButton")
             self.status_var.set("Bot running. Hotkeys are live.")
 
+    def _on_bot_toggle_hotkey_pressed(self, _payload):
+        """The configured Start/Stop Hotkey was physically pressed (dispatched
+        here via _CAPTURE_SENTINEL_HANDLERS/_poll_status_queue, from whichever
+        thread the keyboard/mouse/controller library called back on). Just
+        calls _toggle_bot -- this hotkey is wired independently of
+        HotkeyManager._enabled (see set_bot_toggle_hotkey), so it keeps
+        firing even while the bot is stopped, which is the entire point."""
+        self._toggle_bot()
+
+    # ---- Start/Stop Hotkey: configuring which key/button it is (Settings) ---
+
+    def _set_bot_toggle_settings_buttons_enabled(self, enabled: bool):
+        if self.settings_window is not None:
+            self.settings_window.set_bot_toggle_buttons_enabled(enabled)
+
+    def _refresh_bot_toggle_settings_label(self):
+        if self.settings_window is not None:
+            self.settings_window.refresh_bot_toggle_label()
+
+    def _on_bind_bot_toggle_hotkey_clicked(self):
+        self._set_bot_toggle_settings_buttons_enabled(False)
+        threading.Thread(target=self._capture_bot_toggle_hotkey_worker, daemon=True).start()
+
+    def _capture_bot_toggle_hotkey_worker(self):
+        key = self.hotkey_manager.capture_next_key()
+        self.status_queue.put(("__bot_toggle_bind_captured__", key))
+
+    def _on_bot_toggle_hotkey_bind_captured(self, key: str):
+        self.bot_toggle_hotkey = key
+        self.hotkey_manager.set_bot_toggle_hotkey(key)
+        self._persist_app_state()
+        self._set_bot_toggle_settings_buttons_enabled(True)
+        self._refresh_bot_toggle_settings_label()
+
+    def _on_map_bot_toggle_hotkey_clicked(self):
+        self._set_bot_toggle_settings_buttons_enabled(False)
+        ControllerMapWindow(
+            self, self.controller_type, self._on_bot_toggle_hotkey_bind_captured,
+            on_close=lambda: self._set_bot_toggle_settings_buttons_enabled(True))
+
+    def _on_unbind_bot_toggle_hotkey_clicked(self):
+        self.bot_toggle_hotkey = None
+        self.hotkey_manager.set_bot_toggle_hotkey(None)
+        self._persist_app_state()
+        self._refresh_bot_toggle_settings_label()
+
     def _on_test_run_clicked(self):
         """Fires the currently-open rotation directly through the same
         RotationManager.trigger() every real hotkey press goes through --
@@ -1078,6 +1130,9 @@ class App(tk.Tk, RotationListMixin, StepEditorMixin, DragDropMixin,
         # CalibrationMixin (poe2bot/gui/calibration.py) -- the Screen Grab Hotkey.
         "__screen_grab_fired__": "_on_screen_grab_hotkey_pressed",
         "__screen_grab_bind_captured__": "_on_screen_grab_hotkey_bind_captured",
+        # Start/Stop Hotkey -- see "global start/stop" section below.
+        "__bot_toggle_fired__": "_on_bot_toggle_hotkey_pressed",
+        "__bot_toggle_bind_captured__": "_on_bot_toggle_hotkey_bind_captured",
         # UpdaterMixin (poe2bot/gui/updater_ui.py) -- Linux/Steam Deck only.
         "__update_check_failed__": "_on_update_check_failed",
         "__update_check_done__": "_on_update_check_done",

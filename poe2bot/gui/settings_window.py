@@ -39,6 +39,8 @@ class SettingsWindow(tk.Toplevel):
         ttk.Radiobutton(device_frame, text="Controller", variable=master.active_device_var,
                         value="controller", command=master._on_active_device_changed).pack(anchor="w")
 
+        self._build_bot_toggle_section(container)
+
         safety_frame = ttk.LabelFrame(container, text="Safety", padding=8)
         safety_frame.pack(fill="x", pady=(8, 0))
         ttk.Checkbutton(safety_frame, text="Require game window focus to fire",
@@ -164,6 +166,47 @@ class SettingsWindow(tk.Toplevel):
         Controller section."""
         if sys.platform == "win32":
             self._vigembus_btn.config(state=state, text=text)
+
+    def _build_bot_toggle_section(self, container):
+        """The Start/Stop Hotkey: fires App._toggle_bot from anywhere, even
+        with the game focused, without touching this Settings window or the
+        main window's own Start/Stop Bot button. Same physical-press
+        Bind.../controller-button Map.../Unbind pattern as the Screen Grab
+        Hotkey below -- but unlike every other hotkey in this app, it stays
+        live even while the bot is stopped (see HotkeyManager.
+        set_bot_toggle_hotkey), since restarting the bot is the one thing
+        that must still work at that point."""
+        toggle_frame = ttk.LabelFrame(container, text="Start/Stop Hotkey", padding=8)
+        toggle_frame.pack(fill="x", pady=(8, 0))
+
+        self._bot_toggle_label_var = tk.StringVar(value=display_name(self._master.bot_toggle_hotkey))
+        row = ttk.Frame(toggle_frame)
+        row.pack(fill="x")
+        ttk.Label(row, textvariable=self._bot_toggle_label_var, width=14, anchor="w").pack(side="left")
+        self._bot_toggle_bind_btn = ttk.Button(
+            row, text="Bind...", command=self._master._on_bind_bot_toggle_hotkey_clicked)
+        self._bot_toggle_bind_btn.pack(side="left", padx=(4, 0))
+        self._bot_toggle_map_btn = ttk.Button(
+            row, text="Map...", command=self._master._on_map_bot_toggle_hotkey_clicked)
+        self._bot_toggle_map_btn.pack(side="left", padx=(4, 0))
+        self._bot_toggle_unbind_btn = ttk.Button(
+            row, text="Unbind", command=self._master._on_unbind_bot_toggle_hotkey_clicked)
+        self._bot_toggle_unbind_btn.pack(side="left", padx=(4, 0))
+        ttk.Label(toggle_frame, foreground="gray", wraplength=320, justify="left",
+                  text="Starts/stops the bot's own hotkey listening, same as the Start/Stop Bot "
+                       "button -- and unlike every other hotkey, keeps working even while the bot "
+                       "is stopped.").pack(anchor="w", pady=(4, 0))
+
+    def set_bot_toggle_buttons_enabled(self, enabled: bool):
+        """Called from App while a physical-press/controller-button capture
+        for this row is in flight, same idea as set_screen_grab_buttons_enabled."""
+        state = "normal" if enabled else "disabled"
+        self._bot_toggle_bind_btn.config(state=state)
+        self._bot_toggle_map_btn.config(state=state)
+        self._bot_toggle_unbind_btn.config(state=state)
+
+    def refresh_bot_toggle_label(self):
+        self._bot_toggle_label_var.set(display_name(self._master.bot_toggle_hotkey))
 
     def _build_screen_grab_section(self, container):
         """The Screen Grab Hotkey: arms a screenshot capture that a user can
